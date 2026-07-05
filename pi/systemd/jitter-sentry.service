@@ -1,0 +1,9 @@
+[Unit]
+Description=RepliKam adaptive jitter sentry (auto lan/wan buffer profiles)
+After=NetworkManager.service
+[Service]
+ExecStart=/usr/local/bin/jitter-sentry.sh
+Restart=always
+RestartSec=10
+[Install]
+WantedBy=multi-user.target

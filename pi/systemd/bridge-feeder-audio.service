@@ -1,0 +1,14 @@
+[Unit]
+Description=NetBridge audio receiver (RTP Opus -> UAC2 mic)
+After=bridge-gadget.service
+Wants=bridge-gadget.service
+StartLimitIntervalSec=0
+[Service]
+ExecStartPre=/usr/local/bin/bridge-wait.sh uac2
+ExecStart=/usr/local/bin/bridge-feeder-audio.sh
+Restart=always
+TimeoutStopSec=5
+KillMode=mixed
+RestartSec=2
+[Install]
+WantedBy=multi-user.target

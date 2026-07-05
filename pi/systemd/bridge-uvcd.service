@@ -1,0 +1,21 @@
+[Unit]
+Description=NetBridge uvc-gadget daemon
+After=bridge-feeder-net.service bridge-gadget.service
+Wants=bridge-feeder-net.service
+# RATE-LIMIT restarts (do NOT use infinite restarts here). If uvcd crashes (e.g. a corrupt
+# libuvcgadget.so, or /dev/video40 not ready) it restarts every RestartSec; with a USB host
+# attached, that rapid gadget churn hangs the dwc2 driver -> the 15s hardware watchdog hard-
+# resets the Pi -> unclean reset corrupts files -> uvcd crashes again = reboot spiral.
+# Capping the burst makes uvcd give up (visible "failed") instead of spiralling the whole Pi.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+[Service]
+ExecStartPre=/usr/local/bin/bridge-wait.sh video40
+ExecStart=/usr/local/bin/bridge-uvcd.sh
+Restart=always
+RestartSec=5
+TimeoutStopSec=5
+KillMode=mixed
+KillSignal=SIGKILL
+[Install]
+WantedBy=multi-user.target

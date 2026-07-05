@@ -1,0 +1,11 @@
+[Unit]
+Description=NetBridge fleet agent (enroll + telemetry heartbeat + command pull)
+After=network-online.target tailscaled.service bridge-gadget.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/bridge-agent
+ExecStart=/usr/bin/python3 /usr/local/bin/bridge-agent.py
+# Runs as root: writes /etc/bridge/agent.token and the bridge CLI uses passwordless sudo.
+TimeoutStartSec=30

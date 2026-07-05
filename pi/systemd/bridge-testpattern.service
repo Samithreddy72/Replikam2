@@ -1,0 +1,10 @@
+[Unit]
+Description=SMPTE test pattern -> /dev/video40 (video pump test mode)
+Conflicts=bridge-feeder-net.service
+After=bridge-gadget.service
+[Service]
+ExecStart=/usr/bin/gst-launch-1.0 videotestsrc is-live=true pattern=smpte ! video/x-raw,format=YUY2,width=320,height=180,framerate=20/1 ! v4l2sink device=/dev/video41 sync=true
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target

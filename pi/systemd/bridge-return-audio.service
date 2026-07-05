@@ -1,0 +1,15 @@
+[Unit]
+Description=NetBridge speaker-return audio (UAC2 host playback -> RTP Opus -> peer)
+After=bridge-gadget.service
+Wants=bridge-gadget.service
+StartLimitIntervalSec=0
+[Service]
+EnvironmentFile=-/etc/default/bridge-return-audio
+ExecStartPre=/usr/local/bin/bridge-wait.sh uac2
+ExecStart=/usr/local/bin/bridge-return-audio.sh
+Restart=always
+TimeoutStopSec=5
+KillMode=mixed
+RestartSec=2
+[Install]
+WantedBy=multi-user.target

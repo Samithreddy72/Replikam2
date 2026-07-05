@@ -1,0 +1,13 @@
+[Unit]
+Description=NetBridge USB gadget setup (UVC+UAC2 bidirectional)
+After=systemd-modules-load.service local-fs.target
+StartLimitIntervalSec=0
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/sbin/modprobe libcomposite
+ExecStartPre=/usr/sbin/modprobe v4l2loopback video_nr=40 card_label=BridgeCam exclusive_caps=0
+ExecStart=/usr/local/bin/bridge-gadget-setup.sh
+ExecStop=/usr/local/bin/bridge-gadget-down.sh
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,123 @@
+#!/bin/bash
+# NetBridge control CLI
+SERVICES="bridge-gadget bridge-feeder-net bridge-uvcd bridge-feeder-audio bridge-return-audio"
+MEDIA="bridge-feeder-net bridge-feeder-audio bridge-return-audio bridge-uvcd"
+DEF=/etc/default/bridge-return-audio
+ok(){ printf '  \033[32m%-22s %s\033[0m\n' "$1" "$2"; }
+bad(){ printf '  \033[31m%-22s %s\033[0m\n' "$1" "$2"; }
+line(){ printf '  %-22s %s\n' "$1" "$2"; }
+
+cmd_status(){
+  echo "=== NetBridge status @ $(hostname) ($(hostname -I | awk '{print $1}')) ==="
+  echo "Services:"
+  for s in $SERVICES; do
+    st=$(systemctl is-active "$s")
+    if [ "$st" = active ]; then ok "$s" "$st"; else bad "$s" "$st"; fi
+  done
+  echo "USB gadget:"
+  local udc=$(cat /sys/class/udc/*/state 2>/dev/null)
+  local spd=$(cat /sys/class/udc/*/current_speed 2>/dev/null)
+  if [ "$udc" = configured ]; then ok "host" "$udc ($spd)"; else line "host" "$udc  (no client attached)"; fi
+  line "functions" "$(ls /sys/kernel/config/usb_gadget/g1/functions/ 2>/dev/null | tr '\n' ' ')"
+  echo "Devices:"
+  [ -e /dev/video40 ] && ok "loopback" "/dev/video40" || bad "loopback" "missing"
+  [ -d /proc/asound/UAC2Gadget ] && ok "UAC2 audio card" "present" || bad "UAC2 audio card" "missing"
+  echo "Config:"
+  [ -f "$DEF" ] && . "$DEF"
+  line "return peer" "${RETURN_DEST_IP:-?}:${RETURN_DEST_PORT:-?}  (speaker-return target)"
+  [ -f /etc/default/bridge-net ] && . /etc/default/bridge-net
+  line "net profile" "video=${NET_VIDEO_LATENCY:-100}ms audio=${NET_AUDIO_LATENCY:-120}ms jitterbuffer"
+  echo "Tailscale:"
+  if command -v tailscale >/dev/null 2>&1; then
+    local ts4=$(tailscale ip -4 2>/dev/null | head -1)
+    local bes=$(tailscale status --json 2>/dev/null | grep -m1 '"BackendState"' | cut -d'"' -f4)
+    [ -n "$ts4" ] && ok "ip4" "$ts4" || bad "ip4" "none"
+    line "backend" "${bes:-unknown}"
+    if [ -n "${RETURN_DEST_IP:-}" ]; then
+      # A successful ping is far more trustworthy than tcpdump on the Pi, which lies
+      # about udpsink egress (see CLAUDE.md).
+      if ping -c1 -W1 "$RETURN_DEST_IP" >/dev/null 2>&1; then ok "peer reach" "$RETURN_DEST_IP ok"; else bad "peer reach" "$RETURN_DEST_IP unreachable"; fi
+    fi
+  else
+    bad "tailscale" "not installed"
+  fi
+  echo "Health:"
+  line "temp/throttle" "$(vcgencmd measure_temp 2>/dev/null | cut -d= -f2)  $(vcgencmd get_throttled 2>/dev/null)"
+  local sig=$(awk 'NR>2{gsub(/\./,"",$4); print $4}' /proc/net/wireless 2>/dev/null)
+  [ -n "$sig" ] && line "wifi signal" "${sig} dBm"
+  line "uptime" "$(uptime -p 2>/dev/null | sed 's/up //')"
+  line "watchdog" "timer=$(systemctl is-active bridge-watchdog.timer)  hw=$(systemctl show -p RuntimeWatchdogUSec --value)"
+}
+
+restart_media(){
+  # The uvc-gadget is the CONSUMER of /dev/video40; bridge-feeder-net is the PRODUCER.
+  # If the producer is restarted while the consumer still holds the loopback, v4l2 caps
+  # negotiation fails ("not-negotiated") and the gadget starves (EAGAIN flood -> no/jittery
+  # video). So always: stop the consumer, (re)start the producers, let feeder-net renegotiate
+  # the format as sole owner, THEN reattach the consumer.
+  sudo systemctl stop bridge-uvcd
+  sudo systemctl restart bridge-feeder-net bridge-feeder-audio bridge-return-audio
+  sleep 3
+  sudo systemctl start bridge-uvcd
+}
+
+case "$1" in
+  status|"" ) cmd_status ;;
+  start )   echo "Starting all services..."; sudo systemctl start $SERVICES; sleep 2; cmd_status ;;
+  stop )    echo "Stopping media services (USB device stays enumerated)..."; sudo systemctl stop $MEDIA ;;
+  restart ) echo "Restarting media (safe - does NOT touch the USB gadget)..."; restart_media; sleep 1; cmd_status ;;
+  restart-all )
+    echo "WARNING: this rebuilds the USB gadget - the client may need a replug."
+    read -p "Continue? [y/N] " a; [ "$a" = y ] || { echo aborted; exit 0; }
+    sudo systemctl restart bridge-gadget; sleep 3; sudo systemctl restart $MEDIA; sleep 2; cmd_status ;;
+  reset-clock )
+    # Rebuilds the gadget to reset a degraded UAC2 audio clock - the fix for
+    # return-audio that has gone noisy/crackly. No reboot. The client's
+    # camera/mic/speaker drop and re-enumerate, so re-select them on the client.
+    echo "Resetting UAC2 audio clock (rebuilding gadget; no reboot)..."
+    echo "NOTE: the client's UVC Camera / Microphone / Speakers will briefly drop - re-select them there."
+    sudo systemctl restart bridge-gadget; sleep 3
+    sudo systemctl restart $MEDIA; sleep 2
+    echo "Clock reset done."
+    cmd_status ;;
+  heal )    echo "Running self-heal watchdog once..."; sudo /usr/local/bin/bridge-watchdog.sh; echo done; cmd_status ;;
+  set-peer )
+    [ -z "$2" ] && { echo "usage: bridge set-peer <ip> [port]"; exit 1; }
+    P="${3:-5004}"
+    printf '# speaker-return destination (the remote peer)\nRETURN_DEST_IP=%s\nRETURN_DEST_PORT=%s\n' "$2" "$P" | sudo tee "$DEF" >/dev/null
+    echo "return peer set to $2:$P; restarting return-audio..."
+    sudo systemctl restart bridge-return-audio; sleep 1
+    line "return peer" "$2:$P" ;;
+  profile )
+    # Switch the rtpjitterbuffer latency profile. Restarts ONLY the two feeders
+    # (safe - does not touch the USB gadget).
+    case "$2" in
+      lan ) V=100; A=120 ;;
+      wan ) V=200; A=200 ;;
+      * ) echo "usage: bridge profile <lan|wan>"; exit 1 ;;
+    esac
+    printf '# NetBridge media tuning (bridge profile %s)\nNET_VIDEO_LATENCY=%s\nNET_AUDIO_LATENCY=%s\n' "$2" "$V" "$A" | sudo tee /etc/default/bridge-net >/dev/null
+    echo "net profile '$2' (video=${V}ms audio=${A}ms); restarting media..."
+    restart_media; sleep 1; cmd_status ;;
+  logs )
+    svc="${2:-bridge-uvcd}"; case "$svc" in bridge-*) :;; *) svc="bridge-$svc";; esac
+    echo "=== last 40 log lines of $svc (Ctrl-C to exit follow) ==="
+    journalctl -u "$svc" -n 40 --no-pager; echo "--- following (Ctrl-C to stop) ---"; journalctl -u "$svc" -f ;;
+  help|-h|--help )
+    cat <<H
+bridge - NetBridge control
+  bridge status            show health (services, USB, devices, peer, wifi, temp)
+  bridge start             start all services
+  bridge stop              stop media feeders (USB device stays connected)
+  bridge restart           restart media feeders (SAFE - won't drop the USB device)
+  bridge restart-all       rebuild everything incl USB gadget (asks; client may replug)
+  bridge reset-clock       rebuild gadget to reset a degraded UAC2 audio clock (fixes noisy return audio; client re-selects devices)
+  bridge heal              run the self-heal watchdog once
+  bridge set-peer <ip> [port]   set speaker-return destination (default port 5004)
+  bridge profile <lan|wan> set jitterbuffer latency profile (lan=100/120, wan=200/200ms)
+  bridge logs [service]    tail+follow logs (e.g. bridge logs feeder-net)
+  bridge help              this help
+H
+    ;;
+  * ) echo "unknown command '$1' - try: bridge help"; exit 1 ;;
+esac

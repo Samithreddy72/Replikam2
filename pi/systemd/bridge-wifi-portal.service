@@ -1,0 +1,14 @@
+[Unit]
+Description=NetBridge WiFi setup portal (captive-portal hotspot when offline)
+After=NetworkManager.service network-online.target bridge-web.service
+Wants=NetworkManager.service
+# Needs NetworkManager + dnsmasq-base + /usr/local/sbin/wifi-connect installed.
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/bridge-wifi-portal.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

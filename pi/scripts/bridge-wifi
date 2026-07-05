@@ -1,0 +1,15 @@
+#!/bin/bash
+# bridge-wifi add "<SSID>" "<password>" [priority]   — save a new network (auto-join, no-sleep, retry-forever)
+# bridge-wifi list | status | connect "<SSID>" | forget "<SSID>"
+case "$1" in
+  add) nmcli con add type wifi ifname wlan0 con-name "$2" ssid "$2" \
+         wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$3" \
+         connection.autoconnect yes connection.autoconnect-priority "${4:-80}" \
+         connection.autoconnect-retries 0 802-11-wireless.powersave 2 \
+       && echo "saved: $2 (prio ${4:-80}) — Pi will auto-join it anywhere" ;;
+  list) nmcli -f NAME,AUTOCONNECT,AUTOCONNECT-PRIORITY con show | sed -n "1p;/wifi\|wireless/Ip"; nmcli -t -f NAME,TYPE con show | grep wireless | cut -d: -f1 ;;
+  status) nmcli -t -f NAME,DEVICE con show --active | grep wlan0; ip -o -4 addr show wlan0 | awk "{print \$4}"; /usr/sbin/iw dev wlan0 link | grep -E "SSID|signal" ;;
+  connect) nmcli con up "$2" ;;
+  forget) nmcli con delete "$2" ;;
+  *) grep "^# bridge-wifi" "$0" | sed "s/^# //" ;;
+esac

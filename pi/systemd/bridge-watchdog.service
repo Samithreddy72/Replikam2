@@ -1,0 +1,5 @@
+[Unit]
+Description=NetBridge self-heal watchdog (one pass)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bridge-watchdog.sh

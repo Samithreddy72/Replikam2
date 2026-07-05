@@ -1,0 +1,10 @@
+[Unit]
+Description=RepliKam power trim (headroom for client-plug inrush)
+After=network.target
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 12
+ExecStart=/usr/local/bin/bridge-powertrim.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

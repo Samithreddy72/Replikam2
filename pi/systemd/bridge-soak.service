@@ -1,0 +1,5 @@
+[Unit]
+Description=NetBridge stability soak logger
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bridge-soak.sh

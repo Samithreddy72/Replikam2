@@ -1,0 +1,7 @@
+[Unit]
+Description=RepliKam flight recorder (1s state to disk)
+[Service]
+ExecStart=/usr/local/bin/flight-recorder.sh
+Restart=always
+[Install]
+WantedBy=multi-user.target
