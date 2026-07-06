@@ -30,7 +30,20 @@ ALLOWED = {
     "set-peer":    lambda a: ["bridge", "set-peer", _ip(a.get("ip")), _port(a.get("port", "5004"))],
     "update":      lambda a: ["sudo", "/usr/local/bin/bridge-update.sh"],
     "reboot":      lambda a: ["sudo", "systemctl", "reboot"],
+    "start":       lambda a: ["bridge", "restart"],
+    "stop":        lambda a: ["bridge", "stop"],
+    "diagnose":    lambda a: ["sudo", "/usr/local/bin/bridge-diagnose.sh"],
+    "set-pin":     lambda a: ["sudo", "bridge-pin", "set", _pin(a.get("pin"))],
+    "unlock":      lambda a: ["sudo", "bridge-pin", "unlock", _pin(a.get("pin"))],
+    "lock":        lambda a: ["sudo", "bridge-pin", "lock"],
 }
+
+
+def _pin(v):
+    v = str(v or "")
+    if not (v.isdigit() and 4 <= len(v) <= 8):
+        raise ValueError("pin must be 4-8 digits")
+    return v
 
 
 def _enum(v, allowed):

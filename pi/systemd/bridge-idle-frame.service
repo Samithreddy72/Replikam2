@@ -1,0 +1,9 @@
+[Unit]
+Description=Render the in-camera idle/status frame
+Before=bridge-uvcd.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bridge-idle-frame.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,28 @@
+#!/bin/bash
+# Device-side PIN gate for the bridge media.
+#   bridge-pin set <pin>      store the PIN (hash only) — admin action
+#   bridge-pin unlock <pin>   verify + start media; 3 wrong tries = 1h lockout
+#   bridge-pin lock           stop media, require PIN again
+#   bridge-pin status
+export PATH=/usr/local/bin:/usr/bin:/bin
+H=/etc/bridge/pin.hash; T=/etc/bridge/pin.tries; L=/etc/bridge/pin.lockout
+hash(){ echo -n "$1" | sha256sum | cut -d" " -f1; }
+case "$1" in
+  set)    [ -n "$2" ] || { echo "usage: bridge-pin set <pin>"; exit 1; }
+          mkdir -p /etc/bridge; hash "$2" > $H; chmod 600 $H; rm -f $T $L
+          echo "PIN set (stored as hash only)";;
+  unlock) if [ -f $L ] && [ $(( $(date +%s) - $(cat $L 2>/dev/null || echo 0) )) -lt 3600 ]; then echo "LOCKED OUT (1h cooldown after 3 wrong tries)"; exit 3; fi
+          [ -f $H ] || { echo "no PIN set — unlocked by default"; bridge restart >/dev/null 2>&1; exit 0; }
+          if [ "$(hash "$2")" = "$(cat $H)" ]; then
+            rm -f $T $L; bridge restart >/dev/null 2>&1
+            echo "UNLOCKED — media started"
+          else
+            N=$(( $(cat $T 2>/dev/null || echo 0) + 1 )); echo $N > $T
+            [ $N -ge 3 ] && { date +%s > $L; rm -f $T; echo "WRONG PIN — bridge locked out for 1 hour"; exit 2; }
+            echo "WRONG PIN (attempt $N/3)"; exit 1
+          fi;;
+  lock)   bridge stop >/dev/null 2>&1; echo "LOCKED — media stopped, PIN required";;
+  status) [ -f $L ] && [ $(( $(date +%s) - $(cat $L) )) -lt 3600 ] && { echo "lockout"; exit 0; }
+          [ -f $H ] && echo "pin-set" || echo "no-pin";;
+  *) grep "^#   " "$0" | sed "s/^#   //";;
+esac

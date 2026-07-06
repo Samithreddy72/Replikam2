@@ -22,7 +22,7 @@ from .models import Device, Telemetry, Command, utcnow
 from .schemas import (EnrollIn, EnrollOut, CommandOut, CommandResultIn,
                       ClaimIn, IssueCommandIn)
 
-ALLOWED_COMMANDS = {"restart", "reset-clock", "profile", "set-peer", "update", "reboot"}
+ALLOWED_COMMANDS = {"restart", "reset-clock", "profile", "set-peer", "update", "reboot", "start", "stop", "diagnose", "set-pin", "unlock", "lock"}
 
 app = FastAPI(title="NetBridge Control Plane", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -67,6 +67,11 @@ def telemetry(body: dict, dev: Device = Depends(auth.require_device),
     if body.get("tailscale_ip"):
         dev.tailscale_ip = body["tailscale_ip"]
     db.add(Telemetry(device_id=dev.id, ts=now, metrics=body))
+    # retention: prune telemetry older than 7 days (~1-in-50 writes to keep it cheap)
+    import random as _r
+    if _r.random() < 0.02:
+        cutoff = now - dt.timedelta(days=7)
+        db.query(Telemetry).filter(Telemetry.ts < cutoff).delete()
     db.commit()
     return {"ok": True}
 

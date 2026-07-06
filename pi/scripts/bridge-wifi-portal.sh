@@ -43,7 +43,11 @@ while true; do
   # resolves against the cwd (systemd runs us with cwd=/) and 404s the portal page. The UI assets
   # ship in a SEPARATE wifi-connect-ui.tar.gz (the per-arch binary tarball has none); deploy.sh
   # installs them here.
+  # WPA2-protected with the pairing code (printed on the device label) — nobody
+  # nearby can join the setup AP or watch credentials being entered.
+  pass="$(ap_ssid | sed s/BridgeSetup-/BRIDGE-/)"
   wifi-connect --portal-interface "$PORTAL_IFACE" --portal-ssid "$ssid" \
+               --portal-passphrase "$pass" \
                --ui-directory /usr/local/share/wifi-connect/ui \
                --activity-timeout "$PORTAL_TIMEOUT" 2>&1 | logger -t bridge-wifi-portal
   sleep 5
