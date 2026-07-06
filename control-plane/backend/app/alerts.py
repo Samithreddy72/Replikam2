@@ -17,11 +17,24 @@ def is_online(dev: Device) -> bool:
     return age <= settings.offline_after_s
 
 
+
+# Known remediations per alert kind (the walkthrough's "known fix attached").
+# fix.command must be in the backend ALLOWED_COMMANDS + agent allow-list.
+_FIXES = {
+    "clock_suspect": {"command": "reset-clock", "args": {}, "label": "Reset audio clock now"},
+    "service_down":  {"command": "restart",     "args": {}, "label": "Restart media services"},
+}
+
+
+def alert_fix(kind: str):
+    return _FIXES.get(kind)
+
+
 def device_alerts(dev: Device) -> list[dict]:
     out = []
     if not is_online(dev):
         out.append({"kind": "offline", "detail": "no heartbeat"})
-        return out  # if offline, the rest of the telemetry is stale — don't double-alert
+        return out  # offline has no one-click fix; a human must power-cycle it
     t = dev.latest or {}
     thr = (t.get("throttled") or "").strip()
     if thr and thr not in ("0x0", "throttled=0x0", ""):
@@ -37,4 +50,8 @@ def device_alerts(dev: Device) -> list[dict]:
         pass
     if t.get("clock_suspect"):
         out.append({"kind": "clock_suspect", "detail": "return-audio I/O errors; run reset-clock"})
+    for a in out:
+        fix = alert_fix(a["kind"])
+        if fix:
+            a["fix"] = fix
     return out

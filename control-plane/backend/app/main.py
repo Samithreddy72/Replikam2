@@ -92,6 +92,12 @@ def pull_commands(dev: Device = Depends(auth.require_device), db: Session = Depe
         select(Command).where(Command.device_id == dev.id, Command.status == "pending")
         .order_by(Command.created_at)
     ).all()
+    # At-most-once delivery: mark as "sent" the instant we hand them out, so a
+    # command that disrupts the device before it can POST a result is NOT
+    # re-pulled every tick (that once looped reset-clock -> gadget teardown).
+    for c in rows:
+        c.status = "sent"
+    db.commit()
     return [CommandOut(id=c.id, type=c.type, args=c.args or {}) for c in rows]
 
 
