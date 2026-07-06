@@ -93,10 +93,13 @@ for d in devs:
   unlock)  dispatch unlock     "${3:?fleet unlock <pin> <name>}" "{\"pin\":\"${2}\"}" ;;
   lock)    dispatch lock       "${2:?fleet lock <name|all>}" ;;
   provision)  # attach a one-time payload at claim; args after name become key=val pairs
-    T=$(resolve "${2:?fleet provision <name> key=val ...}"); shift 2
+    NAME="${2:?fleet provision <name> key=val ...}"; T=$(resolve "$NAME"); shift 2
+    [ -n "$T" ] || { echo "❌ unknown bridge: $NAME"; exit 1; }
+    # preserve the device's existing name (claim requires a name field)
+    CUR=$(api "$FLEET_URL/admin/devices/$T" | py 'import json,sys; d=json.load(sys.stdin); print(d.get("name") or d.get("hostname") or d["id"])')
     PAYLOAD=$(python3 -c "import json,sys; print(json.dumps(dict(a.split('=',1) for a in sys.argv[1:])))" "$@")
-    api -X POST -H "Content-Type: application/json" -d "{\"name\":\"$2\",\"provision\":$PAYLOAD}" \
-      "$FLEET_URL/admin/devices/$T/claim" >/dev/null && echo "  ✓ provision payload staged for pull" ;;
+    api -X POST -H "Content-Type: application/json" -d "{\"name\":\"$CUR\",\"provision\":$PAYLOAD}" \
+      "$FLEET_URL/admin/devices/$T/claim" >/dev/null && echo "  ✓ provision staged (name preserved: $CUR)" ;;
   ssh)
     T="${2:?fleet ssh <name>}"
     IP=$(api "$FLEET_URL/admin/devices" | NAME="$T" py '
