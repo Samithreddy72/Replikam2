@@ -93,7 +93,7 @@ case "$1" in
     # (safe - does not touch the USB gadget).
     case "$2" in
       lan ) V=100; A=120 ;;
-      wan ) V=200; A=200 ;;
+      wan ) V=300; A=300 ;;
       * ) echo "usage: bridge profile <lan|wan>"; exit 1 ;;
     esac
     printf '# NetBridge media tuning (bridge profile %s)\nNET_VIDEO_LATENCY=%s\nNET_AUDIO_LATENCY=%s\n' "$2" "$V" "$A" | sudo tee /etc/default/bridge-net >/dev/null
