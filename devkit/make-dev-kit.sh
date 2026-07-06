@@ -20,7 +20,7 @@ MIC=
 CONF
 # mac kit = proven scripts + wrappers
 cp "$R/mac/go-live.sh" "$R/mac/stop-live.sh" "$R/mac/mac-stream.sh" "$R/mac/mac-return-listen.sh" "$OUT/mac/"
-cp "$D/mac/GO-LIVE.command" "$D/mac/STOP.command" "$OUT/mac/"
+cp "$D/mac/GO-LIVE.command" "$D/mac/STOP.command" "$D/mac/CHECKS.command" "$OUT/mac/"
 cp "$OUT/developer.conf" "$OUT/mac/"
 # windows kit
 cp "$D/windows/go-live.ps1" "$D/windows/stop-live.ps1" "$OUT/windows/"

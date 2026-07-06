@@ -3,6 +3,8 @@
 Serves:
   GET /             HTML dashboard (auto-refresh)
   GET /api/status   full status JSON (also consumed by the fleet agent / control plane)
+  GET /api/checks   presenter green checks (samples ~2s; kept out of gather() so
+                    status/telemetry stay instant)
   GET /api/health   tiny liveness JSON
 on http://<pi>:8080"""
 import http.server, socketserver, subprocess, os, time, socket, json, hashlib
@@ -128,6 +130,79 @@ def gather():
     d["ts"] = int(time.time())
     return d
 
+# --------------------------- presenter green checks ---------------------------
+# Journey 3: four am-I-live booleans a presenter can trust. These sample real
+# activity (CPU-tick and hw_ptr deltas), not lifetime averages (`ps pcpu` lies),
+# so they block ~2s. That is why they live on /api/checks, NOT in gather().
+
+PCM_RETURN_STATUS = "/proc/asound/UAC2Gadget/pcm0c/sub0/status"
+
+def _udc_state():
+    udcdir = "/sys/class/udc"
+    if os.path.isdir(udcdir):
+        for f in os.listdir(udcdir):
+            return read("%s/%s/state" % (udcdir, f))
+    return ""
+
+def _feeder_cpu_ticks():
+    """(pid, utime+stime clock ticks) of the net video feeder, or (None, None)."""
+    pids = sh("pgrep -f 'udpsrc port=5000'").split()
+    if not pids:
+        return None, None
+    stat = read("/proc/%s/stat" % pids[0])
+    try:
+        f = stat.rsplit(")", 1)[1].split()   # fields after comm; utime/stime = 14/15 1-indexed
+        return pids[0], int(f[11]) + int(f[12])
+    except Exception:
+        return pids[0], None
+
+def _return_hw_ptr():
+    """Capture-side (from client) hw_ptr in frames, or None if stream closed."""
+    st = read(PCM_RETURN_STATUS)
+    if not st or st.startswith("closed"):
+        return None
+    for ln in st.splitlines():
+        if ln.startswith("hw_ptr"):
+            try:
+                return int(ln.split(":", 1)[1].split()[0])
+            except Exception:
+                return None
+    return None
+
+def checks():
+    win = 2.0                       # one shared sampling window for both deltas
+    pid, t0 = _feeder_cpu_ticks()
+    p0 = _return_hw_ptr()
+    time.sleep(win)
+    _, t1 = _feeder_cpu_ticks()
+    p1 = _return_hw_ptr()
+
+    if pid is None:
+        video_ok, video_detail = False, "video feeder process not running"
+    elif t0 is None or t1 is None:
+        video_ok, video_detail = False, "feeder pid %s: could not read /proc stat" % pid
+    else:
+        dt = t1 - t0
+        video_ok = dt > 10          # >10 cpu ticks in 2s = actively decoding RTP
+        video_detail = "feeder pid %s used %d cpu ticks in %.0fs" % (pid, dt, win)
+
+    if p0 is None or p1 is None:
+        audio_ok, audio_detail = False, "return capture stream not open (client mic path idle)"
+    else:
+        dp = p1 - p0
+        audio_ok = dp > 40000 * win  # 48 kHz nominal; >40k frames/s = flowing
+        audio_detail = "hw_ptr advanced %d frames in %.0fs (~%d/s)" % (dp, win, dp / win)
+
+    udc = _udc_state()
+    return {
+        "online": {"ok": True, "detail": "bridge-web serving on :%d" % PORT},
+        "video_arriving": {"ok": video_ok, "detail": video_detail},
+        "client_sees_camera": {"ok": udc == "configured",
+                               "detail": "usb gadget state: %s" % (udc or "?")},
+        "return_audio": {"ok": audio_ok, "detail": audio_detail},
+        "ts": int(time.time()),
+    }
+
 def badge(ok, text):
     color = "#1a7f37" if ok else "#b42318"
     return '<span style="background:%s;color:#fff;padding:2px 9px;border-radius:10px;font-size:13px">%s</span>' % (color, text)
@@ -191,6 +266,9 @@ class H(http.server.BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
         if path == "/api/status":
             self._send(json.dumps(gather()).encode("utf-8"),
+                       "application/json; charset=utf-8")
+        elif path == "/api/checks":
+            self._send(json.dumps(checks()).encode("utf-8"),
                        "application/json; charset=utf-8")
         elif path == "/api/health":
             self._send(json.dumps({"ok": True, "ts": int(time.time())}).encode("utf-8"),
