@@ -273,8 +273,77 @@ class H(http.server.BaseHTTPRequestHandler):
         elif path == "/api/health":
             self._send(json.dumps({"ok": True, "ts": int(time.time())}).encode("utf-8"),
                        "application/json; charset=utf-8")
+        elif path == "/api/lock-state":
+            # Is this bridge currently PIN-gated? Read straight from the device gate.
+            st = sh("sudo -n /usr/local/bin/bridge-pin state")
+            try:
+                obj = json.loads(st)
+            except Exception:
+                obj = {"pin_set": False, "locked": False, "lockout": False, "lockout_remaining": 0}
+            self._send(json.dumps(obj).encode("utf-8"),
+                       "application/json; charset=utf-8")
         else:
             self._send(page().encode("utf-8"), "text/html; charset=utf-8")
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        if path == "/api/set-peer":
+            # Register the presenter as the return-audio destination — the SSH-free
+            # replacement for `ssh pi@bridge bridge set-peer <ip>`. Strictly a
+            # dotted-quad (we only ever point at a mesh IP), and idempotent: if the
+            # peer is already this ip:port we skip the return-audio restart so
+            # re-going-live never blips the meeting audio.
+            try:
+                n = int(self.headers.get("Content-Length", 0) or 0)
+                body = json.loads(self.rfile.read(n) if n else b"{}") or {}
+                ip = str(body.get("ip", "")).strip()
+                port = str(int(body.get("port", 5004)))
+            except Exception:
+                ip, port = "", "5004"
+            parts = ip.split(".")
+            valid = (len(parts) == 4 and
+                     all(p.isdigit() and 0 <= int(p) <= 255 for p in parts))
+            if not valid:
+                self._send(json.dumps({"ok": False, "error": "bad ip"}).encode("utf-8"),
+                           "application/json; charset=utf-8")
+                return
+            cur = read("/etc/default/bridge-return-audio")
+            if ("RETURN_DEST_IP=%s" % ip) in cur and ("RETURN_DEST_PORT=%s" % port) in cur:
+                self._send(json.dumps({"ok": True, "changed": False,
+                                       "peer": "%s:%s" % (ip, port)}).encode("utf-8"),
+                           "application/json; charset=utf-8")
+                return
+            try:
+                r = subprocess.run(["sudo", "-n", "/usr/local/bin/bridge", "set-peer", ip, port],
+                                   capture_output=True, text=True, timeout=20)
+                ok = r.returncode == 0
+            except Exception:
+                ok = False
+            self._send(json.dumps({"ok": ok, "changed": True,
+                                   "peer": "%s:%s" % (ip, port)}).encode("utf-8"),
+                       "application/json; charset=utf-8")
+        elif path == "/api/unlock":
+            # The PIN is verified ON THE DEVICE ITSELF — it is never forwarded to
+            # the control plane and never logged here. Presenter app -> this bridge
+            # over the private mesh only.
+            try:
+                n = int(self.headers.get("Content-Length", 0) or 0)
+                pin = str((json.loads(self.rfile.read(n) if n else b"{}") or {}).get("pin", ""))
+            except Exception:
+                pin = ""
+            try:
+                r = subprocess.run(["sudo", "-n", "/usr/local/bin/bridge-pin", "unlock", pin],
+                                   capture_output=True, text=True, timeout=20)
+                code = r.returncode
+                msg = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
+            except Exception:
+                code, msg = 4, "unlock failed on device"
+            reason = {0: "ok", 1: "wrong", 2: "locked_out_now", 3: "locked_out"}.get(code, "error")
+            self._send(json.dumps({"ok": code == 0, "reason": reason, "message": msg}).encode("utf-8"),
+                       "application/json; charset=utf-8")
+        else:
+            self._send(json.dumps({"ok": False, "error": "not found"}).encode("utf-8"),
+                       "application/json; charset=utf-8")
 
     def log_message(self, *a):
         pass
