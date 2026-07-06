@@ -1,9 +1,0 @@
-[Unit]
-Description=RepliKam fleet alert notifier (ntfy.sh push)
-After=fleet-brain.service
-[Service]
-ExecStart=/usr/local/bin/fleet-notifier.sh
-Restart=always
-RestartSec=30
-[Install]
-WantedBy=multi-user.target
