@@ -26,6 +26,10 @@ class Device(Base):
     token_hash: Mapped[str | None] = mapped_column(String, nullable=True)  # sha256 of device token
     last_seen: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     latest: Mapped[dict | None] = mapped_column(JSON, nullable=True)        # most recent telemetry blob
+    # One-time provisioning payload (secret-at-claim flow, docs/PROVISIONING-V2.md):
+    # attached by the admin at claim time, handed to the device exactly once via
+    # GET /v1/provision (which clears it). Never exposed in admin device views.
+    provision: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     commands: Mapped[list["Command"]] = relationship(back_populates="device")

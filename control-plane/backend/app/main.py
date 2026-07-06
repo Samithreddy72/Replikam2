@@ -30,6 +30,16 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 # Bootstrap tables for dev/first run. For prod, switch to Alembic migrations.
 Base.metadata.create_all(engine)
 
+# Tiny in-code migration: create_all() never ALTERs existing tables, so add the
+# columns that shipped after first deploy. Idempotent; sqlite-friendly.
+def _migrate():
+    from sqlalchemy import inspect as _inspect, text as _text
+    cols = {c["name"] for c in _inspect(engine).get_columns("devices")}
+    with engine.begin() as conn:
+        if "provision" not in cols:
+            conn.execute(_text("ALTER TABLE devices ADD COLUMN provision JSON"))
+_migrate()
+
 
 @app.get("/healthz")
 def healthz():
@@ -98,6 +108,22 @@ def command_result(cmd_id: int, body: CommandResultIn,
     return {"ok": True}
 
 
+@app.get("/v1/provision")
+def pull_provision(dev: Device = Depends(auth.require_device), db: Session = Depends(get_db)):
+    """One-time provisioning payload (secret-at-claim, docs/PROVISIONING-V2.md).
+
+    Returns whatever the admin attached at claim time (e.g. a tailscale auth key)
+    and clears it in the same transaction, so the secret is handed out exactly
+    once. Subsequent pulls get {"provision": null} — the agent treats that as
+    "nothing to do", making it safe to poll every tick.
+    """
+    payload = dev.provision
+    if payload is not None:
+        dev.provision = None
+        db.commit()
+    return {"provision": payload}
+
+
 # ----------------------------- operator-facing (/admin) -----------------------------
 
 def _device_view(dev: Device) -> dict:
@@ -153,6 +179,10 @@ def claim_device(device_id: str, body: ClaimIn, _: bool = Depends(auth.require_a
     dev.name = body.name
     if dev.claimed_at is None:
         dev.claimed_at = utcnow()
+    if body.provision is not None:
+        # Secret-at-claim: stage the one-time configure payload. The device's
+        # next GET /v1/provision returns it once and the server forgets it.
+        dev.provision = body.provision
     db.commit()
     return _device_view(dev)
 

@@ -30,6 +30,10 @@ class CommandResultIn(BaseModel):
 
 class ClaimIn(BaseModel):
     name: str
+    # Optional one-time configure payload delivered to the device on its next
+    # GET /v1/provision pull (e.g. {"tailscale_auth_key": "tskey-auth-..."}).
+    # Stored until fetched once, then cleared server-side. See docs/PROVISIONING-V2.md.
+    provision: Optional[dict[str, Any]] = None
 
 
 class IssueCommandIn(BaseModel):
