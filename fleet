@@ -24,9 +24,13 @@ if [ ! -f $RC ] && [ -f ~/Downloads/fleet-admin-credentials.txt ]; then
 fi
 [ -f $RC ] || { echo "❌ no ~/.fleetrc (FLEET_URL=, FLEET_KEY=)"; exit 1; }
 . $RC
-api(){ curl -s -m 10 -H "Authorization: Bearer $FLEET_KEY" "$@"; }
+api(){
+  R=$(curl -s -m 10 -H "Authorization: Bearer $FLEET_KEY" "$@")
+  [ -n "$R" ] || { echo "❌ fleet-brain unreachable (bridge offline or network blip) — try again shortly" >&2; exit 2; }
+  echo "$R"
+}
 
-py(){ python3 -c "$1"; }
+py(){ IN=$(cat); [ -n "$IN" ] || exit 2; printf %s "$IN" | python3 -c "$1"; }
 
 resolve(){ # name/hostname/pairing → device id (or 'all')
   [ "$1" = "all" ] && { echo all; return; }
@@ -56,12 +60,14 @@ case "${1:-help}" in
     api "$FLEET_URL/admin/devices" | py '
 import json,sys
 devs=json.load(sys.stdin)
-print(f"{\"BRIDGE\":<24}{\"STATE\":<9}{\"TEMP\":<7}{\"SERVICES\":<10}{\"VER\":<14}ALERTS")
+print("%-24s %-8s %-6s %-9s %-13s %s" % ("BRIDGE","STATE","TEMP","SERVICES","VER","ALERTS"))
 for d in devs:
     m=d.get("latest") or {}
     svc=sum(1 for s,x in m.get("services",[]) if x=="active")
     al=",".join(a["kind"] for a in d["alerts"]) or "-"
-    print(f"{(d[\"name\"] or d[\"hostname\"] or d[\"id\"])[:23]:<24}{\"🟢 up\" if d[\"online\"] else \"🔴 DOWN\":<9}{str(m.get(\"temp\",\"?\")):<7}{str(svc)+\"/5\":<10}{(d[\"version\"] or \"?\")[:13]:<14}{al}")' ;;
+    name=(d["name"] or d["hostname"] or d["id"])[:23]
+    state="UP" if d["online"] else "DOWN"
+    print("%-24s %-8s %-6s %-9s %-13s %s" % (name,state,str(m.get("temp","?")),str(svc)+"/5",(d["version"] or "?")[:12],al))' ;;
   show)    T=$(resolve "${2:?fleet show <name>}"); api "$FLEET_URL/admin/devices/$T" | python3 -m json.tool | head -50 ;;
   restart) dispatch restart "${2:?fleet restart <name|all>}" ;;
   reboot)  dispatch reboot  "${2:?fleet reboot <name>}" ;;
