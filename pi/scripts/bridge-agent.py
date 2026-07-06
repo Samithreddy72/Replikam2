@@ -135,6 +135,41 @@ def run_command(cmd):
     return cid, status, (p.stdout + p.stderr)[-2000:]
 
 
+def syslog(msg):
+    try:
+        subprocess.run(["logger", "-t", "bridge-agent", msg], timeout=5)
+    except Exception:
+        pass
+
+
+def apply_provision(base, token):
+    """Pull the one-time provisioning payload issued at claim and apply it.
+    Safe to call every tick: the server returns {"provision": null} once consumed.
+    Recognised keys: tailscale_authkey (+ optional tailscale_hostname). Unknown
+    keys are logged and ignored. Never raises into the tick."""
+    try:
+        resp = http("GET", base + "/v1/provision", token=token)
+    except urllib.error.URLError:
+        return
+    payload = (resp or {}).get("provision")
+    if not payload:
+        return
+    syslog("provision received: keys=%s" % ",".join(sorted(payload.keys())))
+    key = payload.get("tailscale_authkey")
+    if key:
+        argv = ["tailscale", "up", "--authkey", key, "--reset"]
+        host = payload.get("tailscale_hostname")
+        if host:
+            argv += ["--hostname", host]
+        try:
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+            syslog("provision: tailscale up rc=%d %s" % (p.returncode, (p.stderr or "")[:120]))
+        except Exception as e:
+            syslog("provision: tailscale up failed: %s" % e)
+    else:
+        syslog("provision: no actionable keys (nothing to do)")
+
+
 def main():
     conf = load_conf()
     base = conf.get("CONTROL_URL", "").rstrip("/")
@@ -147,6 +182,8 @@ def main():
         http("POST", base + "/v1/telemetry", token=token, body=tel)
     except urllib.error.URLError as e:
         raise SystemExit("telemetry failed: %s" % e)
+    # apply one-time provisioning issued at claim
+    apply_provision(base, token)
     # pull + run queued commands
     try:
         cmds = http("GET", base + "/v1/commands", token=token) or []
