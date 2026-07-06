@@ -6,3 +6,5 @@ network/
 fleet.conf
 factory/replikam-golden.img
 devkit/kits/
+__pycache__/
+*.pyc
