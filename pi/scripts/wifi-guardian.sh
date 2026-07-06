@@ -29,7 +29,7 @@ while true; do
   else
     fails=$((fails+1))
     LOG "liveness miss #$fails (ssid=$(/usr/sbin/iw dev wlan0 link 2>/dev/null | awk -F': ' '/SSID/{print $2}'))"
-    if [ "$fails" -eq 4 ]; then
+    if [ "$fails" -eq 3 ]; then
       LOG "reconnect wlan0"
       nmcli device disconnect wlan0 >/dev/null 2>&1; sleep 2
       if ! nmcli device connect wlan0 >/dev/null 2>&1; then
@@ -38,13 +38,18 @@ while true; do
           echo "$visible" | grep -qxF "$con" && { LOG "trying saved $con"; nmcli con up "$con" >/dev/null 2>&1 && break; }
         done
       fi
-    elif [ "$fails" -eq 10 ]; then
+    elif [ "$fails" -eq 8 ]; then
       LOG "radio bounce"; nmcli radio wifi off; sleep 3; nmcli radio wifi on; sleep 8
       nmcli device connect wlan0 >/dev/null 2>&1
     elif [ "$fails" -eq 20 ] || [ "$fails" -eq 60 ]; then
       LOG "restart NetworkManager"; systemctl restart NetworkManager; sleep 15
     elif [ "$fails" -ge 120 ]; then
-      LOG "LAST RESORT: ~10min offline -> clean reboot"; sync; systemctl reboot
+      if grep -q configured /sys/class/udc/*/state 2>/dev/null; then
+        LOG "offline 10min but CLIENT ATTACHED - refusing reboot (meeting-safe); keep reconnecting"
+        fails=60
+      else
+        LOG "LAST RESORT: ~10min offline, no client -> clean reboot"; sync; systemctl reboot
+      fi
     fi
     $IW dev wlan0 set power_save off 2>/dev/null
   fi
