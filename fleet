@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+#  fleet — RepliKam admin CLI (runs on the admin Mac, over the tailnet)
+#
+#    fleet status                    fleet health at a glance
+#    fleet show <name>               one device in detail
+#    fleet restart <name|all>        restart media on one/all bridges
+#    fleet profile <lan|wan> <name|all>
+#    fleet update <name|all>         OTA update from the RepliKam2 repo
+#    fleet reboot <name>             reboot a bridge
+#    fleet ssh <name>                shell into a bridge (tailscale)
+#    fleet alerts                    all active alerts
+#
+#  Config: ~/.fleetrc  (FLEET_URL=... FLEET_KEY=...) — created on first run
+#  from ~/Downloads/fleet-admin-credentials.txt if present.
+# ═══════════════════════════════════════════════════════════════════════════
+set -uo pipefail
+RC=~/.fleetrc
+if [ ! -f $RC ] && [ -f ~/Downloads/fleet-admin-credentials.txt ]; then
+  {
+    echo "FLEET_URL=$(grep -oE 'http://[0-9.]+:8000' ~/Downloads/fleet-admin-credentials.txt | head -1)"
+    echo "FLEET_KEY=$(grep ADMIN_API_KEY ~/Downloads/fleet-admin-credentials.txt | cut -d= -f2)"
+  } > $RC && chmod 600 $RC
+fi
+[ -f $RC ] || { echo "❌ no ~/.fleetrc (FLEET_URL=, FLEET_KEY=)"; exit 1; }
+. $RC
+api(){ curl -s -m 10 -H "Authorization: Bearer $FLEET_KEY" "$@"; }
+
+py(){ python3 -c "$1"; }
+
+resolve(){ # name/hostname/pairing → device id (or 'all')
+  [ "$1" = "all" ] && { echo all; return; }
+  api "$FLEET_URL/admin/devices" | NAME="$1" py '
+import json,sys,os
+q=os.environ["NAME"].lower()
+for d in json.load(sys.stdin):
+    if q in ((d["name"] or "").lower(), (d["hostname"] or "").lower(), (d["pairing_code"] or "").lower(), d["id"].lower()):
+        print(d["id"]); break'
+}
+
+cmd_one(){ # id type [args-json]
+  api -X POST -H "Content-Type: application/json" -d "{\"type\":\"$2\",\"args\":${3:-\{\}}}" \
+    "$FLEET_URL/admin/devices/$1/commands" | py 'import json,sys; d=json.load(sys.stdin); print(f"  queued command #{d[\"id\"]}")'
+}
+cmd_all(){ # type [args-json]
+  api -X POST -H "Content-Type: application/json" -d "{\"type\":\"$1\",\"args\":${2:-\{\}}}" \
+    "$FLEET_URL/admin/commands/broadcast" | py 'import json,sys; [print(f"  {q[\"device\"]}: command #{q[\"command_id\"]}") for q in json.load(sys.stdin)["queued"]]'
+}
+dispatch(){ # type target [args-json]
+  T=$(resolve "$2"); [ -n "$T" ] || { echo "❌ unknown bridge: $2"; exit 1; }
+  if [ "$T" = "all" ]; then cmd_all "$1" "${3:-}"; else cmd_one "$T" "$1" "${3:-}"; fi
+}
+
+case "${1:-help}" in
+  status)
+    api "$FLEET_URL/admin/devices" | py '
+import json,sys
+devs=json.load(sys.stdin)
+print(f"{\"BRIDGE\":<24}{\"STATE\":<9}{\"TEMP\":<7}{\"SERVICES\":<10}{\"VER\":<14}ALERTS")
+for d in devs:
+    m=d.get("latest") or {}
+    svc=sum(1 for s,x in m.get("services",[]) if x=="active")
+    al=",".join(a["kind"] for a in d["alerts"]) or "-"
+    print(f"{(d[\"name\"] or d[\"hostname\"] or d[\"id\"])[:23]:<24}{\"🟢 up\" if d[\"online\"] else \"🔴 DOWN\":<9}{str(m.get(\"temp\",\"?\")):<7}{str(svc)+\"/5\":<10}{(d[\"version\"] or \"?\")[:13]:<14}{al}")' ;;
+  show)    T=$(resolve "${2:?fleet show <name>}"); api "$FLEET_URL/admin/devices/$T" | python3 -m json.tool | head -50 ;;
+  restart) dispatch restart "${2:?fleet restart <name|all>}" ;;
+  reboot)  dispatch reboot  "${2:?fleet reboot <name>}" ;;
+  update)  dispatch update  "${2:?fleet update <name|all>}" ;;
+  profile) dispatch profile "${3:?fleet profile <lan|wan> <name|all>}" "{\"mode\":\"${2}\"}" ;;
+  alerts)  api "$FLEET_URL/admin/alerts" | python3 -m json.tool ;;
+  ssh)
+    T="${2:?fleet ssh <name>}"
+    IP=$(api "$FLEET_URL/admin/devices" | NAME="$T" py '
+import json,sys,os
+q=os.environ["NAME"].lower()
+for d in json.load(sys.stdin):
+    if q in ((d["name"] or "").lower(), (d["hostname"] or "").lower(), (d["pairing_code"] or "").lower()):
+        print(d["tailscale_ip"]); break')
+    [ -n "$IP" ] || { echo "❌ unknown bridge"; exit 1; }
+    exec ssh -i ~/.ssh/pi_bridge pi@"$IP" ;;
+  *) sed -n '3,13p' "$0" ;;
+esac

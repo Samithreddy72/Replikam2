@@ -28,6 +28,8 @@ ALLOWED = {
     "reset-clock": lambda a: ["bridge", "reset-clock"],
     "profile":     lambda a: ["bridge", "profile", _enum(a.get("mode"), ("lan", "wan"))],
     "set-peer":    lambda a: ["bridge", "set-peer", _ip(a.get("ip")), _port(a.get("port", "5004"))],
+    "update":      lambda a: ["sudo", "/usr/local/bin/bridge-update.sh"],
+    "reboot":      lambda a: ["sudo", "systemctl", "reboot"],
 }
 
 
@@ -115,7 +117,7 @@ def run_command(cmd):
         argv = builder(args)
     except ValueError as e:
         return cid, "rejected", str(e)
-    p = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    p = subprocess.run(argv, capture_output=True, text=True, timeout=300)
     status = "done" if p.returncode == 0 else "failed"
     return cid, status, (p.stdout + p.stderr)[-2000:]
 

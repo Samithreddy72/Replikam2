@@ -61,3 +61,12 @@ See [docs/GOLDEN-RULES.md](docs/GOLDEN-RULES.md). The big three:
 
 ---
 *Built, broken, debugged, and rebuilt on real hardware. Every file in this repo has run in production.*
+
+## 🌍 Fleet mode (15–20 bridges worldwide)
+This repo also contains the full fleet-management system:
+- `control-plane/` — the admin brain (FastAPI + panel): enroll, telemetry, commands, alerts
+- `fleet` — admin CLI: `fleet status`, `fleet update all`, `fleet ssh bridge-007`
+- `factory/` — SD card mass-production (golden image + per-unit stamping)
+- `devkit/` — personalized one-click developer kits (Mac + Windows)
+- Alerts push to the admin's phone via ntfy.sh
+See `factory/GOLDEN-IMAGE.md` and `devkit/ONBOARDING.md`.

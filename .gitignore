@@ -3,3 +3,6 @@
 *.log
 network/
 *.local.*
+fleet.conf
+factory/replikam-golden.img
+devkit/kits/

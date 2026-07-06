@@ -1,0 +1,10 @@
+# Your personal RepliKam config — set up by your admin. Do not share.
+DEV_NAME=Ravi
+# Your bridge's Tailscale IP (100.x.y.z) — THE address everything streams to:
+BRIDGE=100.0.0.0
+# Voice loudness before sending (raise if the meeting says you're quiet):
+MIC_GAIN_DB=8
+FPS=20
+# Windows only — leave blank to auto-detect the first camera/mic:
+CAMERA=
+MIC=

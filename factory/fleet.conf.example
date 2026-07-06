@@ -1,0 +1,9 @@
+# RepliKam fleet secrets — copy to fleet.conf, fill in, NEVER commit fleet.conf.
+# Tailscale: admin console → Settings → Keys → Generate auth key
+#   → Reusable ✓, Expiration 90d, Tags: tag:bridge
+TS_AUTHKEY=tskey-auth-REPLACE_ME
+# The fleet-brain control plane, reachable over the tailnet:
+CONTROL_URL=http://100.91.108.50:8000
+# From ~/Downloads/fleet-admin-credentials.txt (BOOTSTRAP_TOKEN line):
+BOOTSTRAP_TOKEN=REPLACE_ME
+BRIDGE_VERSION=2.0.0
