@@ -7,7 +7,14 @@
 #    fleet restart <name|all>        restart media on one/all bridges
 #    fleet profile <lan|wan> <name|all>
 #    fleet update <name|all>         OTA update from the RepliKam2 repo
+#    fleet stop|start <name|all>     stop/start media on a bridge
+#    fleet reset-clock <name>        fix crackly return audio (rebuilds gadget)
 #    fleet reboot <name>             reboot a bridge
+#    fleet diagnose <name>           collect a diagnostics bundle on the bridge
+#    fleet set-pin <pin> <name>      lock a bridge with a PIN
+#    fleet unlock <pin> <name>       unlock a bridge
+#    fleet lock <name|all>           lock (stop until PIN)
+#    fleet provision <name> k=v ...  stage a one-time claim payload
 #    fleet ssh <name>                shell into a bridge (tailscale)
 #    fleet alerts                    all active alerts
 #
@@ -43,12 +50,16 @@ for d in json.load(sys.stdin):
 }
 
 cmd_one(){ # id type [args-json]
-  api -X POST -H "Content-Type: application/json" -d "{\"type\":\"$2\",\"args\":${3:-\{\}}}" \
-    "$FLEET_URL/admin/devices/$1/commands" | py 'import json,sys; d=json.load(sys.stdin); print(f"  queued command #{d[\"id\"]}")'
+  A="${3:-}"; [ -n "$A" ] || A="{}"
+  api -X POST -H "Content-Type: application/json" -d "{\"type\":\"$2\",\"args\":$A}" \
+    "$FLEET_URL/admin/devices/$1/commands" | py 'import json,sys; d=json.load(sys.stdin); print("  queued command #%s (%s)" % (d["id"], d["status"]))'
 }
 cmd_all(){ # type [args-json]
-  api -X POST -H "Content-Type: application/json" -d "{\"type\":\"$1\",\"args\":${2:-\{\}}}" \
-    "$FLEET_URL/admin/commands/broadcast" | py 'import json,sys; [print(f"  {q[\"device\"]}: command #{q[\"command_id\"]}") for q in json.load(sys.stdin)["queued"]]'
+  A="${2:-}"; [ -n "$A" ] || A="{}"
+  api -X POST -H "Content-Type: application/json" -d "{\"type\":\"$1\",\"args\":$A}" \
+    "$FLEET_URL/admin/commands/broadcast" | py 'import json,sys
+for q in json.load(sys.stdin)["queued"]:
+    print("  %s: command #%s" % (q["device"], q["command_id"]))'
 }
 dispatch(){ # type target [args-json]
   T=$(resolve "$2"); [ -n "$T" ] || { echo "❌ unknown bridge: $2"; exit 1; }
@@ -74,6 +85,18 @@ for d in devs:
   update)  dispatch update  "${2:?fleet update <name|all>}" ;;
   profile) dispatch profile "${3:?fleet profile <lan|wan> <name|all>}" "{\"mode\":\"${2}\"}" ;;
   alerts)  api "$FLEET_URL/admin/alerts" | python3 -m json.tool ;;
+  stop)    dispatch stop       "${2:?fleet stop <name|all>}" ;;
+  start)   dispatch start      "${2:?fleet start <name|all>}" ;;
+  reset-clock) dispatch reset-clock "${2:?fleet reset-clock <name>}" ;;
+  diagnose) dispatch diagnose  "${2:?fleet diagnose <name>}" ;;
+  set-pin) dispatch set-pin    "${3:?fleet set-pin <pin> <name>}" "{\"pin\":\"${2}\"}" ;;
+  unlock)  dispatch unlock     "${3:?fleet unlock <pin> <name>}" "{\"pin\":\"${2}\"}" ;;
+  lock)    dispatch lock       "${2:?fleet lock <name|all>}" ;;
+  provision)  # attach a one-time payload at claim; args after name become key=val pairs
+    T=$(resolve "${2:?fleet provision <name> key=val ...}"); shift 2
+    PAYLOAD=$(python3 -c "import json,sys; print(json.dumps(dict(a.split('=',1) for a in sys.argv[1:])))" "$@")
+    api -X POST -H "Content-Type: application/json" -d "{\"name\":\"$2\",\"provision\":$PAYLOAD}" \
+      "$FLEET_URL/admin/devices/$T/claim" >/dev/null && echo "  ✓ provision payload staged for pull" ;;
   ssh)
     T="${2:?fleet ssh <name>}"
     IP=$(api "$FLEET_URL/admin/devices" | NAME="$T" py '
