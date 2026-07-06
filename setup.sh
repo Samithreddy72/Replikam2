@@ -97,6 +97,6 @@ for i in $(seq 1 20); do S 'true' 2>/dev/null && break; sleep 5; done
 S 'K=$(uname -r); A=$(systemctl is-active bridge-gadget bridge-feeder-net bridge-uvcd bridge-feeder-audio bridge-return-audio wifi-guardian jitter-sentry | grep -c active)
    echo "  kernel:   $K $([ "${K%%+*}" = "6.12.93" ] && echo "✅" || echo "❌ expected 6.12.93")"
    echo "  services: $A/7 active $([ "$A" = 7 ] && echo "✅")"
-   echo "  camera:   $([ -e /dev/video41 ] && echo "✅ ready") | gadget: $(cat /sys/kernel/config/usb_gadget/g1/UDC 2>/dev/null)"' \
+   echo "  camera:   $([ -e /dev/video40 ] && echo "✅ ready") | gadget: $(cat /sys/kernel/config/usb_gadget/g1/UDC 2>/dev/null)"' \
  && printf '\n🏆 SETUP COMPLETE!\n   1) once:  ssh -i ~/.ssh/pi_bridge pi@%s sudo tailscale up\n   2) plug the client laptop into the Pi USB-C\n   3) on the Mac:  bash mac/go-live.sh\n   4) in the meeting: camera=UVC Camera, mic/speaker=Source/Sink\n' "$T" \
  || printf '\n⚠ Pi still booting — wait 2 min then verify:  ssh -i ~/.ssh/pi_bridge pi@%s uname -r\n' "$T"
