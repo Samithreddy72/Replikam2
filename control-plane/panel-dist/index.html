@@ -96,7 +96,7 @@
         <div class="ph3">Fleet <span class="mono" id="fleetmeta">—</span></div>
         <div style="overflow-x:auto">
           <table class="fleet">
-            <thead><tr><th>Bridge</th><th>Status</th><th>Version</th><th>Session</th><th></th></tr></thead>
+            <thead><tr><th>Bridge</th><th>Status</th><th>PIN</th><th>Version</th><th>Session</th><th></th></tr></thead>
             <tbody id="rows"><tr><td colspan="5" class="dim">loading…</td></tr></tbody>
           </table>
         </div>
@@ -116,6 +116,7 @@ const DISRUPTIVE = new Set(["restart","reset-clock","reboot","lock","stop"]);
 const ACTIONS = [
   ["", "Actions…"],
   ["diagnose", "Collect diagnostics"],
+  ["set-pin", "Set / rotate PIN…"],
   ["profile:lan", "Jitter profile → LAN (low latency)"],
   ["profile:wan", "Jitter profile → WAN (rough network)"],
   ["restart", "Restart media services"],
@@ -159,10 +160,29 @@ function sessionCell(dev){
   return "—";
 }
 
+// PIN-gate state straight from device telemetry (bridge-pin state).
+function pinCell(dev){
+  const p = (dev.latest||{}).pin || {};
+  if (p.lockout){
+    const m = Math.max(1, Math.round((p.lockout_remaining||0)/60));
+    return `<span class="pill live" title="3 wrong tries — brute-force cooldown">lockout ${m} min</span>`;
+  }
+  if (p.locked) return `<span class="pill warn" title="media stopped until a presenter unlocks with the PIN">locked</span>`;
+  if (p.pin_set) return `<span class="pill ok" title="PIN required before streaming">PIN armed</span>`;
+  return `<span class="dim" title="no PIN on this bridge — anyone who can see it can stream to it">no PIN</span>`;
+}
+
 async function doAction(devId, devName, value, isLive){
   if (!value) return;
   let [type, mode] = value.split(":");
-  const args = mode ? {mode} : {};
+  let args = mode ? {mode} : {};
+  if (type === "set-pin"){
+    // Set here, deliver offline (call/text/sticky note) — the panel never shows it again.
+    const pin = prompt(`New 6-digit PIN for ${devName}?\n\nSetting a PIN does not interrupt anything — it just arms the gate. Hand it to your presenter offline.`);
+    if (pin === null) return;
+    if (!/^\d{6}$/.test(pin)) { toast("PIN must be exactly 6 digits"); return; }
+    args = {pin};
+  }
   if (DISRUPTIVE.has(type)) {
     if (isLive && !confirm(`⚠ ${devName} is LIVE — someone is streaming through it right now.\n\n"${type}" will interrupt them. Really proceed?`)) return;
     if (!isLive && !confirm(`Run "${type}" on ${devName}?`)) return;
@@ -202,12 +222,13 @@ function render(){
     const tr = document.createElement("tr");
     if (!d.claimed) {
       tr.innerHTML = `<td class="dev dim">Unclaimed · ${d.pairing_code||d.id}</td>
-        <td>${statusPill(d)}</td><td class="dim">${d.version||"?"}</td><td class="dim">—</td>
+        <td>${statusPill(d)}</td><td class="dim">—</td><td class="dim">${d.version||"?"}</td><td class="dim">—</td>
         <td style="text-align:right"><button class="claimbtn">Claim</button></td>`;
       tr.querySelector(".claimbtn").onclick = ()=>claim(d.id, d.pairing_code||d.id);
     } else {
       tr.innerHTML = `<td class="dev">${d.name||d.hostname||d.id} <span class="dim">${code}</span></td>
         <td>${statusPill(d)}</td>
+        <td>${pinCell(d)}</td>
         <td class="dim">${d.version||"?"}</td>
         <td class="dim">${sessionCell(d)}</td>
         <td style="text-align:right"></td>`;
