@@ -256,6 +256,56 @@ def all_alerts(_: bool = Depends(auth.require_admin), db: Session = Depends(get_
     return out
 
 
+@app.get("/admin/devices/{device_id}/uptime")
+def device_uptime(device_id: str, _: bool = Depends(auth.require_admin),
+                  db: Session = Depends(get_db)):
+    """Uptime/SLA from telemetry ticks (~15s): minute-coverage over rolling 24h
+    windows for the last 7 days, plus outage incidents (tick gaps > 120s).
+    Powered-off time counts as down — that's the honest SLA."""
+    now = utcnow().replace(tzinfo=None)
+    since = now - dt.timedelta(days=7)
+    ts = [r for r in db.scalars(
+        select(Telemetry.ts).where(Telemetry.device_id == device_id,
+                                   Telemetry.ts > since).order_by(Telemetry.ts)).all()]
+    ts = [t.replace(tzinfo=None) for t in ts]
+    # minute coverage
+    up_min = {int((t - since).total_seconds() // 60) for t in ts}
+    windows = []
+    for w in range(7):          # w=0 newest (last 24h) … w=6 oldest
+        lo = now - dt.timedelta(hours=24 * (w + 1))
+        hi = now - dt.timedelta(hours=24 * w)
+        lo_i = max(0, int((lo - since).total_seconds() // 60))
+        hi_i = int((hi - since).total_seconds() // 60)
+        total = max(1, hi_i - lo_i)
+        up = sum(1 for m in up_min if lo_i <= m < hi_i)
+        windows.append({"ago_days": w, "pct": round(100.0 * up / total, 1)})
+    # incidents: gaps between consecutive ticks > 120s (and an ongoing one)
+    incidents = []
+    for a, b in zip(ts, ts[1:]):
+        gap = (b - a).total_seconds()
+        if gap > 120:
+            incidents.append({"start": a.isoformat(), "seconds": int(gap)})
+    if ts and (now - ts[-1]).total_seconds() > 120:
+        incidents.append({"start": ts[-1].isoformat(),
+                          "seconds": int((now - ts[-1]).total_seconds()),
+                          "ongoing": True})
+    up_since = None
+    if ts:
+        up_since = (incidents[-1]["start"] if incidents and incidents[-1].get("ongoing")
+                    else (ts[0].isoformat() if not incidents else None))
+        # seconds since last completed incident = current clean streak
+        last_end = None
+        for i in incidents:
+            if not i.get("ongoing"):
+                e = dt.datetime.fromisoformat(i["start"]) + dt.timedelta(seconds=i["seconds"])
+                last_end = e
+        streak = int((now - (last_end or ts[0])).total_seconds())
+    else:
+        streak = 0
+    return {"windows": windows, "incidents": incidents[-5:], "streak_s": streak,
+            "ticks_7d": len(ts)}
+
+
 @app.get("/admin/devices/{device_id}/diagnostics")
 def list_diagnostics(device_id: str, _: bool = Depends(auth.require_admin),
                      db: Session = Depends(get_db)):

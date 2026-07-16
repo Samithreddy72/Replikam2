@@ -299,6 +299,35 @@ function render(){
       };
     }).catch(()=>{ const el=$(`diag-${d.id}`); if(el) el.textContent="diagnostics unavailable"; });
   }
+  // uptime/SLA card per claimed bridge: 7 rolling-24h bars + streak + incidents
+  for (const d of DEVS){
+    if (!d.claimed) continue;
+    const card = document.createElement("div"); card.className = "pcard alert";
+    card.innerHTML = `<span class="atitle"><span class="adot ok"></span> Uptime — ${d.name||d.id}</span>
+      <span class="abody" id="up-${d.id}">measuring…</span>
+      <div id="upbars-${d.id}" style="display:flex;gap:4px;align-items:flex-end;height:34px;margin-top:4px"></div>`;
+    side.appendChild(card);
+    api(`/admin/devices/${d.id}/uptime`).then(u=>{
+      const bars = $(`upbars-${d.id}`); bars.innerHTML = "";
+      for (const w of [...u.windows].reverse()){   // oldest → newest, newest bar rightmost
+        const b = document.createElement("div");
+        const h = Math.max(3, Math.round(w.pct * 0.32));
+        b.style.cssText = `flex:1;height:${h}px;border-radius:3px;background:${w.pct>=99?"var(--ok)":w.pct>0?"var(--warn)":"var(--line)"}`;
+        b.title = (w.ago_days===0?"last 24h":`${w.ago_days+1} days ago`) + `: ${w.pct}%`;
+        bars.appendChild(b);
+      }
+      const el = $(`up-${d.id}`);
+      const today = u.windows[0].pct;
+      const streakH = Math.floor(u.streak_s/3600), streakM = Math.floor((u.streak_s%3600)/60);
+      let txt = `last 24 h: ${today}% · clean streak ${streakH? streakH+" h ":""}${streakM} min`;
+      const inc = u.incidents.filter(i=>!i.ongoing).slice(-1)[0];
+      if (inc){
+        const t = new Date(inc.start+"Z");
+        txt += ` · last incident ${t.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})} (${Math.round(inc.seconds/60)} min)`;
+      }
+      el.textContent = txt;
+    }).catch(()=>{ const el=$(`up-${d.id}`); if(el) el.textContent="uptime unavailable"; });
+  }
   const ro = document.createElement("div"); ro.className = "pcard rollout";
   ro.innerHTML = `<div class="rname">Rollouts · A/B image updates</div>
     <div style="margin-top:4px">Staged fleet-wide updates with automatic rollback arrive in phase 4.</div>`;
