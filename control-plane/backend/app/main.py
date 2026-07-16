@@ -18,7 +18,7 @@ from .config import settings
 from .db import Base, engine, get_db
 from . import auth, models
 from .alerts import device_alerts, is_online
-from .models import Device, Telemetry, Command, DiagBundle, utcnow
+from .models import Device, Telemetry, Command, DiagBundle, User, AuditLog, utcnow
 from .schemas import (EnrollIn, EnrollOut, CommandOut, CommandResultIn,
                       ClaimIn, IssueCommandIn)
 
@@ -173,13 +173,13 @@ def _device_view(dev: Device) -> dict:
 
 
 @app.get("/admin/devices")
-def list_devices(_: bool = Depends(auth.require_admin), db: Session = Depends(get_db)):
+def list_devices(_: str = Depends(auth.require_viewer), db: Session = Depends(get_db)):
     devs = db.scalars(select(Device).order_by(Device.name.is_(None), Device.name)).all()
     return [_device_view(d) for d in devs]
 
 
 @app.get("/admin/devices/{device_id}")
-def device_detail(device_id: str, _: bool = Depends(auth.require_admin),
+def device_detail(device_id: str, _: str = Depends(auth.require_viewer),
                   db: Session = Depends(get_db)):
     dev = db.get(Device, device_id)
     if not dev:
@@ -201,7 +201,7 @@ def device_detail(device_id: str, _: bool = Depends(auth.require_admin),
 
 
 @app.post("/admin/devices/{device_id}/claim")
-def claim_device(device_id: str, body: ClaimIn, _: bool = Depends(auth.require_admin),
+def claim_device(device_id: str, body: ClaimIn, who: str = Depends(auth.require_admin),
                  db: Session = Depends(get_db)):
     dev = db.get(Device, device_id)
     if not dev:
@@ -214,11 +214,12 @@ def claim_device(device_id: str, body: ClaimIn, _: bool = Depends(auth.require_a
         # next GET /v1/provision returns it once and the server forgets it.
         dev.provision = body.provision
     db.commit()
+    _audit(db, who, "claim", "%s -> %s" % (dev.pairing_code or device_id, body.name))
     return _device_view(dev)
 
 
 @app.post("/admin/devices/{device_id}/commands")
-def issue_command(device_id: str, body: IssueCommandIn, _: bool = Depends(auth.require_admin),
+def issue_command(device_id: str, body: IssueCommandIn, who: str = Depends(auth.require_admin),
                   db: Session = Depends(get_db)):
     if body.type not in ALLOWED_COMMANDS:
         raise HTTPException(400, "unsupported command type")
@@ -228,11 +229,13 @@ def issue_command(device_id: str, body: IssueCommandIn, _: bool = Depends(auth.r
     c = Command(device_id=device_id, type=body.type, args=body.args or {})
     db.add(c)
     db.commit()
+    # audit: never include args (set-pin/unlock carry the PIN)
+    _audit(db, who, "command:%s" % body.type, dev.name or device_id)
     return {"id": c.id, "status": c.status}
 
 
 @app.post("/admin/commands/broadcast")
-def broadcast_command(body: IssueCommandIn, _: bool = Depends(auth.require_admin),
+def broadcast_command(body: IssueCommandIn, who: str = Depends(auth.require_admin),
                       db: Session = Depends(get_db)):
     """Queue the same command for every enrolled device (fleet-wide action)."""
     if body.type not in ALLOWED_COMMANDS:
@@ -244,11 +247,12 @@ def broadcast_command(body: IssueCommandIn, _: bool = Depends(auth.require_admin
         db.flush()
         ids.append({"device": dev.name or dev.id, "command_id": c.id})
     db.commit()
+    _audit(db, who, "broadcast:%s" % body.type, "%d device(s)" % len(ids))
     return {"queued": ids}
 
 
 @app.get("/admin/alerts")
-def all_alerts(_: bool = Depends(auth.require_admin), db: Session = Depends(get_db)):
+def all_alerts(_: str = Depends(auth.require_viewer), db: Session = Depends(get_db)):
     out = []
     for dev in db.scalars(select(Device)).all():
         for a in device_alerts(dev):
@@ -257,7 +261,7 @@ def all_alerts(_: bool = Depends(auth.require_admin), db: Session = Depends(get_
 
 
 @app.get("/admin/devices/{device_id}/uptime")
-def device_uptime(device_id: str, _: bool = Depends(auth.require_admin),
+def device_uptime(device_id: str, _: str = Depends(auth.require_viewer),
                   db: Session = Depends(get_db)):
     """Uptime/SLA from telemetry ticks (~15s): minute-coverage over rolling 24h
     windows for the last 7 days, plus outage incidents (tick gaps > 120s).
@@ -307,7 +311,7 @@ def device_uptime(device_id: str, _: bool = Depends(auth.require_admin),
 
 
 @app.get("/admin/devices/{device_id}/diagnostics")
-def list_diagnostics(device_id: str, _: bool = Depends(auth.require_admin),
+def list_diagnostics(device_id: str, _: str = Depends(auth.require_admin),
                      db: Session = Depends(get_db)):
     rows = db.scalars(select(DiagBundle).where(DiagBundle.device_id == device_id)
                       .order_by(desc(DiagBundle.created_at))).all()
@@ -316,7 +320,7 @@ def list_diagnostics(device_id: str, _: bool = Depends(auth.require_admin),
 
 
 @app.get("/admin/diagnostics/{bundle_id}")
-def download_diagnostics(bundle_id: int, _: bool = Depends(auth.require_admin),
+def download_diagnostics(bundle_id: int, _: str = Depends(auth.require_admin),
                          db: Session = Depends(get_db)):
     from fastapi import Response
     b = db.get(DiagBundle, bundle_id)
@@ -324,6 +328,85 @@ def download_diagnostics(bundle_id: int, _: bool = Depends(auth.require_admin),
         raise HTTPException(404, "bundle not found")
     return Response(content=b.data, media_type="application/gzip",
                     headers={"Content-Disposition": 'attachment; filename="%s"' % b.filename})
+
+
+def _audit(db: Session, who: str, action: str, target: str | None = None):
+    db.add(AuditLog(who=who, action=action, target=target))
+    db.commit()
+
+
+@app.get("/admin/users")
+def list_users(_: str = Depends(auth.require_admin), db: Session = Depends(get_db)):
+    return [{"id": u.id, "email": u.email, "role": u.role,
+             "pending_invite": u.invite_hash is not None,
+             "last_seen": u.last_seen.isoformat() if u.last_seen else None}
+            for u in db.scalars(select(User).order_by(User.created_at)).all()]
+
+
+@app.post("/admin/users")
+def add_user(body: dict, who: str = Depends(auth.require_admin),
+             db: Session = Depends(get_db)):
+    """Create a user + one-time invite token. The invite is returned ONCE and
+    never stored in plaintext — the admin delivers it offline (like the PINs)."""
+    import re as _re
+    email = str(body.get("email") or "").strip().lower()
+    role = str(body.get("role") or "presenter")
+    if not _re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise HTTPException(400, "bad email")
+    if role not in ("admin", "presenter"):
+        raise HTTPException(400, "role must be admin or presenter")
+    if db.scalar(select(User).where(User.email == email)):
+        raise HTTPException(409, "user already exists")
+    import secrets as _s
+    invite = _s.token_urlsafe(24)
+    db.add(User(email=email, role=role, invite_hash=auth.hash_token(invite)))
+    db.commit()
+    _audit(db, who, "user:add", "%s (%s)" % (email, role))
+    return {"email": email, "role": role, "invite": invite}
+
+
+@app.delete("/admin/users/{uid}")
+def revoke_user(uid: int, who: str = Depends(auth.require_admin),
+                db: Session = Depends(get_db)):
+    u = db.get(User, uid)
+    if not u:
+        raise HTTPException(404, "no such user")
+    email = u.email
+    db.delete(u)
+    db.commit()
+    _audit(db, who, "user:revoke", email)
+    return {"ok": True}
+
+
+@app.post("/auth/redeem")
+def redeem_invite(body: dict, db: Session = Depends(get_db)):
+    """Exchange a one-time invite for the personal bearer token (shown once)."""
+    invite = str(body.get("invite") or "")
+    u = db.scalar(select(User).where(User.invite_hash == auth.hash_token(invite))) if invite else None
+    if not u:
+        raise HTTPException(401, "invalid or already-used invite")
+    import secrets as _s
+    token = _s.token_urlsafe(32)
+    u.token_hash = auth.hash_token(token)
+    u.invite_hash = None            # single use
+    db.commit()
+    _audit(db, u.email, "user:redeem-invite")
+    return {"email": u.email, "role": u.role, "token": token}
+
+
+@app.get("/auth/whoami")
+def whoami(who: str = Depends(auth.require_viewer), db: Session = Depends(get_db)):
+    if who == "legacy-key":
+        return {"who": "legacy-key", "role": "admin"}
+    u = db.scalar(select(User).where(User.email == who))
+    return {"who": who, "role": u.role if u else "presenter"}
+
+
+@app.get("/admin/audit")
+def audit_log(_: str = Depends(auth.require_admin), db: Session = Depends(get_db)):
+    rows = db.scalars(select(AuditLog).order_by(desc(AuditLog.ts)).limit(30)).all()
+    return [{"who": a.who, "action": a.action, "target": a.target,
+             "ts": a.ts.isoformat() if a.ts else None} for a in rows]
 
 
 # ----------------------------- admin panel (static) -----------------------------

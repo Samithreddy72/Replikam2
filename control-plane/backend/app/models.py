@@ -44,6 +44,32 @@ class Telemetry(Base):
     metrics: Mapped[dict] = mapped_column(JSON)
 
 
+class User(Base):
+    """A person with their own credential (phase 5). role: admin | presenter.
+    Invite flow: created with a one-time invite token (hash stored); redeeming
+    it mints the personal bearer token (hash stored). No plaintext at rest."""
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String, unique=True, index=True)
+    role: Mapped[str] = mapped_column(String, default="presenter")   # admin | presenter
+    invite_hash: Mapped[str | None] = mapped_column(String, nullable=True)  # cleared on redeem
+    token_hash: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AuditLog(Base):
+    """Every state-changing action, with who did it (walkthrough J4)."""
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    who: Mapped[str] = mapped_column(String)          # email or "legacy-key"
+    action: Mapped[str] = mapped_column(String)       # e.g. command:restart, claim, user:add
+    target: Mapped[str | None] = mapped_column(String, nullable=True)
+    ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class DiagBundle(Base):
     """A diagnostics bundle the device collected and uploaded (walkthrough J4:
     'Bundle ready … Download bundle'). Bundles are small tgz files (~15-50 KB);

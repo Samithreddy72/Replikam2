@@ -75,16 +75,20 @@
   <header>
     <span class="tallydot"></span><span class="brand">NetBridge · Fleet</span>
     <div class="right">
+      <span id="whoami" style="color:var(--muted)"></span>
       <span id="tick"></span>
-      <button onclick="changeKey()">admin key</button>
+      <button onclick="changeKey()">sign out</button>
     </div>
   </header>
 
   <div id="gate" class="hidden">
-    <h2>Fleet admin</h2>
-    <p>Enter the admin API key for this control plane. It stays in this browser.</p>
+    <h2>Sign in</h2>
+    <p>Paste your <b>invite</b> (first time) or use the org admin key. Credentials stay in this browser.</p>
+    <input id="invitein" type="password" placeholder="invite from your admin" onkeydown="if(event.key==='Enter')redeem()" style="margin-bottom:8px">
+    <button onclick="redeem()">Redeem invite &amp; sign in</button>
+    <div style="text-align:center;color:var(--faint);font-size:11px;margin:10px 0 6px">— or —</div>
     <input id="keyin" type="password" placeholder="admin API key" onkeydown="if(event.key==='Enter')saveKey()">
-    <button onclick="saveKey()">Open the fleet</button>
+    <button onclick="saveKey()" style="background:var(--ink)">Open with the admin key</button>
     <div class="err" id="gateerr"></div>
   </div>
 
@@ -136,11 +140,37 @@ async function api(path, opts={}){
   return r.json();
 }
 
+let WHO = localStorage.getItem("nb_who") || "";
+let ROLE = localStorage.getItem("nb_role") || "";
+const isAdmin = () => ROLE !== "presenter";
+
 function gate(err){ $("panel").classList.add("hidden"); $("gate").classList.remove("hidden");
-  $("gateerr").textContent = err || ""; $("keyin").focus(); }
+  $("gateerr").textContent = err || ""; $("invitein").focus(); }
 function saveKey(){ KEY = $("keyin").value.trim(); localStorage.setItem("nb_admin_key", KEY);
-  $("gate").classList.add("hidden"); refresh(true); }
-function changeKey(){ localStorage.removeItem("nb_admin_key"); KEY=""; gate(); }
+  WHO=""; ROLE=""; $("gate").classList.add("hidden"); refresh(true); }
+async function redeem(){
+  const invite = $("invitein").value.trim();
+  if (!invite) return;
+  try {
+    const r = await fetch("/auth/redeem", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify({invite})});
+    if (!r.ok) throw new Error((await r.json()).detail || "HTTP "+r.status);
+    const d = await r.json();
+    KEY = d.token; WHO = d.email; ROLE = d.role;
+    localStorage.setItem("nb_admin_key", KEY);
+    localStorage.setItem("nb_who", WHO); localStorage.setItem("nb_role", ROLE);
+    $("gate").classList.add("hidden"); refresh(true);
+    toast(`welcome, ${d.email} (${d.role})`);
+  } catch(e){ $("gateerr").textContent = "invite: " + e.message; }
+}
+function changeKey(){ ["nb_admin_key","nb_who","nb_role"].forEach(k=>localStorage.removeItem(k));
+  KEY=""; WHO=""; ROLE=""; gate(); }
+async function syncWho(){
+  try { const d = await api("/auth/whoami");
+    WHO = d.who; ROLE = d.role;
+    localStorage.setItem("nb_who", WHO); localStorage.setItem("nb_role", ROLE);
+  } catch(e){}
+}
 
 function agoDays(iso){ if(!iso) return "?";
   const d = (Date.now() - new Date(iso + "Z").getTime()) / 86400000;
@@ -232,10 +262,12 @@ function render(){
         <td class="dim">${d.version||"?"}</td>
         <td class="dim">${sessionCell(d)}</td>
         <td style="text-align:right"></td>`;
-      const sel = document.createElement("select"); sel.className = "act";
-      for (const [v,l] of ACTIONS){ const o=document.createElement("option"); o.value=v; o.textContent=l; sel.appendChild(o); }
-      sel.onchange = ()=>{ doAction(d.id, d.name||d.id, sel.value, isLive); sel.value=""; };
-      tr.lastElementChild.appendChild(sel);
+      if (isAdmin()){   // presenters see the fleet; only admins can act on it
+        const sel = document.createElement("select"); sel.className = "act";
+        for (const [v,l] of ACTIONS){ const o=document.createElement("option"); o.value=v; o.textContent=l; sel.appendChild(o); }
+        sel.onchange = ()=>{ doAction(d.id, d.name||d.id, sel.value, isLive); sel.value=""; };
+        tr.lastElementChild.appendChild(sel);
+      }
     }
     rows.appendChild(tr);
   }
@@ -249,7 +281,7 @@ function render(){
       const card = document.createElement("div"); card.className = "pcard alert";
       card.innerHTML = `<span class="atitle"><span class="adot"></span> ${d.name||d.id} — ${a.kind.replace("_"," ")}</span>
         <span class="abody">${a.detail||""}</span>`;
-      if (a.fix){
+      if (a.fix && isAdmin()){
         const b = document.createElement("button"); b.className = "aact";
         b.textContent = a.fix.label + " →";
         b.onclick = ()=>fix(d.id, d.name||d.id, a.fix, isLive);
@@ -264,9 +296,9 @@ function render(){
       <span class="abody">Offline, thermal, service, clock and PIN-lockout signatures all quiet. Alerts appear here with their known fix attached.</span>`;
     side.appendChild(ok);
   }
-  // diagnostics card per online claimed bridge: newest bundle + download
+  // diagnostics card per online claimed bridge: newest bundle + download (admin-only endpoints)
   for (const d of DEVS){
-    if (!d.claimed || !d.online) continue;
+    if (!d.claimed || !d.online || !isAdmin()) continue;
     const card = document.createElement("div"); card.className = "pcard alert";
     card.innerHTML = `<span class="atitle"><span class="adot ok"></span> Diagnostics — ${d.name||d.id}</span>
       <span class="abody" id="diag-${d.id}">checking for bundles…</span>`;
@@ -328,18 +360,72 @@ function render(){
       el.textContent = txt;
     }).catch(()=>{ const el=$(`up-${d.id}`); if(el) el.textContent="uptime unavailable"; });
   }
+  // team + audit cards (admins only)
+  if (isAdmin()){
+    const team = document.createElement("div"); team.className = "pcard alert";
+    team.innerHTML = `<span class="atitle"><span class="adot ok"></span> Team</span>
+      <span class="abody" id="teamlist">loading…</span>
+      <div style="display:flex;gap:6px;margin-top:4px">
+        <input id="nu-email" placeholder="email" style="flex:1;border:1px solid var(--line);border-radius:7px;padding:4px 8px;font-size:12px">
+        <select id="nu-role" class="act"><option value="presenter">presenter</option><option value="admin">admin</option></select>
+        <button class="aact" onclick="addUser()">Invite →</button>
+      </div>
+      <span class="abody" id="invite-out" style="font-family:var(--mono);font-size:11px;word-break:break-all"></span>`;
+    side.appendChild(team);
+    api("/admin/users").then(us=>{
+      const el = $("teamlist");
+      el.innerHTML = us.length ? "" : "No personal accounts yet — invites replace sharing the org key.";
+      for (const u of us){
+        const row = document.createElement("div");
+        row.innerHTML = `${u.email} · <b>${u.role}</b>${u.pending_invite ? " · invite pending" : ""} <button class="aact" style="margin-left:6px">revoke</button>`;
+        row.querySelector("button").onclick = async ()=>{
+          if (!confirm(`Revoke ${u.email}? Their token stops working immediately.`)) return;
+          try{ await api(`/admin/users/${u.id}`, {method:"DELETE"}); toast(`revoked ${u.email}`); refresh(); }
+          catch(e){ toast("failed: "+e.message); }
+        };
+        el.appendChild(row);
+      }
+    }).catch(()=>{});
+    const aud = document.createElement("div"); aud.className = "pcard alert";
+    aud.innerHTML = `<span class="atitle"><span class="adot ok"></span> Audit — who did what</span>
+      <span class="abody" id="auditlist">loading…</span>`;
+    side.appendChild(aud);
+    api("/admin/audit").then(rows=>{
+      const el = $("auditlist");
+      el.innerHTML = rows.length ? "" : "No actions recorded yet.";
+      for (const r of rows.slice(0,8)){
+        const t = new Date(r.ts+"Z");
+        const line = document.createElement("div");
+        line.textContent = `${t.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})} · ${r.who} · ${r.action}${r.target ? " · "+r.target : ""}`;
+        el.appendChild(line);
+      }
+    }).catch(()=>{});
+  }
   const ro = document.createElement("div"); ro.className = "pcard rollout";
   ro.innerHTML = `<div class="rname">Rollouts · A/B image updates</div>
     <div style="margin-top:4px">Staged fleet-wide updates with automatic rollback arrive in phase 4.</div>`;
   side.appendChild(ro);
 }
 
+async function addUser(){
+  const email = $("nu-email").value.trim(), role = $("nu-role").value;
+  if (!email) return;
+  try {
+    const d = await api("/admin/users", {method:"POST", body:JSON.stringify({email, role})});
+    $("invite-out").textContent = `ONE-TIME invite for ${d.email} — copy and send it offline (shown only now): ${d.invite}`;
+    $("nu-email").value = "";
+    toast(`invited ${d.email} as ${d.role}`);
+  } catch(e){ toast("invite failed: "+e.message); }
+}
+
 async function refresh(first){
   if (!KEY) { gate(); return; }
   try {
+    if (first || !ROLE) await syncWho();
     DEVS = await api("/admin/devices");
     $("panel").classList.remove("hidden"); $("gate").classList.add("hidden");
     render();
+    $("whoami").textContent = WHO === "legacy-key" ? "org admin key" : `${WHO} · ${ROLE}`;
     $("tick").textContent = "updated " + new Date().toLocaleTimeString();
   } catch(e){ if (e.message!=="auth" && first) toast("control plane unreachable"); }
 }
