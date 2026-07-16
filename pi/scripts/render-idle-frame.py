@@ -4,7 +4,7 @@ Deterministic PIL renderer; replaces the quoting-fragile gst-launch textoverlay 
 import hashlib, subprocess, sys
 from PIL import Image, ImageDraw, ImageFont
 
-W, H = 320, 180
+W, H = 640, 360
 OUT = "/etc/bridge/idle-frame.raw"
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 FONTB = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
@@ -27,19 +27,19 @@ t = lambda ok: "✓" if ok else "✗"
 
 img = Image.new("RGB", (W, H), (17, 24, 21))          # --screen #111815
 d = ImageDraw.Draw(img)
-brand   = ImageFont.truetype(FONT, 9)
-title   = ImageFont.truetype(FONTB, 16)
-msg     = ImageFont.truetype(FONT, 11)
-checks  = ImageFont.truetype(FONT, 11)
+brand   = ImageFont.truetype(FONT, 18)
+title   = ImageFont.truetype(FONTB, 32)
+msg     = ImageFont.truetype(FONT, 22)
+checks  = ImageFont.truetype(FONT, 22)
 
 def center(y, text, font, fill):
     w = d.textlength(text, font=font)
     d.text(((W - w) / 2, y), text, font=font, fill=fill)
 
-center(38,  "N E T B R I D G E",                       brand,  (147, 162, 154))  # --screen-muted
-center(62,  "Bridge %s is online" % code,              title,  (232, 239, 234))  # --screen-ink
-center(88,  "Waiting for your presenter to go live…", msg, (155, 180, 173))
-center(118, "%s Wi-Fi     %s Internet     ✓ USB host" % (t(wifi_ok), t(net_ok)),
+center(76,  "N E T B R I D G E",                       brand,  (147, 162, 154))  # --screen-muted
+center(124,  "Bridge %s is online" % code,              title,  (232, 239, 234))  # --screen-ink
+center(176,  "Waiting for your presenter to go live…", msg, (155, 180, 173))
+center(236, "%s Wi-Fi     %s Internet     ✓ USB host" % (t(wifi_ok), t(net_ok)),
             checks, (79, 190, 132))                                              # zcheck green
 
 # RGB -> YUYV (BT.601), 2 pixels per macropixel
