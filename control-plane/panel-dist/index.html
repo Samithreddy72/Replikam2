@@ -243,6 +243,41 @@ function render(){
       <span class="abody">Offline, thermal, service, clock and PIN-lockout signatures all quiet. Alerts appear here with their known fix attached.</span>`;
     side.appendChild(ok);
   }
+  // diagnostics card per online claimed bridge: newest bundle + download
+  for (const d of DEVS){
+    if (!d.claimed || !d.online) continue;
+    const card = document.createElement("div"); card.className = "pcard alert";
+    card.innerHTML = `<span class="atitle"><span class="adot ok"></span> Diagnostics — ${d.name||d.id}</span>
+      <span class="abody" id="diag-${d.id}">checking for bundles…</span>`;
+    const row = document.createElement("div"); row.style.display="flex"; row.style.gap="16px";
+    const dl = document.createElement("button"); dl.className="aact"; dl.textContent="Download bundle →"; dl.style.display="none";
+    const co = document.createElement("button"); co.className="aact"; co.textContent="Collect fresh bundle →";
+    co.onclick = async ()=>{ try{ const r = await api(`/admin/devices/${d.id}/commands`,
+        {method:"POST", body:JSON.stringify({type:"diagnose",args:{}})});
+        toast(`collecting on ${d.name||d.id} — ready in ~40 s (command #${r.id})`);}
+      catch(e){ if(e.message!=="auth") toast("failed: "+e.message); } };
+    row.appendChild(dl); row.appendChild(co); card.appendChild(row);
+    side.appendChild(card);
+    api(`/admin/devices/${d.id}/diagnostics`).then(list=>{
+      const el = $(`diag-${d.id}`);
+      if (!list.length){ el.textContent = "No bundle yet — collect one (service logs, USB state, network, power; ~40 s)."; return; }
+      const b = list[0];
+      const age = Math.max(0, Math.round((Date.now()-new Date(b.created_at+"Z").getTime())/60000));
+      el.textContent = `Bundle ready: ${b.filename} · ${(b.size/1024).toFixed(0)} KB · ${age===0?"just now":age+" min ago"}. Collected remotely on the bridge.`;
+      dl.style.display = "";
+      dl.onclick = async ()=>{
+        try{
+          const r = await fetch(`/admin/diagnostics/${b.id}`, {headers:{"Authorization":"Bearer "+KEY}});
+          if (!r.ok) throw new Error("HTTP "+r.status);
+          const blob = await r.blob();
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob); a.download = b.filename; a.click();
+          URL.revokeObjectURL(a.href);
+          toast(`downloaded ${b.filename}`);
+        }catch(e){ toast("download failed: "+e.message); }
+      };
+    }).catch(()=>{ const el=$(`diag-${d.id}`); if(el) el.textContent="diagnostics unavailable"; });
+  }
   const ro = document.createElement("div"); ro.className = "pcard rollout";
   ro.innerHTML = `<div class="rname">Rollouts · A/B image updates</div>
     <div style="margin-top:4px">Staged fleet-wide updates with automatic rollback arrive in phase 4.</div>`;

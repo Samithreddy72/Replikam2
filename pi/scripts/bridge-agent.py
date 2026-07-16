@@ -121,6 +121,27 @@ def enroll(base, conf, tel):
     return token
 
 
+def upload_latest_bundle(base, token):
+    """POST the newest diagnostics bundle to the control plane (b64; ~15-50KB)."""
+    import base64, glob
+    try:
+        bundles = sorted(glob.glob("/home/pi/diagnostics/bundle-*.tgz"))
+        if not bundles:
+            return
+        path = bundles[-1]
+        with open(path, "rb") as f:
+            data = f.read()
+        if len(data) > 5 * 1024 * 1024:
+            syslog("bundle %s too large to upload (%d bytes)" % (path, len(data)))
+            return
+        http("POST", base + "/v1/diagnostics", token=token,
+             body={"filename": os.path.basename(path),
+                   "data_b64": base64.b64encode(data).decode()})
+        syslog("uploaded diagnostics %s (%d bytes)" % (os.path.basename(path), len(data)))
+    except Exception as e:
+        syslog("bundle upload failed: %s" % e)
+
+
 def run_command(cmd):
     cid, ctype, args = cmd.get("id"), cmd.get("type"), cmd.get("args") or {}
     builder = ALLOWED.get(ctype)
@@ -196,6 +217,10 @@ def main():
                  body={"status": status, "output": output})
         except urllib.error.URLError:
             pass
+        # A completed diagnose leaves a bundle on disk; ship it to the control
+        # plane so the panel's "Download bundle" works without SSH. Best-effort.
+        if c.get("type") == "diagnose" and status == "done":
+            upload_latest_bundle(base, token)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ from .config import settings
 from .db import Base, engine, get_db
 from . import auth, models
 from .alerts import device_alerts, is_online
-from .models import Device, Telemetry, Command, utcnow
+from .models import Device, Telemetry, Command, DiagBundle, utcnow
 from .schemas import (EnrollIn, EnrollOut, CommandOut, CommandResultIn,
                       ClaimIn, IssueCommandIn)
 
@@ -130,6 +130,30 @@ def pull_provision(dev: Device = Depends(auth.require_device), db: Session = Dep
     return {"provision": payload}
 
 
+@app.post("/v1/diagnostics")
+def upload_diagnostics(body: dict, dev: Device = Depends(auth.require_device),
+                       db: Session = Depends(get_db)):
+    """Agent uploads a freshly collected diagnostics bundle (small tgz, base64).
+    Keeps the newest 3 per device so the DB stays flat."""
+    import base64, re
+    filename = str(body.get("filename") or "")
+    if not re.fullmatch(r"bundle-[0-9]{8}-[0-9]{6}\.tgz", filename):
+        raise HTTPException(400, "bad bundle filename")
+    try:
+        data = base64.b64decode(body.get("data_b64") or "", validate=True)
+    except Exception:
+        raise HTTPException(400, "bad base64 payload")
+    if not data or len(data) > 5 * 1024 * 1024:
+        raise HTTPException(400, "bundle empty or over 5MB")
+    db.add(DiagBundle(device_id=dev.id, filename=filename, size=len(data), data=data))
+    keep = db.scalars(select(DiagBundle.id).where(DiagBundle.device_id == dev.id)
+                      .order_by(desc(DiagBundle.created_at)).limit(3)).all()
+    db.query(DiagBundle).filter(DiagBundle.device_id == dev.id,
+                                ~DiagBundle.id.in_(keep)).delete(synchronize_session=False)
+    db.commit()
+    return {"ok": True}
+
+
 # ----------------------------- operator-facing (/admin) -----------------------------
 
 def _device_view(dev: Device) -> dict:
@@ -230,6 +254,26 @@ def all_alerts(_: bool = Depends(auth.require_admin), db: Session = Depends(get_
         for a in device_alerts(dev):
             out.append({"device_id": dev.id, "name": dev.name, **a})
     return out
+
+
+@app.get("/admin/devices/{device_id}/diagnostics")
+def list_diagnostics(device_id: str, _: bool = Depends(auth.require_admin),
+                     db: Session = Depends(get_db)):
+    rows = db.scalars(select(DiagBundle).where(DiagBundle.device_id == device_id)
+                      .order_by(desc(DiagBundle.created_at))).all()
+    return [{"id": b.id, "filename": b.filename, "size": b.size,
+             "created_at": b.created_at.isoformat() if b.created_at else None} for b in rows]
+
+
+@app.get("/admin/diagnostics/{bundle_id}")
+def download_diagnostics(bundle_id: int, _: bool = Depends(auth.require_admin),
+                         db: Session = Depends(get_db)):
+    from fastapi import Response
+    b = db.get(DiagBundle, bundle_id)
+    if not b:
+        raise HTTPException(404, "bundle not found")
+    return Response(content=b.data, media_type="application/gzip",
+                    headers={"Content-Disposition": 'attachment; filename="%s"' % b.filename})
 
 
 # ----------------------------- admin panel (static) -----------------------------

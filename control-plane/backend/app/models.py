@@ -1,7 +1,7 @@
 """SQLAlchemy models for the fleet control plane."""
 import datetime as dt
 
-from sqlalchemy import String, Integer, Float, Boolean, DateTime, ForeignKey, JSON, Text
+from sqlalchemy import String, Integer, Float, Boolean, DateTime, ForeignKey, JSON, Text, LargeBinary
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -42,6 +42,20 @@ class Telemetry(Base):
     device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
     ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     metrics: Mapped[dict] = mapped_column(JSON)
+
+
+class DiagBundle(Base):
+    """A diagnostics bundle the device collected and uploaded (walkthrough J4:
+    'Bundle ready … Download bundle'). Bundles are small tgz files (~15-50 KB);
+    stored inline, newest 3 per device kept."""
+    __tablename__ = "diag_bundles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    filename: Mapped[str] = mapped_column(String)
+    size: Mapped[int] = mapped_column(Integer)
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Command(Base):
