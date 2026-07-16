@@ -85,8 +85,8 @@ S 'command -v tailscale >/dev/null || curl -fsSL https://tailscale.com/install.s
 
 bar "7/8  enabling the self-healing stack"
 S 'sudo systemctl daemon-reload
-   for u in bridge-gadget bridge-feeder-net bridge-uvcd bridge-feeder-audio bridge-return-audio wifi-guardian bridge-powertrim flight-recorder jitter-sentry bridge-watchdog.timer bridge-web bridge-wifi-portal bridge-idle-frame gadget-clean-detach; do sudo systemctl enable $u >/dev/null 2>&1; done
-   sudo systemctl disable bridge-testpattern bridge-agent bridge-agent.timer >/dev/null 2>&1
+   for u in bridge-gadget bridge-feeder-net bridge-uvcd bridge-feeder-audio bridge-return-audio wifi-guardian bridge-powertrim flight-recorder jitter-sentry bridge-watchdog.timer bridge-web bridge-wifi-portal bridge-idle-frame gadget-clean-detach bridge-agent.timer; do sudo systemctl enable $u >/dev/null 2>&1; done
+   sudo systemctl disable bridge-testpattern >/dev/null 2>&1   # agent.timer stays ON: fresh bridges must enroll with the fleet
    echo "  ✓ 14 services armed"'
 
 bar "8/8  reboot + self-verification"
