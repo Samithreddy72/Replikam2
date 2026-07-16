@@ -50,6 +50,13 @@ def device_alerts(dev: Device) -> list[dict]:
         pass
     if t.get("clock_suspect"):
         out.append({"kind": "clock_suspect", "detail": "return-audio I/O errors; run reset-clock"})
+    # PIN brute-force: the device locked itself after 3 wrong tries. This alert IS
+    # the "pages its admin" of the walkthrough — no auto-fix (rotate the PIN offline).
+    pin = t.get("pin") or {}
+    if pin.get("lockout"):
+        left = int(pin.get("lockout_remaining") or 0)
+        out.append({"kind": "pin_lockout",
+                    "detail": "3 wrong PIN tries — bridge locked for %d more min; rotate the PIN if unexpected" % max(1, left // 60)})
     for a in out:
         fix = alert_fix(a["kind"])
         if fix:

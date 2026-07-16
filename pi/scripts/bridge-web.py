@@ -106,6 +106,11 @@ def gather():
     d["peer"] = peer or "?"
     d["wd_timer"] = sh("systemctl is-active bridge-watchdog.timer")
     d["wd_hw"] = sh("systemctl show -p RuntimeWatchdogUSec --value")
+    # PIN-gate state (rides telemetry so a brute-force lockout raises a fleet alert)
+    try:
+        d["pin"] = json.loads(sh("sudo -n /usr/local/bin/bridge-pin state"))
+    except Exception:
+        d["pin"] = {}
     # --- fleet identity + telemetry (consumed by the control plane) ---
     serial = cpu_serial()
     d["device_id"] = serial
