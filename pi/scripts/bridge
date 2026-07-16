@@ -92,7 +92,7 @@ case "$1" in
     # Switch the rtpjitterbuffer latency profile. Restarts ONLY the two feeders
     # (safe - does not touch the USB gadget).
     case "$2" in
-      lan ) V=100; A=120 ;;
+      lan ) V=200; A=200 ;;
       wan ) V=300; A=300 ;;
       * ) echo "usage: bridge profile <lan|wan>"; exit 1 ;;
     esac

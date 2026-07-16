@@ -21,10 +21,10 @@ while true; do
     if [ "${loss:-0}" -gt 2 ] || [ "${mdev:-0}" -gt 25 ] || [ "${avg:-0}" -gt 80 ] || [ "${mx:-0}" -gt 150 ]; then bad=$((bad+1)); good=0
     else good=$((good+1)); bad=0; fi
   fi
-  if [ $bad -ge 3 ] && [ "${cur:-120}" -lt 200 ]; then
+  if [ $bad -ge 3 ] && [ "${cur:-200}" -lt 300 ]; then
     LOG "network degraded (loss=$loss% jitter=${mdev}ms rtt=${avg}ms) -> profile WAN"
     /usr/local/bin/bridge profile wan >/dev/null 2>&1; bad=0
-  elif [ $good -ge 30 ] && [ "${cur:-120}" -ge 200 ]; then
+  elif [ $good -ge 30 ] && [ "${cur:-200}" -ge 300 ]; then
     LOG "network pristine for 10min -> profile LAN"
     /usr/local/bin/bridge profile lan >/dev/null 2>&1; good=0
   fi
