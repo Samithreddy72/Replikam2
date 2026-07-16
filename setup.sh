@@ -38,7 +38,7 @@ bar "2/8  packages (needs internet on the Pi; 5-10 min — grab a coffee)"
 S 'sudo apt-get update -qq && sudo apt-get install -y -qq \
    gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
    gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-alsa \
-   v4l2loopback-dkms v4l2loopback-utils v4l-utils alsa-utils python3 \
+   v4l2loopback-dkms v4l2loopback-utils v4l-utils alsa-utils python3 python3-pil \
    git meson ninja-build build-essential 2>&1 | tail -1'
 echo "  ✓ packages ready"
 
