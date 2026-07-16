@@ -1,13 +1,265 @@
 <!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>NetBridge Fleet</title>
-    <script type="module" crossorigin src="/assets/index-Bj4bOwy_.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-fRmvLH91.css">
-  </head>
-  <body>
-    <div id="root"></div>
-  </body>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NetBridge — Fleet</title>
+<style>
+  :root{
+    --paper:#F4F6F5; --card:#FFFFFF; --ink:#1A2422; --muted:#5F6E68; --faint:#8A968F;
+    --line:#DCE3DF; --chip:#EAF0ED; --tally:#C6392C; --tally-soft:#F7E9E7;
+    --ok:#177A4C; --ok-soft:#E4F1E9; --warn:#9A6B15; --warn-soft:#F6EEDC;
+    --sans:"Avenir Next","Segoe UI",system-ui,-apple-system,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:15px;margin:0;line-height:1.5}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+  header{padding:26px 0 18px;display:flex;align-items:center;gap:10px}
+  .tallydot{width:10px;height:10px;border-radius:50%;background:var(--tally);box-shadow:0 0 0 3px var(--tally-soft)}
+  @media (prefers-reduced-motion:no-preference){.tallydot{animation:tally 2.4s ease-in-out infinite}@keyframes tally{0%,100%{opacity:1}50%{opacity:.35}}}
+  .brand{font-family:var(--mono);font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+  header .right{margin-left:auto;display:flex;align-items:center;gap:12px;font-size:12px;color:var(--faint)}
+  header .right button{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:4px 12px;font-size:12px;color:var(--muted);cursor:pointer}
+  h1{font-size:26px;letter-spacing:-.015em;margin:2px 0 4px;font-weight:700}
+  .sub{color:var(--muted);font-size:14px;margin:0 0 22px}
+  .sub .mono{font-family:var(--mono);font-size:12px;color:var(--faint)}
+
+  .panelgrid{display:grid;grid-template-columns:1.7fr 1fr;gap:14px;padding-bottom:60px}
+  @media (max-width:860px){.panelgrid{grid-template-columns:1fr}}
+  .pcard{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 6px 18px rgba(26,36,34,.05)}
+  .pcard .ph3{font-size:12.5px;font-weight:700;padding:11px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .pcard .ph3 .mono{font-family:var(--mono);font-size:10.5px;color:var(--faint);font-weight:400}
+
+  table.fleet{width:100%;border-collapse:collapse;font-size:12.5px}
+  table.fleet th{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);text-align:left;padding:8px 14px;border-bottom:1px solid var(--line);font-weight:600}
+  table.fleet td{padding:9px 14px;border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:middle}
+  table.fleet tr:last-child td{border-bottom:0}
+  table.fleet .dev{font-weight:600}
+  table.fleet .dim{color:var(--faint);font-family:var(--mono);font-size:11px}
+  .pill{display:inline-block;font-size:11px;font-weight:700;border-radius:999px;padding:2px 10px;letter-spacing:.02em}
+  .pill.ok{background:var(--ok-soft);color:var(--ok)}
+  .pill.live{background:var(--tally-soft);color:var(--tally)}
+  .pill.warn{background:var(--warn-soft);color:var(--warn)}
+  .pill.idle{background:var(--chip);color:var(--muted)}
+  .claimbtn{font-size:11px;font-weight:700;color:var(--tally);border:1px solid var(--tally);border-radius:7px;padding:2px 10px;background:var(--card);cursor:pointer}
+  select.act{border:1px solid var(--line);border-radius:7px;background:var(--card);font-size:11.5px;color:var(--muted);padding:3px 6px;cursor:pointer}
+
+  .side{display:flex;flex-direction:column;gap:14px;min-width:0}
+  .alert{padding:12px 14px;font-size:12.5px;display:flex;flex-direction:column;gap:4px}
+  .alert .atitle{font-weight:700;display:flex;align-items:center;gap:8px;font-size:12.5px}
+  .alert .adot{width:8px;height:8px;border-radius:50%;background:var(--warn);flex:0 0 auto}
+  .alert .adot.ok{background:var(--ok)}
+  .alert .abody{color:var(--muted);line-height:1.5;white-space:normal}
+  .alert .aact{font-size:11.5px;font-weight:700;color:var(--tally);cursor:pointer;background:none;border:0;text-align:left;padding:0}
+  .rollout{padding:12px 14px;font-size:12.5px;color:var(--faint)}
+  .rollout .rname{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--muted)}
+
+  #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--ink);color:#fff;
+    font-size:12.5px;border-radius:9px;padding:9px 18px;opacity:0;transition:opacity .25s;pointer-events:none;max-width:80vw}
+  #toast.show{opacity:1}
+
+  /* key gate */
+  #gate{max-width:420px;margin:80px auto;background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:26px;box-shadow:0 12px 32px rgba(26,36,34,.10)}
+  #gate h2{margin:0 0 4px;font-size:18px}
+  #gate p{color:var(--muted);font-size:13px;margin:0 0 14px}
+  #gate input{width:100%;border:1px solid var(--line);border-radius:9px;padding:10px 12px;font-family:var(--mono);font-size:13px}
+  #gate button{width:100%;margin-top:10px;background:var(--tally);color:#fff;border:0;border-radius:9px;padding:11px 0;font-weight:700;font-size:13.5px;cursor:pointer}
+  #gate .err{color:var(--tally);font-size:12px;margin-top:8px;min-height:16px}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="tallydot"></span><span class="brand">NetBridge · Fleet</span>
+    <div class="right">
+      <span id="tick"></span>
+      <button onclick="changeKey()">admin key</button>
+    </div>
+  </header>
+
+  <div id="gate" class="hidden">
+    <h2>Fleet admin</h2>
+    <p>Enter the admin API key for this control plane. It stays in this browser.</p>
+    <input id="keyin" type="password" placeholder="admin API key" onkeydown="if(event.key==='Enter')saveKey()">
+    <button onclick="saveKey()">Open the fleet</button>
+    <div class="err" id="gateerr"></div>
+  </div>
+
+  <div id="panel" class="hidden">
+    <h1>Every bridge on one screen.</h1>
+    <p class="sub">Live fleet state, refreshed every 5&nbsp;s · <span class="mono">alerts carry their known fix</span></p>
+    <div class="panelgrid">
+      <div class="pcard">
+        <div class="ph3">Fleet <span class="mono" id="fleetmeta">—</span></div>
+        <div style="overflow-x:auto">
+          <table class="fleet">
+            <thead><tr><th>Bridge</th><th>Status</th><th>Version</th><th>Session</th><th></th></tr></thead>
+            <tbody id="rows"><tr><td colspan="5" class="dim">loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="side" id="side"></div>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let KEY = localStorage.getItem("nb_admin_key") || "";
+// Commands that interrupt media or reboot the device — always confirmed,
+// and double-confirmed if someone is live on that bridge (meeting-aware).
+const DISRUPTIVE = new Set(["restart","reset-clock","reboot","lock","stop"]);
+const ACTIONS = [
+  ["", "Actions…"],
+  ["diagnose", "Collect diagnostics"],
+  ["profile:lan", "Jitter profile → LAN (low latency)"],
+  ["profile:wan", "Jitter profile → WAN (rough network)"],
+  ["restart", "Restart media services"],
+  ["reset-clock", "Reset audio clock"],
+  ["lock", "Lock (require PIN)"],
+  ["reboot", "Reboot bridge"],
+];
+
+function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("show");
+  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"), 3500); }
+
+async function api(path, opts={}){
+  const r = await fetch(path, {...opts, headers:{
+    "Authorization":"Bearer "+KEY, "Content-Type":"application/json", ...(opts.headers||{})}});
+  if (r.status === 401 || r.status === 403) { gate("that key was rejected"); throw new Error("auth"); }
+  if (!r.ok) throw new Error("HTTP "+r.status);
+  return r.json();
+}
+
+function gate(err){ $("panel").classList.add("hidden"); $("gate").classList.remove("hidden");
+  $("gateerr").textContent = err || ""; $("keyin").focus(); }
+function saveKey(){ KEY = $("keyin").value.trim(); localStorage.setItem("nb_admin_key", KEY);
+  $("gate").classList.add("hidden"); refresh(true); }
+function changeKey(){ localStorage.removeItem("nb_admin_key"); KEY=""; gate(); }
+
+function agoDays(iso){ if(!iso) return "?";
+  const d = (Date.now() - new Date(iso + "Z").getTime()) / 86400000;
+  return d < 1 ? "today" : Math.round(d) + " d"; }
+
+function statusPill(dev){
+  const t = dev.latest || {}, s = t.streams || {};
+  if (!dev.online) return `<span class="pill idle">offline ${agoDays(dev.last_seen)}</span>`;
+  if (dev.alerts && dev.alerts.length) return `<span class="pill warn">${dev.alerts[0].kind.replace("_"," ")}</span>`;
+  if (s.video) return `<span class="pill live">● live</span>`;
+  return `<span class="pill ok">online</span>`;
+}
+
+function sessionCell(dev){
+  const s = (dev.latest||{}).streams || {};
+  if (dev.online && s.video) return "presenter streaming";
+  return "—";
+}
+
+async function doAction(devId, devName, value, isLive){
+  if (!value) return;
+  let [type, mode] = value.split(":");
+  const args = mode ? {mode} : {};
+  if (DISRUPTIVE.has(type)) {
+    if (isLive && !confirm(`⚠ ${devName} is LIVE — someone is streaming through it right now.\n\n"${type}" will interrupt them. Really proceed?`)) return;
+    if (!isLive && !confirm(`Run "${type}" on ${devName}?`)) return;
+  }
+  try {
+    const r = await api(`/admin/devices/${devId}/commands`, {method:"POST", body:JSON.stringify({type, args})});
+    toast(`queued ${type} on ${devName} — command #${r.id}`);
+  } catch(e){ if(e.message!=="auth") toast("failed: "+e.message); }
+}
+
+async function claim(devId, code){
+  const name = prompt(`Name for ${code}? (e.g. "Mumbai Studio")`);
+  if (!name) return;
+  try { await api(`/admin/devices/${devId}/claim`, {method:"POST", body:JSON.stringify({name})});
+        toast(`claimed ${code} as “${name}”`); refresh(); }
+  catch(e){ if(e.message!=="auth") toast("claim failed: "+e.message); }
+}
+
+async function fix(devId, devName, f, isLive){
+  if (isLive && DISRUPTIVE.has(f.command) &&
+      !confirm(`⚠ ${devName} is LIVE. “${f.label}” interrupts the stream. Proceed?`)) return;
+  try { const r = await api(`/admin/devices/${devId}/commands`,
+        {method:"POST", body:JSON.stringify({type:f.command, args:f.args||{}})});
+        toast(`${f.label} — queued command #${r.id} on ${devName}`); }
+  catch(e){ if(e.message!=="auth") toast("failed: "+e.message); }
+}
+
+let DEVS = [];
+function render(){
+  const rows = $("rows"); rows.innerHTML = "";
+  const online = DEVS.filter(d=>d.online).length;
+  $("fleetmeta").textContent = `${DEVS.length} bridge${DEVS.length===1?"":"s"} · ${online} online · live refresh`;
+  for (const d of DEVS){
+    const t = d.latest || {};
+    const isLive = !!(d.online && (t.streams||{}).video);
+    const code = (d.pairing_code||"").replace("BRIDGE-","");
+    const tr = document.createElement("tr");
+    if (!d.claimed) {
+      tr.innerHTML = `<td class="dev dim">Unclaimed · ${d.pairing_code||d.id}</td>
+        <td>${statusPill(d)}</td><td class="dim">${d.version||"?"}</td><td class="dim">—</td>
+        <td style="text-align:right"><button class="claimbtn">Claim</button></td>`;
+      tr.querySelector(".claimbtn").onclick = ()=>claim(d.id, d.pairing_code||d.id);
+    } else {
+      tr.innerHTML = `<td class="dev">${d.name||d.hostname||d.id} <span class="dim">${code}</span></td>
+        <td>${statusPill(d)}</td>
+        <td class="dim">${d.version||"?"}</td>
+        <td class="dim">${sessionCell(d)}</td>
+        <td style="text-align:right"></td>`;
+      const sel = document.createElement("select"); sel.className = "act";
+      for (const [v,l] of ACTIONS){ const o=document.createElement("option"); o.value=v; o.textContent=l; sel.appendChild(o); }
+      sel.onchange = ()=>{ doAction(d.id, d.name||d.id, sel.value, isLive); sel.value=""; };
+      tr.lastElementChild.appendChild(sel);
+    }
+    rows.appendChild(tr);
+  }
+  // side: alerts (with their attached fix), then the phase-4 rollout placeholder
+  const side = $("side"); side.innerHTML = "";
+  let anyAlert = false;
+  for (const d of DEVS){
+    const isLive = !!(d.online && ((d.latest||{}).streams||{}).video);
+    for (const a of (d.alerts||[])){
+      anyAlert = true;
+      const card = document.createElement("div"); card.className = "pcard alert";
+      card.innerHTML = `<span class="atitle"><span class="adot"></span> ${d.name||d.id} — ${a.kind.replace("_"," ")}</span>
+        <span class="abody">${a.detail||""}</span>`;
+      if (a.fix){
+        const b = document.createElement("button"); b.className = "aact";
+        b.textContent = a.fix.label + " →";
+        b.onclick = ()=>fix(d.id, d.name||d.id, a.fix, isLive);
+        card.appendChild(b);
+      }
+      side.appendChild(card);
+    }
+  }
+  if (!anyAlert){
+    const ok = document.createElement("div"); ok.className = "pcard alert";
+    ok.innerHTML = `<span class="atitle"><span class="adot ok"></span> No active alerts</span>
+      <span class="abody">Offline, thermal, service, clock and PIN-lockout signatures all quiet. Alerts appear here with their known fix attached.</span>`;
+    side.appendChild(ok);
+  }
+  const ro = document.createElement("div"); ro.className = "pcard rollout";
+  ro.innerHTML = `<div class="rname">Rollouts · A/B image updates</div>
+    <div style="margin-top:4px">Staged fleet-wide updates with automatic rollback arrive in phase 4.</div>`;
+  side.appendChild(ro);
+}
+
+async function refresh(first){
+  if (!KEY) { gate(); return; }
+  try {
+    DEVS = await api("/admin/devices");
+    $("panel").classList.remove("hidden"); $("gate").classList.add("hidden");
+    render();
+    $("tick").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch(e){ if (e.message!=="auth" && first) toast("control plane unreachable"); }
+}
+refresh(true);
+setInterval(refresh, 5000);
+</script>
+</body>
 </html>
