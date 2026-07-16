@@ -17,6 +17,13 @@
 #    fleet provision <name> k=v ...  stage a one-time claim payload
 #    fleet ssh <name>                shell into a bridge (tailscale)
 #    fleet alerts                    all active alerts
+#    fleet users                     list personal accounts
+#    fleet invite <email> [role]     create user, print one-time invite (default presenter)
+#    fleet revoke <email>            delete a user (token dies instantly)
+#    fleet audit                     recent actions, who did what
+#    fleet uptime <name>             SLA: 7-day bars + incidents + streak
+#    fleet bundles <name>            list diagnostics bundles on the control plane
+#    fleet bundle <name>             download the newest bundle to ~/Downloads
 #
 #  Config: ~/.fleetrc  (FLEET_URL=... FLEET_KEY=...) — created on first run
 #  from ~/Downloads/fleet-admin-credentials.txt if present.
@@ -100,6 +107,70 @@ for d in devs:
     PAYLOAD=$(python3 -c "import json,sys; print(json.dumps(dict(a.split('=',1) for a in sys.argv[1:])))" "$@")
     api -X POST -H "Content-Type: application/json" -d "{\"name\":\"$CUR\",\"provision\":$PAYLOAD}" \
       "$FLEET_URL/admin/devices/$T/claim" >/dev/null && echo "  ✓ provision staged (name preserved: $CUR)" ;;
+  users)
+    api "$FLEET_URL/admin/users" | py '
+import json,sys
+us=json.load(sys.stdin)
+if not us: print("  no personal accounts yet — fleet invite <email> [role]"); raise SystemExit
+print("%-34s %-10s %-8s %s" % ("EMAIL","ROLE","INVITE","LAST SEEN"))
+for u in us:
+    print("%-34s %-10s %-8s %s" % (u["email"], u["role"],
+          "pending" if u["pending_invite"] else "-", (u["last_seen"] or "never")[:16]))' ;;
+  invite)
+    E="${2:?fleet invite <email> [admin|presenter]}"; R="${3:-presenter}"
+    api -X POST -H "Content-Type: application/json" -d "{\"email\":\"$E\",\"role\":\"$R\"}" \
+      "$FLEET_URL/admin/users" | py '
+import json,sys
+d=json.load(sys.stdin)
+if "invite" not in d: print("  failed: %s" % d.get("detail", d)); raise SystemExit(1)
+print("  %s invited as %s" % (d["email"], d["role"]))
+print("  ONE-TIME invite (shown only now — deliver it offline):")
+print("    %s" % d["invite"])' ;;
+  revoke)
+    E="${2:?fleet revoke <email>}"
+    USERID=$(api "$FLEET_URL/admin/users" | EMAIL="$E" py '
+import json,sys,os
+for u in json.load(sys.stdin):
+    if u["email"] == os.environ["EMAIL"]: print(u["id"]); break')
+    [ -n "$USERID" ] || { echo "❌ no user $E"; exit 1; }
+    api -X DELETE "$FLEET_URL/admin/users/$USERID" >/dev/null && echo "  ✓ revoked $E (token dead)" ;;
+  audit)
+    api "$FLEET_URL/admin/audit" | py '
+import json,sys
+rows=json.load(sys.stdin)
+if not rows: print("  no actions recorded yet"); raise SystemExit
+for r in rows[:20]:
+    print("  %s  %-28s %-22s %s" % ((r["ts"] or "")[:16], r["who"], r["action"], r.get("target") or ""))' ;;
+  uptime)
+    T=$(resolve "${2:?fleet uptime <name>}"); [ -n "$T" ] || { echo "❌ unknown bridge: $2"; exit 1; }
+    api "$FLEET_URL/admin/devices/$T/uptime" | py '
+import json,sys
+d=json.load(sys.stdin)
+bars=""
+for w in reversed(d["windows"]):
+    p=w["pct"]
+    bars += "█" if p>=99 else ("▅" if p>=50 else ("▂" if p>0 else "·"))
+print("  7-day (old→new): %s   last 24h: %.1f%%" % (bars, d["windows"][0]["pct"]))
+s=d["streak_s"]; print("  clean streak: %dh %02dm   ticks stored: %d" % (s//3600,(s%3600)//60,d["ticks_7d"]))
+for i in d["incidents"][-5:]:
+    print("  incident: %s for %dmin%s" % (i["start"][:16], i["seconds"]//60, " (ONGOING)" if i.get("ongoing") else ""))' ;;
+  bundles)
+    T=$(resolve "${2:?fleet bundles <name>}"); [ -n "$T" ] || { echo "❌ unknown bridge: $2"; exit 1; }
+    api "$FLEET_URL/admin/devices/$T/diagnostics" | py '
+import json,sys
+bs=json.load(sys.stdin)
+if not bs: print("  no bundles — queue one with: fleet diagnose <name>"); raise SystemExit
+for b in bs: print("  #%-3s %s  %5.1f KB  %s" % (b["id"], b["filename"], b["size"]/1024, (b["created_at"] or "")[:16]))' ;;
+  bundle)
+    T=$(resolve "${2:?fleet bundle <name>}"); [ -n "$T" ] || { echo "❌ unknown bridge: $2"; exit 1; }
+    B=$(api "$FLEET_URL/admin/devices/$T/diagnostics" | py '
+import json,sys
+bs=json.load(sys.stdin)
+print("%s %s" % (bs[0]["id"], bs[0]["filename"]) if bs else "")')
+    [ -n "$B" ] || { echo "❌ no bundles — run: fleet diagnose $2 (ready ~40s later)"; exit 1; }
+    BID=${B%% *}; BFN=${B##* }
+    curl -s -m 30 -H "Authorization: Bearer $FLEET_KEY" -o ~/Downloads/"$BFN" "$FLEET_URL/admin/diagnostics/$BID" \
+      && echo "  ✓ ~/Downloads/$BFN ($(stat -f%z ~/Downloads/"$BFN" 2>/dev/null || stat -c%s ~/Downloads/"$BFN") bytes)" ;;
   ssh)
     T="${2:?fleet ssh <name>}"
     IP=$(api "$FLEET_URL/admin/devices" | NAME="$T" py '
@@ -110,5 +181,5 @@ for d in json.load(sys.stdin):
         print(d["tailscale_ip"]); break')
     [ -n "$IP" ] || { echo "❌ unknown bridge"; exit 1; }
     exec ssh -i ~/.ssh/pi_bridge pi@"$IP" ;;
-  *) sed -n '3,13p' "$0" ;;
+  *) sed -n '3,26p' "$0" ;;
 esac
