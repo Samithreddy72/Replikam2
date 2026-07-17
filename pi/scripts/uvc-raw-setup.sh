@@ -160,6 +160,14 @@ case "$1" in
 
 	echo "Creating UAC2 microphone function..."
 	mkdir functions/uac2.usb0
+	# ADAPTIVE sync for the host->gadget (speaker) stream: the default "async"
+	# mode requires a feedback endpoint that Windows' usbaudio2.sys must honor —
+	# a documented source of drift -> stutter-burst -> multi-second stream resets
+	# on continuous audio (music), while pause-laden speech self-heals. Adaptive
+	# is what real USB soundcards use: no feedback dance, host streams steadily.
+	echo adaptive > functions/uac2.usb0/c_sync || true
+	# Deeper URB queue (default 2) rides out dwc2 scheduling latency.
+	echo 8 > functions/uac2.usb0/req_number || true
 	echo 1 > functions/uac2.usb0/c_chmask
 	# Single 48k rate for the return path (the "Speakers/Source" the client plays into). Advertising
 	# only 48k makes the CLIENT OS do any 44.1->48 resample with its high-quality SRC (like a fixed-
