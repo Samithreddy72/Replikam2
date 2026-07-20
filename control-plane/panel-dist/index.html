@@ -83,12 +83,12 @@
 
   <div id="gate" class="hidden">
     <h2>Sign in</h2>
-    <p>Paste your <b>invite</b> (first time). The shared bootstrap key works only until the first admin account exists. Credentials stay in this browser.</p>
+    <p>Paste your <b>invite</b> (first time) — it becomes your personal token. Already have one? Use the second box. Credentials stay in this browser.</p>
     <input id="invitein" type="password" placeholder="invite from your admin" onkeydown="if(event.key==='Enter')redeem()" style="margin-bottom:8px">
     <button onclick="redeem()">Redeem invite &amp; sign in</button>
     <div style="text-align:center;color:var(--faint);font-size:11px;margin:10px 0 6px">— or —</div>
-    <input id="keyin" type="password" placeholder="bootstrap key (first-run only)" onkeydown="if(event.key==='Enter')saveKey()">
-    <button onclick="saveKey()" style="background:var(--ink)">Open with the bootstrap key</button>
+    <input id="keyin" type="password" placeholder="personal token (or bootstrap key, first run only)" onkeydown="if(event.key==='Enter')saveKey()">
+    <button onclick="saveKey()" style="background:var(--ink)">Sign in with a token</button>
     <div class="err" id="gateerr"></div>
   </div>
 

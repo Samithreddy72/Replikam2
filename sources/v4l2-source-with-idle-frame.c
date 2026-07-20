@@ -30,65 +30,29 @@ struct v4l2_source {
 	unsigned int last_size;
 	unsigned int last_alloc;
 
-	/* Idle-card state. last_frame doubles as "last live video frame" and "the
-	 * status card"; holds_live says which one is in there right now, so that
-	 * when a session ends we swap the presenter's frozen last frame back out
-	 * for the card instead of leaving their face on the meeting laptop. */
+	/* The branded "bridge online, waiting for your presenter" card, kept in
+	 * its own buffer so live video can never overwrite it. Served whenever
+	 * no fresh frame has arrived for IDLE_FALLBACK_S seconds — short network
+	 * blips keep the frozen last frame (protects a live meeting), a real
+	 * session end decays back to the status card. */
+	void *idle_frame;
+	unsigned int idle_size;
+	/* mtime of the card we currently hold + when we last checked, so a
+	 * re-rendered card (Wi-Fi dropped, USB unplugged) reaches the meeting
+	 * laptop instead of the boot-time snapshot being shown forever. */
 	time_t idle_mtime;
 	time_t idle_checked;
-	int holds_live;
+	time_t last_fresh;
 
-	unsigned int n_ok, n_again, n_err, n_gray;
+	unsigned int n_ok, n_again, n_err, n_gray, n_idle;
 	int last_errno;
 	unsigned int last_used;
 	time_t last_report;
 };
 
+#define IDLE_FALLBACK_S 5
+
 #define to_v4l2_source(s) container_of(s, struct v4l2_source, src)
-
-#define IDLE_FRAME_PATH "/etc/bridge/idle-frame.raw"
-
-/* (Re)load the rendered status card from disk. Sized from the file itself —
- * it used to be a hardcoded 115200 (320x180x2), which silently truncated the
- * card to its top quarter once the renderer moved to 640x360. Returns 1 on
- * success. */
-static int idle_frame_load(struct v4l2_source *src)
-{
-	struct stat st;
-	FILE *f;
-	void *buf;
-	size_t got;
-
-	if (stat(IDLE_FRAME_PATH, &st) < 0 || st.st_size <= 0)
-		return 0;
-
-	f = fopen(IDLE_FRAME_PATH, "rb");
-	if (!f)
-		return 0;
-
-	buf = malloc(st.st_size);
-	if (!buf) {
-		fclose(f);
-		return 0;
-	}
-
-	got = fread(buf, 1, st.st_size, f);
-	fclose(f);
-
-	if (got != (size_t)st.st_size) {
-		/* Partial read: the renderer is mid-write. Keep whatever we have
-		 * and retry on the next tick rather than showing a torn card. */
-		free(buf);
-		return 0;
-	}
-
-	free(src->last_frame);
-	src->last_frame = buf;
-	src->last_size = src->last_alloc = st.st_size;
-	src->idle_mtime = st.st_mtime;
-	src->holds_live = 0;
-	return 1;
-}
 
 static void pump_report(struct v4l2_source *src)
 {
@@ -96,11 +60,11 @@ static void pump_report(struct v4l2_source *src)
 	if (now - src->last_report < 2)
 		return;
 	src->last_report = now;
-	fprintf(stderr, "pump: ok=%u again=%u err=%u(errno=%d) gray=%u bytesused=%u\n",
+	fprintf(stderr, "pump: ok=%u again=%u err=%u(errno=%d) gray=%u idle=%u bytesused=%u\n",
 		src->n_ok, src->n_again, src->n_err, src->last_errno,
-		src->n_gray, src->last_used);
+		src->n_gray, src->n_idle, src->last_used);
 	fflush(stderr);
-	src->n_ok = src->n_again = src->n_err = src->n_gray = 0;
+	src->n_ok = src->n_again = src->n_err = src->n_gray = src->n_idle = 0;
 }
 
 static void v4l2_source_destroy(struct video_source *s)
@@ -108,6 +72,7 @@ static void v4l2_source_destroy(struct video_source *s)
 	struct v4l2_source *src = to_v4l2_source(s);
 
 	free(src->last_frame);
+	free(src->idle_frame);
 	v4l2_close(src->vdev);
 	free(src);
 }
@@ -139,6 +104,63 @@ static int v4l2_source_alloc_buffers(struct video_source *s, unsigned int nbufs)
 	return v4l2_mmap_buffers(src->vdev);
 }
 
+#define IDLE_FRAME_PATH "/etc/bridge/idle-frame.raw"
+
+/* (Re)load the rendered status card. Size comes from the file, so the card
+ * follows whatever resolution the renderer produces. Returns 1 on success;
+ * a short read (renderer mid-write) leaves the current card untouched. */
+static int idle_frame_load(struct v4l2_source *src)
+{
+	struct stat st;
+	FILE *f;
+	void *buf;
+	size_t got;
+
+	if (stat(IDLE_FRAME_PATH, &st) < 0 || st.st_size <= 0 ||
+	    st.st_size > 4 * 1024 * 1024)
+		return 0;
+
+	f = fopen(IDLE_FRAME_PATH, "rb");
+	if (!f)
+		return 0;
+
+	buf = malloc(st.st_size);
+	if (!buf) {
+		fclose(f);
+		return 0;
+	}
+
+	got = fread(buf, 1, st.st_size, f);
+	fclose(f);
+
+	if (got != (size_t)st.st_size) {
+		free(buf);
+		return 0;
+	}
+
+	free(src->idle_frame);
+	src->idle_frame = buf;
+	src->idle_size = st.st_size;
+	src->idle_mtime = st.st_mtime;
+	return 1;
+}
+
+/* Once a second while idle, pick up a re-rendered card. Cheap: the renderer
+ * only rewrites the file when the status actually changed, so mtime is stable
+ * and this is a bare stat() in the common case. */
+static void idle_frame_refresh(struct v4l2_source *src)
+{
+	struct stat st;
+	time_t now = time(NULL);
+
+	if (now == src->idle_checked)
+		return;
+	src->idle_checked = now;
+
+	if (stat(IDLE_FRAME_PATH, &st) == 0 && st.st_mtime != src->idle_mtime)
+		idle_frame_load(src);
+}
+
 static void v4l2_source_fill_buffer(struct video_source *s, struct video_buffer *buf)
 {
 	struct v4l2_source *src = to_v4l2_source(s);
@@ -154,25 +176,20 @@ static void v4l2_source_fill_buffer(struct video_source *s, struct video_buffer 
 			src->n_err++;
 			src->last_errno = -ret;
 		}
-		/* We are idle (no live frame arriving). Once per second, refresh the
-		 * status card from disk if the renderer has rewritten it — this is what
-		 * makes the Wi-Fi/Internet/USB ticks the meeting laptop sees actually
-		 * LIVE. Also swap back to the card if we're currently holding the
-		 * presenter's last video frame. Without this the pump loaded the card
-		 * exactly once at startup and a bridge that lost Wi-Fi kept showing
-		 * a green tick forever. */
-		{
-			time_t now = time(NULL);
-			if (now != src->idle_checked) {
-				struct stat st;
-				src->idle_checked = now;
-				if (stat(IDLE_FRAME_PATH, &st) == 0 &&
-				    (src->holds_live || st.st_mtime != src->idle_mtime))
-					idle_frame_load(src);
-			}
-		}
-
-		if (src->last_frame && src->last_size) {
+		/* No fresh frame this cycle. If fresh video stopped IDLE_FALLBACK_S+
+		 * seconds ago (or never started), serve the status card; otherwise
+		 * hold the last real frame so brief blips don't disturb a meeting. */
+		idle_frame_refresh(src);
+		if (src->idle_frame && src->idle_size &&
+		    (src->last_fresh == 0 ||
+		     time(NULL) - src->last_fresh >= IDLE_FALLBACK_S)) {
+			n = src->idle_size;
+			if (n > buf->size)
+				n = buf->size;
+			memcpy(buf->mem, src->idle_frame, n);
+			buf->bytesused = n;
+			src->n_idle++;
+		} else if (src->last_frame && src->last_size) {
 			n = src->last_size;
 			if (n > buf->size)
 				n = buf->size;
@@ -194,6 +211,30 @@ static void v4l2_source_fill_buffer(struct video_source *s, struct video_buffer 
 	if (n > buf->size)
 		n = buf->size;
 
+	/* v4l2loopback re-serves the last written frame at frame rate forever,
+	 * so a successful dequeue does NOT mean fresh video. Only a frame whose
+	 * bytes differ from the previous one counts as fresh (a live camera
+	 * always differs; a dead source repeats itself exactly). After
+	 * IDLE_FALLBACK_S of exact repeats, serve the status card instead. */
+	if (src->last_frame && src->last_size == n &&
+	    memcmp(src->last_frame, sbuf.mem, n) == 0) {
+		if (src->idle_frame && src->idle_size && src->last_fresh &&
+		    time(NULL) - src->last_fresh >= IDLE_FALLBACK_S) {
+			unsigned int m = src->idle_size;
+			if (m > buf->size)
+				m = buf->size;
+			memcpy(buf->mem, src->idle_frame, m);
+			buf->bytesused = m;
+			src->last_used = m;
+			src->n_idle++;
+			v4l2_queue_buffer(src->vdev, &sbuf);
+			pump_report(src);
+			return;
+		}
+	} else {
+		src->last_fresh = time(NULL);
+	}
+
 	memcpy(buf->mem, sbuf.mem, n);
 	buf->bytesused = n;
 	src->last_used = n;
@@ -206,7 +247,6 @@ static void v4l2_source_fill_buffer(struct video_source *s, struct video_buffer 
 	if (src->last_frame) {
 		memcpy(src->last_frame, sbuf.mem, n);
 		src->last_size = n;
-		src->holds_live = 1;
 	}
 
 	v4l2_queue_buffer(src->vdev, &sbuf);
@@ -297,13 +337,10 @@ struct video_source *v4l2_video_source_create(const char *devname)
 
 	/* RepliKam: preload the rendered status frame so the host sees
 	 * "bridge online, waiting for presenter" until real video arrives
-	 * (replaced naturally by the first live frame, and reloaded from disk
-	 * whenever we go idle again — see v4l2_source_fill_buffer). */
-	{
-		if (idle_frame_load(src))
-			fprintf(stderr, "pump: idle status frame loaded (%u bytes)\n",
-				src->last_size);
-	}
+	 * (replaced naturally by the first live frame). */
+	if (idle_frame_load(src))
+		fprintf(stderr, "pump: idle status frame loaded (%u bytes)\n",
+			src->idle_size);
 
 	if (src->vdev->type != V4L2_BUF_TYPE_VIDEO_CAPTURE) {
 		fprintf(stderr, "v4l2 device does not support video capture\n");
