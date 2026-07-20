@@ -46,7 +46,22 @@ cmd_status(){
   local sig=$(awk 'NR>2{gsub(/\./,"",$4); print $4}' /proc/net/wireless 2>/dev/null)
   [ -n "$sig" ] && line "wifi signal" "${sig} dBm"
   line "uptime" "$(uptime -p 2>/dev/null | sed 's/up //')"
-  line "watchdog" "timer=$(systemctl is-active bridge-watchdog.timer)  hw=$(systemctl show -p RuntimeWatchdogUSec --value)"
+  # Report these separately. They used to share one line reading
+  # "watchdog timer=active hw=0", where "active" referred to the SOFTWARE
+  # self-heal timer — so the line looked healthy while the HARDWARE watchdog was
+  # switched off. That is how a disabled watchdog hid for two weeks, until a hang
+  # needed a physical replug to recover.
+  local hwstate=$(cat /sys/class/watchdog/watchdog0/state 2>/dev/null)
+  local hwsec=$(systemctl show -p RuntimeWatchdogUSec --value)
+  # NOT red when off: it is off DELIBERATELY (commit f370860 — arming it at 15s
+  # caused a boot-with-client-attached reboot spiral). Stating the trade-off beats
+  # both a scary red line and the old line that hid it entirely.
+  if [ "$hwstate" = active ]; then
+    ok   "watchdog (hardware)" "armed, ${hwsec} — a hang self-recovers"
+  else
+    line "watchdog (hardware)" "off by design (boot-with-client spiral) — a hang needs a replug"
+  fi
+  line "self-heal timer" "$(systemctl is-active bridge-watchdog.timer)  (restarts dead services every 30s)"
 }
 
 restart_media(){
