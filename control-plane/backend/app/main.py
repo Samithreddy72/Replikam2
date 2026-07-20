@@ -34,10 +34,19 @@ Base.metadata.create_all(engine)
 # columns that shipped after first deploy. Idempotent; sqlite-friendly.
 def _migrate():
     from sqlalchemy import inspect as _inspect, text as _text
-    cols = {c["name"] for c in _inspect(engine).get_columns("devices")}
+    insp = _inspect(engine)
+    def cols(t):
+        try: return {c["name"] for c in insp.get_columns(t)}
+        except Exception: return set()
     with engine.begin() as conn:
-        if "provision" not in cols:
+        if "provision" not in cols("devices"):
             conn.execute(_text("ALTER TABLE devices ADD COLUMN provision JSON"))
+        # M5 org scoping: existing users/audit predate org_id — add it, default
+        # 'default' so the current single-org fleet keeps working unchanged.
+        if "users" in insp.get_table_names() and "org_id" not in cols("users"):
+            conn.execute(_text("ALTER TABLE users ADD COLUMN org_id VARCHAR DEFAULT 'default'"))
+        if "audit_log" in insp.get_table_names() and "org_id" not in cols("audit_log"):
+            conn.execute(_text("ALTER TABLE audit_log ADD COLUMN org_id VARCHAR DEFAULT 'default'"))
 _migrate()
 
 
@@ -66,7 +75,9 @@ def enroll(body: EnrollIn, db: Session = Depends(get_db)):
     token, token_hash = auth.new_device_token()
     dev = db.get(Device, body.device_id)
     if dev is None:
-        dev = Device(id=body.device_id)
+        # The bootstrap token decides which org the device enrolls into, so a
+        # customer's cards land directly in their org (never visible to others).
+        dev = Device(id=body.device_id, org_id=settings.bootstrap_tokens[body.bootstrap_token])
         db.add(dev)
     dev.pairing_code = body.pairing_code
     dev.version = body.version
@@ -181,17 +192,16 @@ def _device_view(dev: Device) -> dict:
 
 
 @app.get("/admin/devices")
-def list_devices(_: str = Depends(auth.require_viewer), db: Session = Depends(get_db)):
-    devs = db.scalars(select(Device).order_by(Device.name.is_(None), Device.name)).all()
+def list_devices(actor=Depends(auth.require_viewer), db: Session = Depends(get_db)):
+    devs = db.scalars(select(Device).where(Device.org_id == actor.org)
+                      .order_by(Device.name.is_(None), Device.name)).all()
     return [_device_view(d) for d in devs]
 
 
 @app.get("/admin/devices/{device_id}")
-def device_detail(device_id: str, _: str = Depends(auth.require_viewer),
+def device_detail(device_id: str, actor=Depends(auth.require_viewer),
                   db: Session = Depends(get_db)):
-    dev = db.get(Device, device_id)
-    if not dev:
-        raise HTTPException(404, "device not found")
+    dev = _scoped_device(db, device_id, actor)
     view = _device_view(dev)
     rows = db.scalars(
         select(Telemetry).where(Telemetry.device_id == device_id)
@@ -209,11 +219,9 @@ def device_detail(device_id: str, _: str = Depends(auth.require_viewer),
 
 
 @app.post("/admin/devices/{device_id}/claim")
-def claim_device(device_id: str, body: ClaimIn, who: str = Depends(auth.require_admin),
+def claim_device(device_id: str, body: ClaimIn, actor=Depends(auth.require_admin),
                  db: Session = Depends(get_db)):
-    dev = db.get(Device, device_id)
-    if not dev:
-        raise HTTPException(404, "device not found")
+    dev = _scoped_device(db, device_id, actor)
     dev.name = body.name
     if dev.claimed_at is None:
         dev.claimed_at = utcnow()
@@ -222,54 +230,52 @@ def claim_device(device_id: str, body: ClaimIn, who: str = Depends(auth.require_
         # next GET /v1/provision returns it once and the server forgets it.
         dev.provision = body.provision
     db.commit()
-    _audit(db, who, "claim", "%s -> %s" % (dev.pairing_code or device_id, body.name))
+    _audit(db, actor, "claim", "%s -> %s" % (dev.pairing_code or device_id, body.name))
     return _device_view(dev)
 
 
 @app.post("/admin/devices/{device_id}/commands")
-def issue_command(device_id: str, body: IssueCommandIn, who: str = Depends(auth.require_admin),
+def issue_command(device_id: str, body: IssueCommandIn, actor=Depends(auth.require_admin),
                   db: Session = Depends(get_db)):
     if body.type not in ALLOWED_COMMANDS:
         raise HTTPException(400, "unsupported command type")
-    dev = db.get(Device, device_id)
-    if not dev:
-        raise HTTPException(404, "device not found")
+    dev = _scoped_device(db, device_id, actor)
     c = Command(device_id=device_id, type=body.type, args=body.args or {})
     db.add(c)
     db.commit()
     # audit: never include args (set-pin/unlock carry the PIN)
-    _audit(db, who, "command:%s" % body.type, dev.name or device_id)
+    _audit(db, actor, "command:%s" % body.type, dev.name or device_id)
     return {"id": c.id, "status": c.status}
 
 
 @app.post("/admin/commands/broadcast")
-def broadcast_command(body: IssueCommandIn, who: str = Depends(auth.require_admin),
+def broadcast_command(body: IssueCommandIn, actor=Depends(auth.require_admin),
                       db: Session = Depends(get_db)):
-    """Queue the same command for every enrolled device (fleet-wide action)."""
+    """Queue the same command for every device IN THE CALLER'S ORG."""
     if body.type not in ALLOWED_COMMANDS:
         raise HTTPException(400, "unsupported command type")
     ids = []
-    for dev in db.scalars(select(Device)).all():
+    for dev in db.scalars(select(Device).where(Device.org_id == actor.org)).all():
         c = Command(device_id=dev.id, type=body.type, args=body.args or {})
         db.add(c)
         db.flush()
         ids.append({"device": dev.name or dev.id, "command_id": c.id})
     db.commit()
-    _audit(db, who, "broadcast:%s" % body.type, "%d device(s)" % len(ids))
+    _audit(db, actor, "broadcast:%s" % body.type, "%d device(s)" % len(ids))
     return {"queued": ids}
 
 
 @app.get("/admin/alerts")
-def all_alerts(_: str = Depends(auth.require_viewer), db: Session = Depends(get_db)):
+def all_alerts(actor=Depends(auth.require_viewer), db: Session = Depends(get_db)):
     out = []
-    for dev in db.scalars(select(Device)).all():
+    for dev in db.scalars(select(Device).where(Device.org_id == actor.org)).all():
         for a in device_alerts(dev):
             out.append({"device_id": dev.id, "name": dev.name, **a})
     return out
 
 
 @app.get("/admin/devices/{device_id}/uptime")
-def device_uptime(device_id: str, _: str = Depends(auth.require_viewer),
+def device_uptime(device_id: str, actor=Depends(auth.require_viewer),
                   db: Session = Depends(get_db)):
     """Uptime/SLA from telemetry ticks (~15s): minute-coverage over rolling 24h
     windows for the last 7 days, plus outage incidents (tick gaps > 120s).
@@ -280,6 +286,7 @@ def device_uptime(device_id: str, _: str = Depends(auth.require_viewer),
     count this endpoint sums for raw, so a rolled day scores identically. The
     raw-keep window is a whole number of hours, so each 24h window falls entirely
     on one side of the boundary — no window is half raw, half rolled."""
+    _scoped_device(db, device_id, actor)   # 404 if not in the caller's org
     from .models import TelemetryRollup
     now = utcnow().replace(tzinfo=None)
     since = now - dt.timedelta(days=7)
@@ -346,8 +353,9 @@ def device_uptime(device_id: str, _: str = Depends(auth.require_viewer),
 
 
 @app.get("/admin/devices/{device_id}/diagnostics")
-def list_diagnostics(device_id: str, _: str = Depends(auth.require_admin),
+def list_diagnostics(device_id: str, actor=Depends(auth.require_admin),
                      db: Session = Depends(get_db)):
+    _scoped_device(db, device_id, actor)   # 404 if not in the caller's org
     rows = db.scalars(select(DiagBundle).where(DiagBundle.device_id == device_id)
                       .order_by(desc(DiagBundle.created_at))).all()
     return [{"id": b.id, "filename": b.filename, "size": b.size,
@@ -355,34 +363,54 @@ def list_diagnostics(device_id: str, _: str = Depends(auth.require_admin),
 
 
 @app.get("/admin/diagnostics/{bundle_id}")
-def download_diagnostics(bundle_id: int, _: str = Depends(auth.require_admin),
+def download_diagnostics(bundle_id: int, actor=Depends(auth.require_admin),
                          db: Session = Depends(get_db)):
     from fastapi import Response
     b = db.get(DiagBundle, bundle_id)
     if not b:
         raise HTTPException(404, "bundle not found")
+    # A bundle belongs to a device — enforce that device is in the caller's org.
+    bdev = db.get(Device, b.device_id)
+    if not bdev or bdev.org_id != actor.org:
+        raise HTTPException(404, "bundle not found")
     return Response(content=b.data, media_type="application/gzip",
                     headers={"Content-Disposition": 'attachment; filename="%s"' % b.filename})
 
 
-def _audit(db: Session, who: str, action: str, target: str | None = None):
-    db.add(AuditLog(who=who, action=action, target=target))
+def _audit(db: Session, actor, action: str, target: str | None = None):
+    # actor may be an auth.Actor (has .email/.org) or a bare string+org for the
+    # redeem path (no actor yet). Store both who and the org the action was in.
+    if hasattr(actor, "email"):
+        who, org = actor.email, actor.org
+    else:
+        who, org = str(actor), "default"
+    db.add(AuditLog(who=who, org_id=org, action=action, target=target))
     db.commit()
 
 
+def _scoped_device(db: Session, device_id: str, actor) -> Device:
+    """Fetch a device the actor is allowed to see, or 404. Cross-org is answered
+    identically to 'not found' so one org can't probe another's device ids."""
+    dev = db.get(Device, device_id)
+    if not dev or dev.org_id != actor.org:
+        raise HTTPException(404, "device not found")
+    return dev
+
+
 @app.get("/admin/users")
-def list_users(_: str = Depends(auth.require_admin), db: Session = Depends(get_db)):
+def list_users(actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
     return [{"id": u.id, "email": u.email, "role": u.role,
              "pending_invite": u.invite_hash is not None,
              "last_seen": u.last_seen.isoformat() if u.last_seen else None}
-            for u in db.scalars(select(User).order_by(User.created_at)).all()]
+            for u in db.scalars(select(User).where(User.org_id == actor.org)
+                                .order_by(User.created_at)).all()]
 
 
 @app.post("/admin/users")
-def add_user(body: dict, who: str = Depends(auth.require_admin),
+def add_user(body: dict, actor=Depends(auth.require_admin),
              db: Session = Depends(get_db)):
-    """Create a user + one-time invite token. The invite is returned ONCE and
-    never stored in plaintext — the admin delivers it offline (like the PINs)."""
+    """Create a user IN THE ADMIN'S ORG + a one-time invite token. The invite is
+    returned ONCE and never stored in plaintext — delivered offline (like PINs)."""
     import re as _re
     email = str(body.get("email") or "").strip().lower()
     role = str(body.get("role") or "presenter")
@@ -394,22 +422,22 @@ def add_user(body: dict, who: str = Depends(auth.require_admin),
         raise HTTPException(409, "user already exists")
     import secrets as _s
     invite = _s.token_urlsafe(24)
-    db.add(User(email=email, role=role, invite_hash=auth.hash_token(invite)))
+    db.add(User(email=email, org_id=actor.org, role=role, invite_hash=auth.hash_token(invite)))
     db.commit()
-    _audit(db, who, "user:add", "%s (%s)" % (email, role))
+    _audit(db, actor, "user:add", "%s (%s)" % (email, role))
     return {"email": email, "role": role, "invite": invite}
 
 
 @app.delete("/admin/users/{uid}")
-def revoke_user(uid: int, who: str = Depends(auth.require_admin),
+def revoke_user(uid: int, actor=Depends(auth.require_admin),
                 db: Session = Depends(get_db)):
     u = db.get(User, uid)
-    if not u:
-        raise HTTPException(404, "no such user")
+    if not u or u.org_id != actor.org:
+        raise HTTPException(404, "no such user")   # cross-org: indistinguishable from absent
     email = u.email
     db.delete(u)
     db.commit()
-    _audit(db, who, "user:revoke", email)
+    _audit(db, actor, "user:revoke", email)
     return {"ok": True}
 
 
@@ -425,34 +453,37 @@ def redeem_invite(body: dict, db: Session = Depends(get_db)):
     u.token_hash = auth.hash_token(token)
     u.invite_hash = None            # single use
     db.commit()
-    _audit(db, u.email, "user:redeem-invite")
+    _audit(db, auth.Actor(u.email, u.org_id, u.role), "user:redeem-invite")
     return {"email": u.email, "role": u.role, "token": token}
 
 
 @app.get("/auth/whoami")
-def whoami(who: str = Depends(auth.require_viewer), db: Session = Depends(get_db)):
-    if who == "bootstrap-key":
-        return {"who": "bootstrap-key", "role": "admin",
+def whoami(actor=Depends(auth.require_viewer), db: Session = Depends(get_db)):
+    if actor.is_bootstrap:
+        return {"who": "bootstrap-key", "org": actor.org, "role": "admin",
                 "bootstrap": True,
                 "notice": "Shared bootstrap key — create an admin account "
                           "(Team → add user, role admin) and this key stops working."}
-    u = db.scalar(select(User).where(User.email == who))
-    return {"who": who, "role": u.role if u else "presenter"}
+    return {"who": actor.email, "org": actor.org, "role": actor.role}
 
 
 @app.get("/admin/audit")
-def audit_log(_: str = Depends(auth.require_admin), db: Session = Depends(get_db)):
-    rows = db.scalars(select(AuditLog).order_by(desc(AuditLog.ts)).limit(30)).all()
+def audit_log(actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
+    rows = db.scalars(select(AuditLog).where(AuditLog.org_id == actor.org)
+                      .order_by(desc(AuditLog.ts)).limit(30)).all()
     return [{"who": a.who, "action": a.action, "target": a.target,
              "ts": a.ts.isoformat() if a.ts else None} for a in rows]
 
 
 @app.get("/admin/alerts/history")
-def alerts_history(_: str = Depends(auth.require_admin), db: Session = Depends(get_db)):
-    """Recent alert episodes (fired + resolved), newest first — so an admin can
-    see that a bridge flapped overnight even though no one had the panel open."""
+def alerts_history(actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
+    """Recent alert episodes (fired + resolved) for the caller's org, newest
+    first — so an admin can see that a bridge flapped overnight even though no
+    one had the panel open."""
     from .models import AlertEvent
-    rows = db.scalars(select(AlertEvent).order_by(desc(AlertEvent.opened_at)).limit(50)).all()
+    org_ids = {d.id for d in db.scalars(select(Device).where(Device.org_id == actor.org)).all()}
+    rows = db.scalars(select(AlertEvent).order_by(desc(AlertEvent.opened_at)).limit(200)).all()
+    rows = [e for e in rows if e.device_id in org_ids][:50]
     return [{"device_id": e.device_id, "kind": e.kind, "detail": e.detail,
              "opened_at": e.opened_at.isoformat() if e.opened_at else None,
              "notified": e.notified_at is not None,
@@ -461,7 +492,7 @@ def alerts_history(_: str = Depends(auth.require_admin), db: Session = Depends(g
 
 
 @app.post("/admin/alerts/test")
-def alerts_test(who: str = Depends(auth.require_admin)):
+def alerts_test(who=Depends(auth.require_admin)):
     """Send a synthetic alert through every configured channel, so an admin can
     confirm their webhook/email is wired WITHOUT unplugging a bridge to trigger a
     real one. Reports exactly which channels fired."""

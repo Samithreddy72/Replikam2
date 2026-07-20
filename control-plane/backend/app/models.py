@@ -52,6 +52,7 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String, unique=True, index=True)
+    org_id: Mapped[str] = mapped_column(String, default="default", index=True)  # multi-tenant scope
     role: Mapped[str] = mapped_column(String, default="presenter")   # admin | presenter
     invite_hash: Mapped[str | None] = mapped_column(String, nullable=True)  # cleared on redeem
     token_hash: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
@@ -64,7 +65,8 @@ class AuditLog(Base):
     __tablename__ = "audit_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    who: Mapped[str] = mapped_column(String)          # email or "legacy-key"
+    who: Mapped[str] = mapped_column(String)          # email or "bootstrap-key"
+    org_id: Mapped[str] = mapped_column(String, default="default", index=True)  # scope of the action
     action: Mapped[str] = mapped_column(String)       # e.g. command:restart, claim, user:add
     target: Mapped[str | None] = mapped_column(String, nullable=True)
     ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

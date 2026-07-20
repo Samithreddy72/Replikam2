@@ -10,9 +10,14 @@ class Settings:
     #   postgresql+psycopg://bridge:bridge@localhost/bridge
     database_url = os.getenv("DATABASE_URL", "sqlite:///./bridge.db")
 
-    # Comma-separated set of valid one-time-ish bootstrap tokens that flashed Pis
-    # present at first enrollment. Rotate regularly. NEVER commit real values.
-    bootstrap_tokens = [t for t in os.getenv("BOOTSTRAP_TOKENS", "").split(",") if t]
+    # Bootstrap tokens flashed Pis present at first enrollment, as a comma list of
+    # `token` or `token:org`. A bare token enrolls the device into org "default";
+    # `token:acme` enrolls it directly into org "acme" (multi-tenant). Rotate
+    # regularly. NEVER commit real values. Stored token -> org.
+    bootstrap_tokens = {
+        (t.split(":", 1)[0] if ":" in t else t): (t.split(":", 1)[1] if ":" in t else "default")
+        for t in os.getenv("BOOTSTRAP_TOKENS", "").split(",") if t
+    }
 
     # BOOTSTRAP-ONLY admin key. Real auth is per-admin accounts (User.role=admin);
     # this key only works until the first admin account exists, then auth.py
