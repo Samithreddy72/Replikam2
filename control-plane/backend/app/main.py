@@ -42,13 +42,14 @@ _migrate()
 
 
 @app.on_event("startup")
-async def _start_retention():
-    """Hourly retention sweep (retention.py) — the thing that keeps the fleet DB
-    flat regardless of how much traffic the devices generate."""
+async def _start_background():
+    """Background loops: hourly retention sweep, and the alert evaluator that
+    pushes new/cleared alerts out by email/webhook (walkthrough J4)."""
     import asyncio
     from .db import SessionLocal
-    from . import retention
+    from . import retention, alerting
     asyncio.create_task(retention.sweep_loop(SessionLocal))
+    asyncio.create_task(alerting.evaluate_loop(SessionLocal, settings.alert_eval_interval_s))
 
 
 @app.get("/healthz")
@@ -417,6 +418,35 @@ def audit_log(_: str = Depends(auth.require_admin), db: Session = Depends(get_db
     rows = db.scalars(select(AuditLog).order_by(desc(AuditLog.ts)).limit(30)).all()
     return [{"who": a.who, "action": a.action, "target": a.target,
              "ts": a.ts.isoformat() if a.ts else None} for a in rows]
+
+
+@app.get("/admin/alerts/history")
+def alerts_history(_: str = Depends(auth.require_admin), db: Session = Depends(get_db)):
+    """Recent alert episodes (fired + resolved), newest first — so an admin can
+    see that a bridge flapped overnight even though no one had the panel open."""
+    from .models import AlertEvent
+    rows = db.scalars(select(AlertEvent).order_by(desc(AlertEvent.opened_at)).limit(50)).all()
+    return [{"device_id": e.device_id, "kind": e.kind, "detail": e.detail,
+             "opened_at": e.opened_at.isoformat() if e.opened_at else None,
+             "notified": e.notified_at is not None,
+             "resolved_at": e.resolved_at.isoformat() if e.resolved_at else None}
+            for e in rows]
+
+
+@app.post("/admin/alerts/test")
+def alerts_test(who: str = Depends(auth.require_admin)):
+    """Send a synthetic alert through every configured channel, so an admin can
+    confirm their webhook/email is wired WITHOUT unplugging a bridge to trigger a
+    real one. Reports exactly which channels fired."""
+    from . import notifier
+    if not notifier.any_channel_configured():
+        raise HTTPException(400, "no alert channel configured — set ALERT_WEBHOOK_URL or SMTP_*")
+    payload = notifier.build_message(
+        "test-bridge", "TEST", "offline",
+        "this is a NetBridge test alert sent by %s" % who, "firing",
+        {"command": "none", "label": "no action — test only"})
+    results = notifier.deliver(payload)
+    return {"sent": results, "ok": any(results.values())}
 
 
 # ----------------------------- admin panel (static) -----------------------------

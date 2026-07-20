@@ -70,6 +70,27 @@ class AuditLog(Base):
     ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class AlertEvent(Base):
+    """One row per (device, alert-kind) episode — the memory that turns
+    level-triggered detection (device_alerts, recomputed on every read) into
+    edge-triggered notifications. Without this, a bridge that stays offline for
+    three days would send an alert email on every evaluation tick.
+
+    Lifecycle: created when an alert first appears (opened_at set, notified_at
+    set once delivery succeeds); resolved_at set when it clears. A recurrence
+    after resolution is a NEW row, so 'offline again' pages again."""
+    __tablename__ = "alert_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    kind: Mapped[str] = mapped_column(String, index=True)       # offline | throttled | ...
+    detail: Mapped[str | None] = mapped_column(String, nullable=True)
+    opened_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    notified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolve_notified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class DiagBundle(Base):
     """A diagnostics bundle the device collected and uploaded (walkthrough J4:
     'Bundle ready … Download bundle'). Bundles are small tgz files (~15-50 KB);

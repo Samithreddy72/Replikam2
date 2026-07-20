@@ -28,6 +28,19 @@ class Settings:
     # Alert thresholds.
     temp_alert_c = float(os.getenv("TEMP_ALERT_C", "75"))
 
+    # ── Alert delivery (notifier.py). All optional; unset = that channel off.
+    # With NOTHING set, alerts are still detected and shown in the panel — they
+    # just aren't pushed. This is the walkthrough's "page you by email or webhook".
+    alert_eval_interval_s = int(os.getenv("ALERT_EVAL_INTERVAL_S", "30"))
+    alert_webhook_url = os.getenv("ALERT_WEBHOOK_URL", "")   # POST JSON here (Slack/Discord/n8n/…)
+    smtp_host = os.getenv("SMTP_HOST", "")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER", "")
+    smtp_password = os.getenv("SMTP_PASSWORD", "")
+    smtp_starttls = os.getenv("SMTP_STARTTLS", "1") not in ("0", "false", "no", "")
+    alert_email_from = os.getenv("ALERT_EMAIL_FROM", "")
+    alert_email_to = os.getenv("ALERT_EMAIL_TO", "")
+
     # Retention windows (see retention.py). Telemetry cannot go below 7 days
     # without also changing /admin/devices/{id}/uptime, which reads a rolling
     # 7-day window of raw ticks.
