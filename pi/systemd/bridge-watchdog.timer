@@ -1,8 +1,11 @@
 [Unit]
-Description=Run NetBridge watchdog every 30s
+Description=NetBridge watchdog backstop (bridge-supervisor.sh is the fast event path)
 [Timer]
-OnBootSec=45
-OnUnitActiveSec=30
-AccuracySec=5
+# Recovery is event-driven now (bridge-supervisor.service reacts to udev in ~1-2s).
+# This timer is only a slow backstop for anything udev can't see — every 5 min
+# instead of 30s, which also means ~10x fewer scheduled wakeups on the Pi.
+OnBootSec=60
+OnUnitActiveSec=300
+AccuracySec=30
 [Install]
 WantedBy=timers.target

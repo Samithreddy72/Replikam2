@@ -1,0 +1,14 @@
+[Unit]
+Description=NetBridge event-driven pipeline supervisor (fast recovery via udev)
+After=bridge-gadget.service
+Wants=bridge-gadget.service
+
+[Service]
+ExecStart=/usr/local/bin/bridge-supervisor.sh
+Restart=always
+RestartSec=3
+# It mostly sleeps in a blocking udev read; keep it light.
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
