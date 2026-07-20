@@ -6,9 +6,13 @@
 #  Example: bash make-card.sh 7          → makes bridge-007 (auto-detects the SD)
 #
 #  Per card: flashes factory/replikam-golden.img + injects that unit's
-#  provisioning conf (hostname bridge-0NN + fleet secrets from fleet.conf).
-#  On first boot the card joins the tailnet, enrolls with the control plane,
-#  and appears in the admin panel — zero further touch.
+#  provisioning conf (hostname bridge-0NN + fleet bootstrap from fleet.conf).
+#  KEY-AT-CLAIM (M10): the card carries NO tailnet key. On first boot it enrolls
+#  with the control plane over its public HTTPS URL using only a bootstrap token,
+#  then the admin claims it and the tailnet key is delivered once. So a lost card
+#  is not a live tailnet key.
+#  ⚠️ CONTROL_URL in fleet.conf MUST be publicly reachable — a tailnet-only URL
+#     deadlocks a keyless card (can't reach the control plane to get on the tailnet).
 #
 #  One-time prereqs:
 #    1. Create the golden image (see GOLDEN-IMAGE.md) at factory/replikam-golden.img
@@ -49,9 +53,11 @@ echo "══ stamping bridge-$NN ══"
 sleep 3; diskutil mountDisk "$DISK" >/dev/null 2>&1 || true; sleep 3
 BOOT=$(ls -d /Volumes/bootfs /Volumes/boot 2>/dev/null | head -1)
 [ -n "$BOOT" ] || { echo "❌ boot partition didn't mount — remove/reinsert the card, then run: bash inject-only.sh $NN"; exit 1; }
+# No TS_AUTHKEY on the card (key-at-claim). Only identity hint + enrollment
+# bootstrap. TS_HOSTNAME is kept as a friendly default the agent can pass at the
+# claim-time `tailscale up`; it is not a secret.
 TMP=$(mktemp)
 cat > "$TMP" <<EOF
-TS_AUTHKEY=$TS_AUTHKEY
 TS_HOSTNAME=bridge-$NN
 CONTROL_URL=$CONTROL_URL
 BOOTSTRAP_TOKEN=$BOOTSTRAP_TOKEN
@@ -59,8 +65,15 @@ BRIDGE_VERSION=${BRIDGE_VERSION:-2.0.0}
 EOF
 install -m 600 "$TMP" "$BOOT/bridge-provision.conf"
 rm -f "$TMP"
-echo "  ✓ provision conf written (first boot consumes + shreds it)"
+case "$CONTROL_URL" in
+  https://*) : ;;
+  *) echo "  ⚠️  CONTROL_URL is not https:// — a keyless card can only enroll over a"
+     echo "      publicly reachable HTTPS control plane. A tailnet/localhost URL will"
+     echo "      leave this card unable to enroll. (See fleet.conf.example.)" ;;
+esac
+echo "  ✓ provision conf written — NO tailnet key on the card (key-at-claim)"
 diskutil eject "$DISK"
 echo ""
 echo "🏭 bridge-$NN card READY — insert into a Pi, power on, and it appears"
-echo "   in the admin panel within ~2 minutes. Insert the next card and re-run."
+echo "   in the admin panel as UNCLAIMED within ~2 minutes. Claim it there to"
+echo "   deliver its tailnet key and bring it online. Insert the next card and re-run."

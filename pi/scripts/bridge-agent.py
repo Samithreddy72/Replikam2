@@ -166,7 +166,7 @@ def syslog(msg):
 def apply_provision(base, token):
     """Pull the one-time provisioning payload issued at claim and apply it.
     Safe to call every tick: the server returns {"provision": null} once consumed.
-    Recognised keys: tailscale_authkey (+ optional tailscale_hostname). Unknown
+    Recognised keys: tailscale_auth_key (+ optional tailscale_hostname). Unknown
     keys are logged and ignored. Never raises into the tick."""
     try:
         resp = http("GET", base + "/v1/provision", token=token)
@@ -176,10 +176,14 @@ def apply_provision(base, token):
     if not payload:
         return
     syslog("provision received: keys=%s" % ",".join(sorted(payload.keys())))
-    key = payload.get("tailscale_authkey")
+    # Accept BOTH spellings. The docs/schema/claim examples all say
+    # `tailscale_auth_key` (canonical), but this code used to read only
+    # `tailscale_authkey` — so a claim that followed the docs silently did
+    # nothing and the bridge never joined the mesh. Take either, canonical first.
+    key = payload.get("tailscale_auth_key") or payload.get("tailscale_authkey")
     if key:
         argv = ["tailscale", "up", "--authkey", key, "--reset"]
-        host = payload.get("tailscale_hostname")
+        host = payload.get("tailscale_hostname") or payload.get("tailscale_host")
         if host:
             argv += ["--hostname", host]
         try:

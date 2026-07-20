@@ -1,7 +1,9 @@
 # Provisioning v2 — secret-free images, key-at-claim
 
-**Status:** backend implemented + verified live (2026-07-07). Agent/firstboot consumption is
-staged work — see "Not yet built" at the bottom.
+**Status:** backend + agent + firstboot implemented (2026-07-21). The card no longer
+carries a tailnet key; the agent applies the claim-time key. ONE deployment
+prerequisite remains before a keyless card can enroll in the field — a publicly
+reachable control-plane URL. See "Remaining" at the bottom.
 
 ## The problem with v1
 
@@ -101,13 +103,23 @@ databases are upgraded by a tiny idempotent in-code migration in `main.py` (`_mi
 4. unauthenticated `GET /v1/provision` → `401`
 5. agent telemetry unaffected (last_seen kept advancing after fleet-brain restart)
 
-## Not yet built (next steps)
+## Done (2026-07-21, M10)
 
-- **Agent-side consumption**: `bridge-agent.py` should call `/v1/provision` each tick and
-  apply known keys (`tailscale_auth_key` first). Small, allow-listed applier — same pattern
-  as the command allow-list.
-- **Firstboot without tailscale**: the enroll call needs a network path before the mesh
-  exists — either LAN-local discovery of the control plane or a temporary egress URL.
-- **Generic image build**: strip the baked tailscale state from the golden image;
-  firstboot generates hostname + shows the pairing code on the dashboard (already does).
-- **Admin panel UI**: a "provision" field on the claim dialog.
+- **Agent-side consumption** — `bridge-agent.py:apply_provision()` calls `/v1/provision`
+  each tick and applies `tailscale_auth_key` (accepts the legacy `tailscale_authkey`
+  spelling too — they had silently diverged, so a doc-following claim did nothing).
+- **Firstboot no longer joins from a card key** — it only makes tailscaled ready; the
+  join happens at claim via the delivered key. A legacy card's TS_AUTHKEY is ignored + warned.
+- **Factory** — `make-card.sh` stops injecting `TS_AUTHKEY`; `fleet.conf.example` drops it.
+
+## Remaining
+
+- **⚠️ Public enrollment URL (the real blocker)**: a keyless card enrolls BEFORE it is on
+  the tailnet, so `CONTROL_URL` must be reachable off-tailnet — a public `https://` endpoint
+  (`tailscale serve` / reverse proxy + cert). Today it points at a tailnet IP (100.x), which
+  deadlocks a keyless card. Until this exists, key-at-claim is code-complete but not
+  operable in the field. Co-located dev (bridge-001, CONTROL_URL=127.0.0.1) is unaffected.
+- **Generic image build**: strip baked tailscale state from the golden image so a clone
+  boots unjoined (firstboot already generates hostname + shows the pairing code).
+- **Admin panel UI**: a "provision" field on the claim dialog (today the key is supplied via
+  the claim API body).

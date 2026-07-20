@@ -1,11 +1,14 @@
 #!/bin/bash
 # NetBridge first-boot provisioning. Runs ONCE on a freshly flashed Pi:
-#   1. joins the tailnet with a tagged pre-auth key,
+#   1. makes tailscaled ready (running, but NOT joined — no key on the card),
 #   2. writes the fleet-agent config (CONTROL_URL + one-time bootstrap token),
-#   3. enables the agent timer (which enrolls + starts heartbeating),
+#   3. enables the agent timer (which enrolls over HTTPS + starts heartbeating),
 #   4. shreds the secret-bearing conf and disables itself.
-# Secrets arrive via a conf file dropped on the boot partition at flash time
-# (see provisioning/inject-secrets.sh). Nothing secret is baked into the repo/image.
+# KEY-AT-CLAIM (docs/PROVISIONING-V2.md): the tailnet key is NOT on the SD card.
+# The agent enrolls over the public control-plane HTTPS URL with only a bootstrap
+# token, the admin claims the device, and the tailnet key is delivered ONCE via
+# GET /v1/provision, which bridge-agent's apply_provision() runs as `tailscale up`.
+# So a lost card is no longer a live tailnet key.
 set -euo pipefail
 log(){ logger -t bridge-firstboot "$*"; echo "bridge-firstboot: $*"; }
 
@@ -15,15 +18,21 @@ CONF=/boot/firmware/bridge-provision.conf
 # shellcheck disable=SC1090
 . "$CONF"
 
-# 1. join the tailnet (tag:bridge identity comes from the auth key's ACL tags)
-if command -v tailscale >/dev/null 2>&1 && [ -n "${TS_AUTHKEY:-}" ]; then
-  systemctl enable --now tailscaled || true
-  tailscale up --authkey="$TS_AUTHKEY" \
-    --hostname="${TS_HOSTNAME:-bridge-$(hostname)}" \
-    --accept-dns=false \
-    || log "WARN: tailscale up failed; will retry on next boot if conf kept"
+# 1. tailscaled ready but UNJOINED. The card carries no tailnet key; the join
+# happens later, when the admin claims this device and apply_provision runs
+# `tailscale up --authkey=<key delivered at claim>`. We only need the daemon up
+# and enabled so that call succeeds the moment the key arrives.
+if command -v tailscale >/dev/null 2>&1; then
+  systemctl enable --now tailscaled || log "WARN: could not start tailscaled"
 else
-  log "WARN: tailscale not installed or TS_AUTHKEY missing"
+  log "WARN: tailscale not installed"
+fi
+# A legacy card may still carry TS_AUTHKEY. Ignore it by design — the whole point
+# of key-at-claim is that the key is never on the card. Warn so it's noticed.
+# NB: must be a full `if`, not `[ -n ... ] && log`, because under `set -e` the
+# test failing (the normal keyless case) would abort the whole script.
+if [ -n "${TS_AUTHKEY:-}" ]; then
+  log "NOTE: TS_AUTHKEY present in conf but IGNORED (key-at-claim); remove it from provisioning"
 fi
 
 # 2. fleet-agent config

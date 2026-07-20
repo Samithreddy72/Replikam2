@@ -1,9 +1,18 @@
-# RepliKam fleet secrets — copy to fleet.conf, fill in, NEVER commit fleet.conf.
-# Tailscale: admin console → Settings → Keys → Generate auth key
-#   → Reusable ✓, Expiration 90d, Tags: tag:bridge
-TS_AUTHKEY=tskey-auth-REPLACE_ME
-# The fleet-brain control plane, reachable over the tailnet:
-CONTROL_URL=http://100.91.108.50:8000
-# From ~/Downloads/fleet-admin-credentials.txt (BOOTSTRAP_TOKEN line):
+# RepliKam fleet provisioning — copy to fleet.conf, fill in, NEVER commit fleet.conf.
+#
+# KEY-AT-CLAIM (M10): there is NO tailnet auth key here any more. The card ships
+# without a tailnet key; the key is delivered once when an admin claims the device
+# in the panel. A lost card is therefore not a live tailnet key.
+#
+# CONTROL_URL — where a freshly flashed bridge enrolls. This is the ONE thing that
+# must be right for key-at-claim to work:
+#   ⚠️ It MUST be reachable by a bridge that is NOT yet on the tailnet — i.e. a
+#      PUBLIC https:// URL. A tailnet address (100.x) or localhost will deadlock:
+#      the bridge can't reach the control plane to get the key that would put it
+#      on the tailnet. (Stand up a public HTTPS endpoint — e.g. `tailscale serve`
+#      /a reverse proxy with a real cert — and point this at it.)
+CONTROL_URL=https://fleet.YOURDOMAIN.example
+# From ~/Downloads/fleet-admin-credentials.txt (BOOTSTRAP_TOKEN line). Authorizes
+# ONLY enrollment; rotate server-side (settings.bootstrap_tokens) without reflashing.
 BOOTSTRAP_TOKEN=REPLACE_ME
 BRIDGE_VERSION=2.0.0
