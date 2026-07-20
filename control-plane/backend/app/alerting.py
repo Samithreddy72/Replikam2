@@ -25,7 +25,11 @@ def evaluate(db) -> dict:
     configured = notifier.any_channel_configured()
 
     for dev in db.scalars(select(Device)).all():
-        current = {a["kind"]: a for a in device_alerts(dev)}
+        # Pass db so restart_storm (history-based) is evaluated here in the loop.
+        # The panel read-path calls device_alerts(dev) WITHOUT db to stay a cheap
+        # single-snapshot check; restart storms surface via the notification +
+        # /admin/alerts/history instead of a live panel card.
+        current = {a["kind"]: a for a in device_alerts(dev, db)}
         open_events = {e.kind: e for e in db.scalars(
             select(AlertEvent).where(AlertEvent.device_id == dev.id,
                                      AlertEvent.resolved_at.is_(None))).all()}

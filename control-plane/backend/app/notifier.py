@@ -21,8 +21,8 @@ log = logging.getLogger("notifier")
 
 
 def _severity(kind: str) -> str:
-    # offline / thermal / lockout are the ones you actually want to wake up for.
-    return "critical" if kind in ("offline", "temp_high", "pin_lockout") else "warning"
+    # offline / thermal / lockout / a rebooting bridge are the wake-you-up ones.
+    return "critical" if kind in ("offline", "temp_high", "pin_lockout", "restart_storm") else "warning"
 
 
 def build_message(dev_name: str, dev_id: str, kind: str, detail: str,
@@ -38,11 +38,37 @@ def build_message(dev_name: str, dev_id: str, kind: str, detail: str,
     }
 
 
+def _summary_line(payload: dict) -> str:
+    """One human-readable line for chat apps."""
+    firing = payload["event"] == "firing"
+    icon = ("🔴" if payload["severity"] == "critical" else "🟠") if firing else "🟢"
+    verb = "FIRING" if firing else "RESOLVED"
+    d = payload["device"]
+    s = "%s %s · %s · %s — %s" % (icon, verb, payload["kind"], d["name"], payload["detail"] or "")
+    if firing and payload.get("fix", {}) and payload["fix"].get("label"):
+        s += "  ·  fix: %s" % payload["fix"]["label"]
+    return s.rstrip(" —")
+
+
+def _webhook_body(payload: dict) -> dict:
+    """Shape the payload for the target. Slack wants {text}, Discord wants
+    {content}; a raw consumer (n8n, a custom endpoint) gets the structured data.
+    Explicit format beats guessing — a raw JSON blob renders as nothing in Slack
+    or Discord, which is the whole reason this exists."""
+    fmt = (settings.alert_webhook_format or "raw").lower()
+    line = _summary_line(payload)
+    if fmt == "slack":
+        return {"text": line}
+    if fmt == "discord":
+        return {"content": line}
+    return payload            # raw: full structured object
+
+
 def _send_webhook(payload: dict) -> bool:
     url = settings.alert_webhook_url
     if not url:
         return False
-    data = json.dumps(payload).encode()
+    data = json.dumps(_webhook_body(payload)).encode()
     req = urllib.request.Request(url, data=data, method="POST",
                                  headers={"Content-Type": "application/json"})
     # Short timeout: a slow webhook must not stall the alert loop for every device.
