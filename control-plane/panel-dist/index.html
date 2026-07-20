@@ -84,8 +84,11 @@
   <div id="gate" class="hidden">
     <h2>Sign in</h2>
     <p>Paste your <b>invite</b> (first time) — it becomes your personal token. Already have one? Use the second box. Credentials stay in this browser.</p>
+    <input id="emailin" type="email" placeholder="you@work.com — email me a sign-in link" onkeydown="if(event.key==='Enter')magicLink()" style="margin-bottom:8px">
+    <button onclick="magicLink()">Email me a sign-in link</button>
+    <div style="text-align:center;color:var(--faint);font-size:11px;margin:10px 0 6px">— or —</div>
     <input id="invitein" type="password" placeholder="invite from your admin" onkeydown="if(event.key==='Enter')redeem()" style="margin-bottom:8px">
-    <button onclick="redeem()">Redeem invite &amp; sign in</button>
+    <button onclick="redeem()" style="background:var(--ink)">Redeem invite &amp; sign in</button>
     <div style="text-align:center;color:var(--faint);font-size:11px;margin:10px 0 6px">— or —</div>
     <input id="keyin" type="password" placeholder="personal token (or bootstrap key, first run only)" onkeydown="if(event.key==='Enter')saveKey()">
     <button onclick="saveKey()" style="background:var(--ink)">Sign in with a token</button>
@@ -165,6 +168,33 @@ async function redeem(){
 }
 function changeKey(){ ["nb_admin_key","nb_who","nb_role"].forEach(k=>localStorage.removeItem(k));
   KEY=""; WHO=""; ROLE=""; gate(); }
+async function magicLink(){
+  const email = $("emailin").value.trim();
+  if (!email) return;
+  try {
+    const r = await fetch("/auth/magic-link", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify({email, base_url: location.origin})});
+    // always 200 (no enumeration) — show the same reassuring message either way
+    $("gateerr").style.color = "var(--ok)";
+    $("gateerr").textContent = "Check your email for a sign-in link (expires in 15 min).";
+  } catch(e){ $("gateerr").style.color = ""; $("gateerr").textContent = "couldn't send: " + e.message; }
+}
+async function redeemCode(code){
+  // Called when the emailed link lands here as /signin?code=... — trade it for a token.
+  try {
+    const r = await fetch("/auth/magic-redeem", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify({code})});
+    if (!r.ok) throw new Error((await r.json()).detail || "HTTP "+r.status);
+    const d = await r.json();
+    KEY = d.token; WHO = d.email; ROLE = d.role;
+    localStorage.setItem("nb_admin_key", KEY);
+    localStorage.setItem("nb_who", WHO); localStorage.setItem("nb_role", ROLE);
+    history.replaceState(null, "", location.pathname);   // scrub the code from the URL
+    $("gate").classList.add("hidden"); refresh(true);
+    toast(`welcome, ${d.email} (${d.role})`);
+    return true;
+  } catch(e){ gate("sign-in link: " + e.message); return false; }
+}
 async function syncWho(){
   try { const d = await api("/auth/whoami");
     WHO = d.who; ROLE = d.role;
@@ -431,7 +461,12 @@ async function refresh(first){
     $("tick").textContent = "updated " + new Date().toLocaleTimeString();
   } catch(e){ if (e.message!=="auth" && first) toast("control plane unreachable"); }
 }
-refresh(true);
+// If we arrived from an emailed sign-in link (/signin?code=…), redeem it first.
+(async () => {
+  const code = new URLSearchParams(location.search).get("code");
+  if (code && !KEY) { await redeemCode(code); }
+  refresh(true);
+})();
 setInterval(refresh, 5000);
 </script>
 </body>

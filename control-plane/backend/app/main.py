@@ -47,6 +47,13 @@ def _migrate():
             conn.execute(_text("ALTER TABLE users ADD COLUMN org_id VARCHAR DEFAULT 'default'"))
         if "audit_log" in insp.get_table_names() and "org_id" not in cols("audit_log"):
             conn.execute(_text("ALTER TABLE audit_log ADD COLUMN org_id VARCHAR DEFAULT 'default'"))
+        # M6 magic-link sign-in: one-time login code on the user row.
+        if "users" in insp.get_table_names():
+            ucols = cols("users")
+            if "login_hash" not in ucols:
+                conn.execute(_text("ALTER TABLE users ADD COLUMN login_hash VARCHAR"))
+            if "login_expires" not in ucols:
+                conn.execute(_text("ALTER TABLE users ADD COLUMN login_expires DATETIME"))
 _migrate()
 
 
@@ -455,6 +462,66 @@ def redeem_invite(body: dict, db: Session = Depends(get_db)):
     db.commit()
     _audit(db, auth.Actor(u.email, u.org_id, u.role), "user:redeem-invite")
     return {"email": u.email, "role": u.role, "token": token}
+
+
+@app.post("/auth/magic-link")
+def request_magic_link(body: dict, db: Session = Depends(get_db)):
+    """Email a one-time sign-in code to an existing user (walkthrough J3: "A magic
+    link signs you in"). ALWAYS returns 200 with the same body whether or not the
+    email exists — so this can't be used to discover who has an account. The user
+    must already exist (an admin added them); the code both signs them in and, if
+    they'd never redeemed an invite, becomes their first login."""
+    import re as _re, secrets as _s
+    from .models import User, utcnow
+    from . import notifier
+    email = str(body.get("email") or "").strip().lower()
+    base = str(body.get("base_url") or settings.public_base_url or "").rstrip("/")
+    generic = {"ok": True, "message": "If that email has an account, a sign-in link is on its way."}
+    if not _re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        return generic
+    u = db.scalar(select(User).where(User.email == email))
+    if not u:
+        return generic                      # no enumeration: same response
+    code = _s.token_urlsafe(24)
+    u.login_hash = auth.hash_token(code)
+    u.login_expires = utcnow() + dt.timedelta(minutes=15)
+    db.commit()
+    # Point at the panel root (served at /) with the code as a query param — the
+    # panel redeems it on load. A /signin path would 404 against the static mount.
+    link = ("%s/?code=%s" % (base, code)) if base else None
+    lines = ["Sign in to NetBridge.", ""]
+    if link:
+        lines += ["Open this link to sign in:", link, ""]
+    lines += ["Or paste this code into the NetBridge app:", "", "    %s" % code, "",
+              "It expires in 15 minutes. If you didn't ask to sign in, ignore this email."]
+    try:
+        notifier.send_mail(email, "Your NetBridge sign-in link", "\n".join(lines))
+    except Exception:
+        pass                                # never leak SMTP state to the caller
+    return generic
+
+
+@app.post("/auth/magic-redeem")
+def redeem_magic_link(body: dict, db: Session = Depends(get_db)):
+    """Exchange a magic-link code for the personal bearer token. One use: the code
+    is cleared on success. Rejects expired/unknown codes identically."""
+    import secrets as _s
+    from .models import User, utcnow
+    code = str(body.get("code") or "").strip()
+    u = db.scalar(select(User).where(User.login_hash == auth.hash_token(code))) if code else None
+    now = utcnow()
+    exp = u.login_expires if u else None
+    if exp is not None and exp.tzinfo is None:
+        exp = exp.replace(tzinfo=dt.timezone.utc)
+    if not u or exp is None or exp < now:
+        raise HTTPException(401, "invalid or expired code")
+    token = _s.token_urlsafe(32)
+    u.token_hash = auth.hash_token(token)
+    u.login_hash = None                     # single use
+    u.login_expires = None
+    db.commit()
+    _audit(db, auth.Actor(u.email, u.org_id, u.role), "user:magic-signin")
+    return {"email": u.email, "role": u.role, "org": u.org_id, "token": token}
 
 
 @app.get("/auth/whoami")

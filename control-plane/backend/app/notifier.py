@@ -95,12 +95,34 @@ def _send_email(payload: dict) -> bool:
     msg["To"] = settings.alert_email_to
     msg.set_content("\n".join(lines))
 
+    _smtp_send(msg)
+    return True
+
+
+def _smtp_send(msg: EmailMessage):
     with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as s:
         if settings.smtp_starttls:
             s.starttls()
         if settings.smtp_user:
             s.login(settings.smtp_user, settings.smtp_password)
         s.send_message(msg)
+
+
+def email_configured() -> bool:
+    return bool(settings.smtp_host and settings.alert_email_from)
+
+
+def send_mail(to: str, subject: str, body: str) -> bool:
+    """Generic transactional email over the same SMTP the alerts use (M6 sign-in).
+    Returns False if SMTP isn't configured; raises are the caller's to handle."""
+    if not email_configured():
+        return False
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = settings.alert_email_from
+    msg["To"] = to
+    msg.set_content(body)
+    _smtp_send(msg)
     return True
 
 

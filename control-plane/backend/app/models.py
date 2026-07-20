@@ -56,6 +56,10 @@ class User(Base):
     role: Mapped[str] = mapped_column(String, default="presenter")   # admin | presenter
     invite_hash: Mapped[str | None] = mapped_column(String, nullable=True)  # cleared on redeem
     token_hash: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # Magic-link sign-in (M6): a one-time login code (hashed) + its expiry. Set on
+    # POST /auth/magic-link, consumed by POST /auth/magic-redeem to mint the bearer.
+    login_hash: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    login_expires: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_seen: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

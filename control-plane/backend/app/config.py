@@ -26,6 +26,11 @@ class Settings:
     # publicly-known "dev-admin-key".
     admin_api_key = os.getenv("ADMIN_API_KEY", "")
 
+    # Public URL of the panel/control plane, used to build the magic-link in the
+    # sign-in email (e.g. https://fleet.example). If unset, the email carries just
+    # the paste-in code (which is all the Mac app needs anyway).
+    public_base_url = os.getenv("PUBLIC_BASE_URL", "")
+
     # A device is "offline" if it hasn't sent a heartbeat in this many seconds
     # (agent ticks every 15s).
     offline_after_s = int(os.getenv("OFFLINE_AFTER_S", "60"))
