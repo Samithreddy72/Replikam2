@@ -44,27 +44,50 @@ def _user_for_token(tok: str, db: Session):
     return u
 
 
+def _legacy_key_ok(tok: str, db: Session) -> bool:
+    """The shared org-wide admin key (walkthrough J4 lists `dev-admin-key` under
+    "gone from today"). It is now a BOOTSTRAP credential only: it works while the
+    fleet has no admin user yet, so a fresh deployment can create its first one,
+    and retires itself automatically the moment that account exists.
+
+    Retiring it matters because it is one secret shared by every operator: it
+    cannot be revoked for one person, it cannot be attributed in the audit log
+    (every action it takes is logged as "legacy-key", not a name), and it never
+    expires.
+    """
+    from .models import User
+    if not settings.admin_api_key:
+        return False           # unset = disabled. Without this an empty key
+                               # would make `Authorization: Bearer ` a bypass.
+    if not secrets.compare_digest(tok, settings.admin_api_key):
+        return False
+    # Any real admin account existing means bootstrap is over.
+    return db.scalar(select(User).where(User.role == "admin")) is None
+
+
 def require_admin(authorization: str | None = Header(default=None),
                   db: Session = Depends(get_db)) -> str:
-    """Full fleet control: the legacy shared key, or a personal token whose
-    user has role=admin. Returns the actor's identity for the audit log."""
+    """Full fleet control: a personal token whose user has role=admin (or the
+    bootstrap key while no admin exists). Returns the actor's identity for the
+    audit log."""
     tok = _bearer(authorization)
-    if secrets.compare_digest(tok, settings.admin_api_key):
-        return "legacy-key"
     u = _user_for_token(tok, db)
     if u and u.role == "admin":
         return u.email
+    if _legacy_key_ok(tok, db):
+        return "bootstrap-key"
     raise HTTPException(401, "invalid admin credential")
 
 
 def require_viewer(authorization: str | None = Header(default=None),
                    db: Session = Depends(get_db)) -> str:
-    """Read-only fleet visibility: any admin credential, or a presenter's
-    personal token. Presenters can see bridges — never command them."""
+    """Read-only fleet visibility: any personal token (admin or presenter), or
+    the bootstrap key while no admin exists. Presenters can see bridges — never
+    command them."""
     tok = _bearer(authorization)
-    if secrets.compare_digest(tok, settings.admin_api_key):
-        return "legacy-key"
     u = _user_for_token(tok, db)
     if u:
         return u.email
+    if _legacy_key_ok(tok, db):
+        return "bootstrap-key"
     raise HTTPException(401, "invalid credential")

@@ -36,6 +36,17 @@ EOF
 chmod 600 /etc/default/bridge-agent
 echo "${BRIDGE_VERSION:-dev}" >/etc/bridge/version
 
+# 2b. per-device setup-AP passphrase. Generated HERE (not baked into the image)
+# so every unit gets a different key — a shared or SSID-derived key would let
+# anyone in radio range join the setup AP and watch the venue's WiFi password
+# being typed. `bridge setup-pass` prints it for the label.
+if [ ! -s /etc/bridge/setup-wifi-pass ]; then
+  LC_ALL=C tr -dc 'ABCDEFGHJKMNPQRSTUVWXYZ23456789' </dev/urandom | head -c 12 \
+    >/etc/bridge/setup-wifi-pass
+  chmod 600 /etc/bridge/setup-wifi-pass
+  log "generated per-device setup-AP passphrase"
+fi
+
 # 3. start the agent (enrolls on first tick, then heartbeats)
 systemctl enable --now bridge-agent.timer || log "WARN: could not enable bridge-agent.timer"
 

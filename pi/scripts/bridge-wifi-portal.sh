@@ -19,11 +19,32 @@ have_internet() {
   return 1
 }
 
+PASS_FILE=/etc/bridge/setup-wifi-pass
+
 ap_ssid() {
   local pc
   pc=$(curl -s --max-time 2 http://localhost:8080/api/status 2>/dev/null \
        | grep -o '"pairing_code": *"[^"]*"' | cut -d'"' -f4)
   echo "BridgeSetup-${pc:-Pi}"
+}
+
+# The setup AP's WPA2 key. MUST NOT be derivable from the broadcast SSID — it
+# used to be `sed s/BridgeSetup-/BRIDGE-/` of the SSID, which meant anyone in
+# radio range could compute it from the beacon and sit on the portal while the
+# receiver typed the venue's WiFi password. Now: 12 random chars, generated once
+# per device on first use and persisted, so it matches the printed label for the
+# life of the card. Regenerating would strand the label, hence create-if-absent.
+ap_pass() {
+  if [ ! -s "$PASS_FILE" ]; then
+    install -d -m 755 /etc/bridge
+    # Ambiguity-free alphabet (no O/0, I/1/l) — this gets read off a sticker and
+    # typed on a phone keyboard by someone who cannot ask us for help.
+    (umask 077; LC_ALL=C tr -dc 'ABCDEFGHJKMNPQRSTUVWXYZ23456789' </dev/urandom \
+       | head -c 12 > "$PASS_FILE") 2>/dev/null
+    chmod 600 "$PASS_FILE"
+    logger -t bridge-wifi-portal "generated new setup-AP passphrase (label must match $PASS_FILE)"
+  fi
+  cat "$PASS_FILE"
 }
 
 # Give NetworkManager time to (re)connect to a known WiFi / Ethernet on boot before deciding
@@ -43,9 +64,9 @@ while true; do
   # resolves against the cwd (systemd runs us with cwd=/) and 404s the portal page. The UI assets
   # ship in a SEPARATE wifi-connect-ui.tar.gz (the per-arch binary tarball has none); deploy.sh
   # installs them here.
-  # WPA2-protected with the pairing code (printed on the device label) — nobody
-  # nearby can join the setup AP or watch credentials being entered.
-  pass="$(ap_ssid | sed s/BridgeSetup-/BRIDGE-/)"
+  # WPA2-protected with the per-device random key printed on the device label —
+  # nobody nearby can join the setup AP or watch credentials being entered.
+  pass="$(ap_pass)"
   wifi-connect --portal-interface "$PORTAL_IFACE" --portal-ssid "$ssid" \
                --portal-passphrase "$pass" \
                --ui-directory /usr/local/share/wifi-connect/ui \

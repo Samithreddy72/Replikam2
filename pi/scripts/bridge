@@ -99,6 +99,23 @@ case "$1" in
     printf '# NetBridge media tuning (bridge profile %s)\nNET_VIDEO_LATENCY=%s\nNET_AUDIO_LATENCY=%s\n' "$2" "$V" "$A" | sudo tee /etc/default/bridge-net >/dev/null
     echo "net profile '$2' (video=${V}ms audio=${A}ms); restarting media..."
     restart_media; sleep 1; cmd_status ;;
+  setup-pass )
+    # What goes on the printed setup label (walkthrough J1 step 3 / J2 step 2).
+    # The passphrase is random per device and generated on first use, so this is
+    # the ONLY place to read it — there is no way to derive it from the SSID.
+    PF=/etc/bridge/setup-wifi-pass
+    if [ ! -s "$PF" ]; then
+      sudo install -d -m 755 /etc/bridge
+      sudo sh -c "umask 077; LC_ALL=C tr -dc 'ABCDEFGHJKMNPQRSTUVWXYZ23456789' </dev/urandom | head -c 12 > $PF"
+      sudo chmod 600 "$PF"
+      echo "(generated a new setup passphrase)"
+    fi
+    PC=$(curl -s --max-time 2 http://localhost:8080/api/status 2>/dev/null \
+         | grep -o '"pairing_code": *"[^"]*"' | cut -d'"' -f4)
+    echo "=== NetBridge setup label ==="
+    line "Wi-Fi"    "BridgeSetup-${PC:-Pi}"
+    line "password" "$(sudo cat "$PF")"
+    line "pairing"  "${PC:-unknown}" ;;
   logs )
     svc="${2:-bridge-uvcd}"; case "$svc" in bridge-*) :;; *) svc="bridge-$svc";; esac
     echo "=== last 40 log lines of $svc (Ctrl-C to exit follow) ==="
@@ -115,6 +132,7 @@ bridge - NetBridge control
   bridge heal              run the self-heal watchdog once
   bridge set-peer <ip> [port]   set speaker-return destination (default port 5004)
   bridge profile <lan|wan> set jitterbuffer latency profile (lan=100/120, wan=200/200ms)
+  bridge setup-pass        print the setup-label details (AP name, random password, pairing code)
   bridge logs [service]    tail+follow logs (e.g. bridge logs feeder-net)
   bridge help              this help
 H

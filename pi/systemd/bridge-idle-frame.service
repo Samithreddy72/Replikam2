@@ -4,6 +4,8 @@ Before=bridge-uvcd.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/bridge-idle-frame.sh
-RemainAfterExit=yes
+# NOT RemainAfterExit: bridge-idle-frame.timer re-triggers this unit every 20s to
+# keep the Wi-Fi/Internet/USB ticks live, and a unit left "active" after exiting
+# is never re-run by its timer.
 [Install]
 WantedBy=multi-user.target

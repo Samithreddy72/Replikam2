@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render the NetBridge in-camera status frame (YUYV 320x180) — walkthrough J2 card.
 Deterministic PIL renderer; replaces the quoting-fragile gst-launch textoverlay chain."""
-import hashlib, subprocess, sys
+import hashlib, os, subprocess, sys
 from PIL import Image, ImageDraw, ImageFont
 
 W, H = 640, 360
@@ -23,6 +23,22 @@ code = hashlib.sha256(serial.encode()).hexdigest()[:4].upper()
 
 wifi_ok = "Connected" in sh("/usr/sbin/iw dev wlan0 link")
 net_ok = sh("nmcli networking connectivity check") == "full"
+
+def usb_ok():
+    # Real UDC state, not a painted-on checkmark. "configured" means a host has
+    # enumerated us — i.e. the USB cable really is in the meeting laptop. Any
+    # other state (not attached / powered / addressed) means it is not, and the
+    # receiver needs to see that instead of a green tick that is always green.
+    try:
+        for d in os.listdir("/sys/class/udc"):
+            with open("/sys/class/udc/%s/state" % d) as f:
+                if f.read().strip() == "configured":
+                    return True
+    except Exception:
+        pass
+    return False
+
+usb = usb_ok()
 t = lambda ok: "✓" if ok else "✗"
 
 img = Image.new("RGB", (W, H), (17, 24, 21))          # --screen #111815
@@ -39,8 +55,8 @@ def center(y, text, font, fill):
 center(76,  "N E T B R I D G E",                       brand,  (147, 162, 154))  # --screen-muted
 center(124,  "Bridge %s is online" % code,              title,  (232, 239, 234))  # --screen-ink
 center(176,  "Waiting for your presenter to go live…", msg, (155, 180, 173))
-center(236, "%s Wi-Fi     %s Internet     ✓ USB host" % (t(wifi_ok), t(net_ok)),
-            checks, (79, 190, 132))                                              # zcheck green
+center(236, "%s Wi-Fi     %s Internet     %s USB host" % (t(wifi_ok), t(net_ok), t(usb)),
+            checks, (79, 190, 132) if (wifi_ok and net_ok and usb) else (198, 57, 44))
 
 # RGB -> YUYV (BT.601), 2 pixels per macropixel
 px = img.load()
@@ -57,5 +73,23 @@ for y in range(H):
         clamp = lambda v: max(0, min(255, v))
         buf[i:i+4] = bytes([clamp(y0), clamp((u0+u1)//2), clamp(y1), clamp((v0+v1)//2)])
         i += 4
-open(OUT, "wb").write(buf)
-print("idle frame rendered (NetBridge %s, wifi=%s net=%s, %d bytes)" % (code, t(wifi_ok), t(net_ok), len(buf)))
+# This runs on a timer, and the uvc pump re-reads the file whenever its mtime
+# changes. So: (a) write atomically via rename, or the pump can read a half-written
+# frame and show a torn card; (b) skip the write entirely when nothing changed, so
+# mtime only moves on a REAL state change and the pump isn't reloading every tick.
+try:
+    if open(OUT, "rb").read() == bytes(buf):
+        print("idle frame unchanged (NetBridge %s, wifi=%s net=%s usb=%s)"
+              % (code, t(wifi_ok), t(net_ok), t(usb)))
+        sys.exit(0)
+except Exception:
+    pass
+
+tmp = OUT + ".tmp"
+with open(tmp, "wb") as f:
+    f.write(buf)
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(tmp, OUT)
+print("idle frame rendered (NetBridge %s, wifi=%s net=%s usb=%s, %d bytes)"
+      % (code, t(wifi_ok), t(net_ok), t(usb), len(buf)))

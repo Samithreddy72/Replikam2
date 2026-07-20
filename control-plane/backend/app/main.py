@@ -41,6 +41,16 @@ def _migrate():
 _migrate()
 
 
+@app.on_event("startup")
+async def _start_retention():
+    """Hourly retention sweep (retention.py) — the thing that keeps the fleet DB
+    flat regardless of how much traffic the devices generate."""
+    import asyncio
+    from .db import SessionLocal
+    from . import retention
+    asyncio.create_task(retention.sweep_loop(SessionLocal))
+
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True}
@@ -77,11 +87,8 @@ def telemetry(body: dict, dev: Device = Depends(auth.require_device),
     if body.get("tailscale_ip"):
         dev.tailscale_ip = body["tailscale_ip"]
     db.add(Telemetry(device_id=dev.id, ts=now, metrics=body))
-    # retention: prune telemetry older than 7 days (~1-in-50 writes to keep it cheap)
-    import random as _r
-    if _r.random() < 0.02:
-        cutoff = now - dt.timedelta(days=7)
-        db.query(Telemetry).filter(Telemetry.ts < cutoff).delete()
+    # Retention is NOT done here any more — see retention.py. Pruning on the
+    # write path meant a device that stopped reporting never got cleaned up.
     db.commit()
     return {"ok": True}
 
@@ -396,8 +403,11 @@ def redeem_invite(body: dict, db: Session = Depends(get_db)):
 
 @app.get("/auth/whoami")
 def whoami(who: str = Depends(auth.require_viewer), db: Session = Depends(get_db)):
-    if who == "legacy-key":
-        return {"who": "legacy-key", "role": "admin"}
+    if who == "bootstrap-key":
+        return {"who": "bootstrap-key", "role": "admin",
+                "bootstrap": True,
+                "notice": "Shared bootstrap key — create an admin account "
+                          "(Team → add user, role admin) and this key stops working."}
     u = db.scalar(select(User).where(User.email == who))
     return {"who": who, "role": u.role if u else "presenter"}
 

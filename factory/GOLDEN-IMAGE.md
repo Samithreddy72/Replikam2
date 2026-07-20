@@ -14,9 +14,12 @@ sudo systemctl stop bridge-agent.timer tailscaled
 sudo rm -f /etc/bridge/agent.token            # forget enrollment
 sudo tailscale logout 2>/dev/null; sudo rm -rf /var/lib/tailscale  # forget tailnet identity
 sudo rm -f /etc/NetworkManager/system-connections/*   # forget wifi (firstboot/Imager re-adds)
+sudo rm -f /etc/bridge/setup-wifi-pass        # forget the setup-AP key (each clone makes its own)
 sudo systemctl enable bridge-firstboot 2>/dev/null    # arm firstboot for the clones
 sudo poweroff
 ```
+⚠️ Do not skip the `setup-wifi-pass` removal — if it stays in the image, every
+bridge in the fleet ships with the SAME setup-AP password.
 
 ## 3. Image it (on the Mac)
 Insert the master card, find it with `diskutil list external`, then:
@@ -31,6 +34,16 @@ cp fleet.conf.example fleet.conf   # fill in the secrets
 bash make-card.sh 2                # bridge-002
 bash make-card.sh 3                # bridge-003 ... etc
 ```
+
+## 5. Print each unit's label
+Boot the stamped card once, then on that Pi:
+```
+bridge setup-pass
+```
+It prints the three things the label needs — setup Wi-Fi name, its **random
+per-device password**, and the pairing code. The password is generated at first
+boot and stored only at `/etc/bridge/setup-wifi-pass`; it cannot be recomputed
+from the SSID, so if the label is lost the key must be read (or regenerated) here.
 
 ## Identity model (why clones don't collide)
 - `device_id` = CPU serial → unique per Pi automatically

@@ -83,12 +83,12 @@
 
   <div id="gate" class="hidden">
     <h2>Sign in</h2>
-    <p>Paste your <b>invite</b> (first time) or use the org admin key. Credentials stay in this browser.</p>
+    <p>Paste your <b>invite</b> (first time). The shared bootstrap key works only until the first admin account exists. Credentials stay in this browser.</p>
     <input id="invitein" type="password" placeholder="invite from your admin" onkeydown="if(event.key==='Enter')redeem()" style="margin-bottom:8px">
     <button onclick="redeem()">Redeem invite &amp; sign in</button>
     <div style="text-align:center;color:var(--faint);font-size:11px;margin:10px 0 6px">— or —</div>
-    <input id="keyin" type="password" placeholder="admin API key" onkeydown="if(event.key==='Enter')saveKey()">
-    <button onclick="saveKey()" style="background:var(--ink)">Open with the admin key</button>
+    <input id="keyin" type="password" placeholder="bootstrap key (first-run only)" onkeydown="if(event.key==='Enter')saveKey()">
+    <button onclick="saveKey()" style="background:var(--ink)">Open with the bootstrap key</button>
     <div class="err" id="gateerr"></div>
   </div>
 
@@ -425,7 +425,9 @@ async function refresh(first){
     DEVS = await api("/admin/devices");
     $("panel").classList.remove("hidden"); $("gate").classList.add("hidden");
     render();
-    $("whoami").textContent = WHO === "legacy-key" ? "org admin key" : `${WHO} · ${ROLE}`;
+    $("whoami").textContent = WHO === "bootstrap-key"
+      ? "bootstrap key · add an admin account to retire it"
+      : `${WHO} · ${ROLE}`;
     $("tick").textContent = "updated " + new Date().toLocaleTimeString();
   } catch(e){ if (e.message!=="auth" && first) toast("control plane unreachable"); }
 }
