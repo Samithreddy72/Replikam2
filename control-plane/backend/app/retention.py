@@ -16,7 +16,8 @@ import logging
 from sqlalchemy import delete
 
 from .config import settings
-from .models import Telemetry, AuditLog, Command, utcnow
+from .models import Telemetry, TelemetryRollup, AuditLog, Command, utcnow
+from . import rollup as _rollup
 
 log = logging.getLogger("retention")
 
@@ -27,14 +28,26 @@ def sweep(db) -> dict:
     now = utcnow()
     deleted = {}
 
-    # Raw telemetry. The uptime/SLA endpoint reads a rolling 7-day window of
-    # ticks, so this floor cannot go below that without also teaching uptime to
-    # read from rollups (that is the phase-2 "rolled up after 48h" item).
+    # 1) Roll raw telemetry older than 48h into hourly summaries and delete the
+    # raw rows (rollup.py). This is what keeps the DB flat while the uptime
+    # endpoint still has history — it reads raw for the recent window and these
+    # rollups beyond it.
+    roll = _rollup.rollup_telemetry(db)
+    deleted["telemetry_rolled"] = roll["raw_deleted"]
+
+    # 2) Rollups themselves are pruned at their own (much longer) horizon.
     # synchronize_session=False on every delete below: the default ("evaluate")
     # re-runs the WHERE clause in Python against objects already in the session's
     # identity map, and SQLite hands back naive datetimes while our cutoffs are
     # tz-aware — that comparison raises. A bulk sweep has no need to reconcile
     # in-memory state anyway.
+    cutoff = now - dt.timedelta(days=settings.rollup_retention_days)
+    deleted["rollups"] = db.execute(
+        delete(TelemetryRollup).where(TelemetryRollup.hour < cutoff),
+        execution_options={"synchronize_session": False}).rowcount or 0
+
+    # 3) Safety net: any raw telemetry somehow still older than the 7-day floor
+    # (e.g. rollup disabled/failed) is hard-pruned so raw can never grow unbounded.
     cutoff = now - dt.timedelta(days=settings.telemetry_retention_days)
     deleted["telemetry"] = db.execute(
         delete(Telemetry).where(Telemetry.ts < cutoff),

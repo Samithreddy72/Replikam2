@@ -49,5 +49,12 @@ class Settings:
     audit_retention_days = int(os.getenv("AUDIT_RETENTION_DAYS", "365"))
     command_retention_days = int(os.getenv("COMMAND_RETENTION_DAYS", "30"))
 
+    # Telemetry rollup (rollup.py, walkthrough "rolled up after 48h"). Raw ticks
+    # older than this collapse to one row per (device, hour); the hourly rollups
+    # are then kept this many days. The uptime endpoint reads raw for the recent
+    # window and rollups beyond it.
+    rollup_raw_keep_hours = int(os.getenv("ROLLUP_RAW_KEEP_HOURS", "48"))
+    rollup_retention_days = int(os.getenv("ROLLUP_RETENTION_DAYS", "90"))
+
 
 settings = Settings()

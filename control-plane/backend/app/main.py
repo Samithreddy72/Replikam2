@@ -273,14 +273,32 @@ def device_uptime(device_id: str, _: str = Depends(auth.require_viewer),
                   db: Session = Depends(get_db)):
     """Uptime/SLA from telemetry ticks (~15s): minute-coverage over rolling 24h
     windows for the last 7 days, plus outage incidents (tick gaps > 120s).
-    Powered-off time counts as down — that's the honest SLA."""
+    Powered-off time counts as down — that's the honest SLA.
+
+    Reads RAW ticks for the recent window (minute-precise) and hourly ROLLUPS
+    beyond it (rollup.py). up_minutes in a rollup is the same distinct-minute
+    count this endpoint sums for raw, so a rolled day scores identically. The
+    raw-keep window is a whole number of hours, so each 24h window falls entirely
+    on one side of the boundary — no window is half raw, half rolled."""
+    from .models import TelemetryRollup
     now = utcnow().replace(tzinfo=None)
     since = now - dt.timedelta(days=7)
-    ts = [r for r in db.scalars(
+    naive = lambda t: t.replace(tzinfo=None) if t and t.tzinfo else t
+
+    ts = [naive(r) for r in db.scalars(
         select(Telemetry.ts).where(Telemetry.device_id == device_id,
                                    Telemetry.ts > since).order_by(Telemetry.ts)).all()]
-    ts = [t.replace(tzinfo=None) for t in ts]
-    # minute coverage
+    rolls = db.execute(
+        select(TelemetryRollup.hour, TelemetryRollup.up_minutes, TelemetryRollup.samples)
+        .where(TelemetryRollup.device_id == device_id, TelemetryRollup.hour > since)
+        .order_by(TelemetryRollup.hour)).all()
+
+    # Raw gives exact per-minute coverage for the recent window; rollups give
+    # per-hour up_minutes for older time. Raw and rollup cover DISJOINT regions
+    # (raw is deleted once rolled), so a window's uptime = raw up-minutes in it +
+    # rollup up_minutes of hours in it — no double counting. Aged windows are
+    # accurate to the hour (a rollup hour is credited to the window holding its
+    # start); recent windows stay minute-exact.
     up_min = {int((t - since).total_seconds() // 60) for t in ts}
     windows = []
     for w in range(7):          # w=0 newest (last 24h) … w=6 oldest
@@ -289,10 +307,20 @@ def device_uptime(device_id: str, _: str = Depends(auth.require_viewer),
         lo_i = max(0, int((lo - since).total_seconds() // 60))
         hi_i = int((hi - since).total_seconds() // 60)
         total = max(1, hi_i - lo_i)
-        up = sum(1 for m in up_min if lo_i <= m < hi_i)
-        windows.append({"ago_days": w, "pct": round(100.0 * up / total, 1)})
-    # incidents: gaps between consecutive ticks > 120s (and an ongoing one)
+        up = sum(1 for m in up_min if lo_i <= m < hi_i) \
+             + sum(um for hour, um, _ in rolls if lo <= naive(hour) < hi)
+        windows.append({"ago_days": w, "pct": round(100.0 * min(up, total) / total, 1)})
+
+    # Incidents: precise gaps from RAW (recent window). Older, coarse outages are
+    # recovered from rollup hours that were not fully up (an hour with up_minutes
+    # < 55 → a ~(60-up_minutes) min outage that hour) so a big old outage still
+    # shows, at hour granularity. incidents[-5:] surfaces the newest, which are
+    # almost always in the raw window anyway.
     incidents = []
+    for hour, up_minutes, _ in rolls:
+        if up_minutes < 55:
+            incidents.append({"start": naive(hour).isoformat(),
+                              "seconds": (60 - up_minutes) * 60, "coarse": True})
     for a, b in zip(ts, ts[1:]):
         gap = (b - a).total_seconds()
         if gap > 120:
@@ -301,11 +329,9 @@ def device_uptime(device_id: str, _: str = Depends(auth.require_viewer),
         incidents.append({"start": ts[-1].isoformat(),
                           "seconds": int((now - ts[-1]).total_seconds()),
                           "ongoing": True})
-    up_since = None
+    incidents.sort(key=lambda i: i["start"])
+
     if ts:
-        up_since = (incidents[-1]["start"] if incidents and incidents[-1].get("ongoing")
-                    else (ts[0].isoformat() if not incidents else None))
-        # seconds since last completed incident = current clean streak
         last_end = None
         for i in incidents:
             if not i.get("ongoing"):
@@ -314,8 +340,9 @@ def device_uptime(device_id: str, _: str = Depends(auth.require_viewer),
         streak = int((now - (last_end or ts[0])).total_seconds())
     else:
         streak = 0
+    total_ticks = len(ts) + sum(s for _, _, s in rolls)
     return {"windows": windows, "incidents": incidents[-5:], "streak_s": streak,
-            "ticks_7d": len(ts)}
+            "ticks_7d": total_ticks}
 
 
 @app.get("/admin/devices/{device_id}/diagnostics")

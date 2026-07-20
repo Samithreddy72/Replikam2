@@ -70,6 +70,24 @@ class AuditLog(Base):
     ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class TelemetryRollup(Base):
+    """Hourly summary of raw telemetry (walkthrough J4: "Telemetry rolled up
+    after 48 h — the fleet DB stays flat forever"). Raw ticks (~15s) are kept
+    48h for minute-precise recent uptime; older ticks collapse to one row per
+    (device, hour) here and the raw rows are deleted. `up_minutes` is the count
+    of DISTINCT minutes in that hour that had at least one tick — the exact same
+    quantity the uptime endpoint sums for its SLA %, so a rolled window scores
+    identically to a raw one."""
+    __tablename__ = "telemetry_rollup"
+
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), primary_key=True)
+    hour: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), primary_key=True)  # truncated to the hour, UTC
+    samples: Mapped[int] = mapped_column(Integer)          # raw ticks that hour
+    up_minutes: Mapped[int] = mapped_column(Integer)       # distinct minutes with a tick, 0..60
+    first_ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+    last_ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
 class AlertEvent(Base):
     """One row per (device, alert-kind) episode — the memory that turns
     level-triggered detection (device_alerts, recomputed on every read) into
