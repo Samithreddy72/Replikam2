@@ -33,6 +33,7 @@ class Settings:
     # just aren't pushed. This is the walkthrough's "page you by email or webhook".
     alert_eval_interval_s = int(os.getenv("ALERT_EVAL_INTERVAL_S", "30"))
     alert_webhook_url = os.getenv("ALERT_WEBHOOK_URL", "")   # POST JSON here (Slack/Discord/n8n/…)
+    alert_webhook_format = os.getenv("ALERT_WEBHOOK_FORMAT", "raw")  # slack | discord | raw
     smtp_host = os.getenv("SMTP_HOST", "")
     smtp_port = int(os.getenv("SMTP_PORT", "587"))
     smtp_user = os.getenv("SMTP_USER", "")
