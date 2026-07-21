@@ -31,11 +31,15 @@ mkdir -p $RUN
 # xruns over the window: pcm reporting state==XRUN + return-audio I/O errors in the
 # journal (both mean the same dropped-frame event, deduped by capping at a sane max).
 count_xruns(){
-  local x=0 st j
-  st=$(grep -c 'state: XRUN' "$PCM_STATUS" 2>/dev/null || echo 0)
+  local st j x
+  # NB: `grep -c` prints its count (e.g. "0") AND exits 1 on no-match, so a `|| echo 0`
+  # here would append a SECOND "0" -> "0\n0" -> arithmetic syntax error. Just take the
+  # count and default an empty (missing-file) result to 0. head -1 guards against any
+  # stray extra line.
+  st=$(grep -c 'state: XRUN' "$PCM_STATUS" 2>/dev/null | head -1); st=${st:-0}
   j=$(journalctl -u bridge-return-audio --since "-${CYCLE}s" --no-pager 2>/dev/null \
-        | grep -ciE 'overrun|underrun|input/output error|xrun')
-  x=$((st + j)); [ "$x" -gt 20 ] && x=20; echo "$x"
+        | grep -ciE 'overrun|underrun|input/output error|xrun' | head -1); j=${j:-0}
+  x=$(( st + j )); [ "$x" -gt 20 ] && x=20; echo "$x"
 }
 
 # idle == return-audio not actively holding pcm0c (so we can open it for a capture)
@@ -50,7 +54,7 @@ verdict_now(){
   xr=$(count_xruns)
   if is_idle; then
     wav=$(mktemp /tmp/crackle-XXXX.wav)
-    if arecord -D "$DEV" -d "$CAP_SECS" -f S16_LE -r 48000 -c 2 -q "$wav" 2>/dev/null \
+    if arecord -D "$DEV" -d "$CAP_SECS" -f S16_LE -r 48000 -c 1 -q "$wav" 2>/dev/null \
          && [ -s "$wav" ]; then
       j=$("$ANALYZER" --xruns "$xr" "$wav" 2>/dev/null)
       rm -f "$wav"; echo "$j"; return

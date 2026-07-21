@@ -37,7 +37,7 @@ import wave
 
 FRAME = 4096          # FFT size (power of two — radix-2)
 HF_HZ = 12000.0       # "high frequency" boundary for the broadband-click ratio
-CLICK_K = 6.0         # a first-difference > CLICK_K * median-slew counts as a click
+CLICK_RESIDUAL_FLOOR = 0.30   # interpolation residual above this = a click (music stays well under)
 
 
 # --------------------------------------------------------------------------- FFT
@@ -158,34 +158,37 @@ def _hf_ratio(psd, freqs):
 
 
 def _click_rate(x, rate):
-    """Clicks/sec detected by SLEW, not absolute level. A crackle click is a sudden
-    sample-to-sample discontinuity (ALSA dropping/inserting a frame), which shows up
-    as a first-difference far above the programme's normal slope — independent of how
-    loud the programme is, so a quiet click over a loud tone is still caught. The
-    threshold is a robust multiple of the MEDIAN abs-difference (median ignores the
-    rare huge clicks themselves), with an absolute floor so silence noise can't blow
-    it up. Consecutive over-threshold diffs collapse to one click (a click is one
-    event with a rising and a falling edge)."""
+    """Clicks/sec detected by INTERPOLATION RESIDUAL — how far each sample sits from the
+    straight line between its two neighbours. Bandlimited programme material (voice,
+    music) is smooth: even loud or high-frequency content stays close to that line, so
+    its residual is small. A dropped/inserted-sample click is a genuine discontinuity —
+    the sample can't be predicted from its neighbours — so its residual is huge. This is
+    what makes it level-independent AND music-proof: a first-difference detector fires on
+    every loud transient (real music has ~7% of samples with a big first-difference), but
+    those transients are still SMOOTH, so their interpolation residual is tiny.
+
+    Threshold = an absolute floor (a real audible click is a large break) OR an adaptive
+    4x the 99th-pct residual, whichever is larger — so a genuinely spiky signal raises
+    its own bar and can't false-positive. Consecutive over-threshold samples collapse to
+    one click. Verified against a real 3s music capture (0 false clicks) and synthetic
+    click trains (exact counts)."""
     n = len(x)
-    if n < 2:
-        return 0.0, 0.0, 0.0
-    diffs = [abs(x[i] - x[i - 1]) for i in range(1, n)]
-    srt = sorted(diffs)
-    median = srt[len(srt) // 2]
-    thr = max(CLICK_K * median, 0.05)  # floor: real clicks are big, noise slew isn't
+    if n < 3:
+        rms = math.sqrt(sum(v * v for v in x) / n) if n else 0.0
+        return 0.0, 0.0, rms
+    res = [abs(x[i] - (x[i - 1] + x[i + 1]) * 0.5) for i in range(1, n - 1)]
+    srt = sorted(res)
+    p99 = srt[int(len(srt) * 0.99)]
+    thr = max(CLICK_RESIDUAL_FLOOR, 4.0 * p99)
     clicks = 0
     prev_over = False
-    peak = 0.0
-    total_sq = 0.0
-    for i, v in enumerate(x):
-        total_sq += v * v
-        av = v if v >= 0 else -v
-        if av > peak:
-            peak = av
-        over = i > 0 and diffs[i - 1] > thr
+    for v in res:
+        over = v > thr
         if over and not prev_over:
             clicks += 1
         prev_over = over
+    peak = max((v if v >= 0 else -v) for v in x)
+    total_sq = sum(v * v for v in x)
     secs = n / rate
     rms_all = math.sqrt(total_sq / n)
     crest_db = 20.0 * math.log10(peak / rms_all) if rms_all > 0 and peak > 0 else 0.0

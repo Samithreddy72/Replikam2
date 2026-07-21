@@ -16,7 +16,7 @@ cp /home/pi/flight.txt /home/pi/netlog.txt $D/ 2>/dev/null
 # latest latched verdict. This is the "clock FFT" line in the walkthrough bundle.
 {
   W=$(mktemp /tmp/diag-cap-XXXX.wav)
-  if arecord -D hw:UAC2Gadget -d 2 -f S16_LE -r 48000 -c 2 -q "$W" 2>/dev/null && [ -s "$W" ]; then
+  if arecord -D hw:UAC2Gadget -d 2 -f S16_LE -r 48000 -c 1 -q "$W" 2>/dev/null && [ -s "$W" ]; then
     echo "== live capture (2s from hw:UAC2Gadget) =="
     /usr/local/bin/bridge-clock-fft.py --ascii "$W" 2>&1
   else
