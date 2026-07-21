@@ -65,16 +65,33 @@ def svc_restarts(svc):
     except Exception:
         return 0
 
-def clock_suspect():
-    # Heuristic flag for a degrading UAC2 gadget clock (the cause of crackly return
-    # audio). True FFT detection is deferred; here we look for the I/O-error cascade
-    # in recent return-audio logs. The fix remains `bridge reset-clock`.
+def clock_verdict():
+    """Return (bool suspect, dict detail) for the UAC2 gadget clock. Prefers the real
+    FFT verdict the crackle-sentry writes to /run/bridge/crackle.json (M4); the file
+    exists only while a crackle is currently latched (edge-triggered) and is removed
+    on resolve, so its mere presence — if fresh — means "crackling now". Falls back to
+    the old I/O-error journal heuristic when the sentry isn't running."""
+    try:
+        st = os.stat("/run/bridge/crackle.json")
+        if time.time() - st.st_mtime < 300:  # fresh within 5 min
+            with open("/run/bridge/crackle.json") as f:
+                d = json.load(f)
+            return d.get("verdict") in ("crackle", "degrading"), d
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
     errs = sh("journalctl -u bridge-return-audio --since '-10 min' 2>/dev/null "
               "| grep -ci 'input/output error'")
     try:
-        return int(errs) > 0
+        return int(errs) > 0, {"verdict": "crackle" if int(errs) > 0 else "clean",
+                               "source": "journal-heuristic"}
     except Exception:
-        return False
+        return False, {}
+
+
+def clock_suspect():
+    return clock_verdict()[0]
 
 def gather():
     d = {}
@@ -131,7 +148,9 @@ def gather():
         "uvcd": svc_restarts("bridge-uvcd"),
         "return_audio": svc_restarts("bridge-return-audio"),
     }
-    d["clock_suspect"] = clock_suspect()
+    suspect, detail = clock_verdict()
+    d["clock_suspect"] = suspect          # bool (backward compat for the control plane)
+    d["clock"] = detail                   # M4: full FFT verdict {verdict,score,reasons,...}
     d["ts"] = int(time.time())
     return d
 

@@ -1,0 +1,9 @@
+[Unit]
+Description=NetBridge crackle sentry (FFT return-audio clock verdict -> fleet)
+After=bridge-return-audio.service
+[Service]
+ExecStart=/usr/local/bin/bridge-crackle-sentry.sh
+Restart=always
+RestartSec=10
+[Install]
+WantedBy=multi-user.target
