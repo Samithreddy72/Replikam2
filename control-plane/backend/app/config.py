@@ -31,6 +31,17 @@ class Settings:
     # the paste-in code (which is all the Mac app needs anyway).
     public_base_url = os.getenv("PUBLIC_BASE_URL", "")
 
+    # ── Mesh (Tailscale) — phase 5 embedded-client auth (mesh.py). On sign-in the
+    # control plane mints a SCOPED EPHEMERAL auth key via the Tailscale API so the
+    # presenter app joins the private mesh itself — no user Tailscale install, no
+    # shared admin key, no hardcoded 100.x IP. ts_api_key UNSET = feature off
+    # (the /auth/mesh-key endpoint answers 503). NEVER commit a real key.
+    ts_api_key = os.getenv("TS_API_KEY", "")                # Tailscale API key / OAuth access token
+    ts_tailnet = os.getenv("TS_TAILNET", "")                # e.g. taile564ff.ts.net; "" -> the key's default tailnet
+    ts_source_tag = os.getenv("TS_SOURCE_TAG", "tag:nb-source")  # tag applied to app nodes; the tailnet ACL scopes it to bridges only
+    ts_key_ttl_s = int(os.getenv("TS_KEY_TTL_S", "600"))    # how long the minted KEY is valid to join (seconds)
+    ts_login_server = os.getenv("TS_LOGIN_SERVER", "https://login.tailscale.com")  # control server (Headscale-friendly)
+
     # A device is "offline" if it hasn't sent a heartbeat in this many seconds
     # (agent ticks every 15s).
     offline_after_s = int(os.getenv("OFFLINE_AFTER_S", "60"))

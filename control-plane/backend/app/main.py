@@ -543,6 +543,50 @@ def redeem_magic_link(body: dict, db: Session = Depends(get_db)):
     return {"email": u.email, "role": u.role, "org": u.org_id, "token": token}
 
 
+@app.post("/auth/mesh-key")
+def issue_mesh_key(actor=Depends(auth.require_viewer), db: Session = Depends(get_db)):
+    """Phase 5: hand the presenter app a SCOPED ephemeral mesh (Tailscale) auth key
+    so it joins the private network ITSELF — no admin key, no user-installed
+    Tailscale, no hardcoded 100.x IP (walkthrough J3: "Joins the private mesh with
+    an embedded client + scoped token from sign-in"). Any signed-in user (presenter
+    or admin) may call it. The key is tagged tag:nb-source (the tailnet ACL grants
+    that tag the bridges only), ephemeral (auto-removed on disconnect) and
+    short-lived — so a leaked key reaches bridges, never other nodes, and dies fast.
+    Also returns the caller's org bridges by tailnet name so the app connects by
+    name via MagicDNS instead of a hardcoded IP."""
+    import re as _re
+    from . import mesh
+    try:
+        minted = mesh.mint_ephemeral_key("netbridge-source %s (%s)" % (actor.email, actor.org))
+    except mesh.MeshNotConfigured:
+        raise HTTPException(503, "mesh sign-in is not configured on this control plane")
+    except mesh.MeshError as e:
+        raise HTTPException(502, "could not mint a mesh key: %s" % e)
+    tailnet = settings.ts_tailnet
+    bridges = []
+    for d in db.scalars(select(Device).where(Device.org_id == actor.org)).all():
+        name = d.hostname or d.id
+        bridges.append({
+            "id": d.id,
+            "name": name,
+            "tailnet_name": ("%s.%s" % (name, tailnet)) if tailnet else name,
+            "ip": d.tailscale_ip or "",
+            "online": is_online(d),
+        })
+    # A stable, DNS-safe hostname for the app's ephemeral mesh node.
+    slug = _re.sub(r"[^a-z0-9-]+", "-", actor.email.lower()).strip("-")[:40] or "user"
+    _audit(db, actor, "auth:mesh-key")
+    return {
+        "authkey": minted["key"],
+        "login_server": settings.ts_login_server,
+        "tailnet": tailnet,
+        "tag": settings.ts_source_tag,
+        "hostname": "nb-source-" + slug,
+        "expires": minted["expires"],
+        "bridges": bridges,
+    }
+
+
 @app.get("/auth/whoami")
 def whoami(actor=Depends(auth.require_viewer), db: Session = Depends(get_db)):
     if actor.is_bootstrap:
