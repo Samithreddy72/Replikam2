@@ -73,9 +73,15 @@ while true; do
   V=$(echo "$J" | sed -n 's/.*"verdict": *"\([a-z]*\)".*/\1/p')
   [ -z "$V" ] && V=clean
   PREV=$(cat "$STATE" 2>/dev/null || echo clean)
-  # collapse degrading+crackle into one "bad" edge; clean is the other side
-  cur=bad; [ "$V" = clean ] && cur=good
-  prevside=bad; [ "$PREV" = clean ] && prevside=good
+  # Only genuine bad verdicts (degrading/crackle) fire an alert; clean/empty/unknown all
+  # map to good. This is the hardening guard: a corrupt or failed capture makes the
+  # analyzer return verdict "unknown", and without this it would land in the bad branch
+  # and raise a phantom crackle alert on a device glitch.
+  case "$V" in degrading|crackle) cur=bad;; *) cur=good;; esac
+  # STATE holds the normalized side (good/bad), not the raw verdict — so an "unknown"
+  # or "degrading" verdict can't be misread as a bad PRIOR state next cycle. Legacy
+  # state files (which stored "clean") map to good since they aren't "bad".
+  prevside=good; [ "$PREV" = bad ] && prevside=bad
   if [ "$cur" = bad ]; then
     # Rewrite every bad cycle (not just the edge) so the file's mtime stays fresh:
     # bridge-web.py:clock_verdict() only trusts it within 5 min, precisely so a dead
@@ -87,6 +93,6 @@ while true; do
   elif [ "$prevside" = bad ]; then
     rm -f "$OUT"; LOG "crackle cleared"
   fi
-  echo "$V" > "$STATE"
+  echo "$cur" > "$STATE"
   sleep "$CYCLE"
 done
