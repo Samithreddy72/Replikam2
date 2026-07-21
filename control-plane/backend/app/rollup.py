@@ -59,10 +59,14 @@ def rollup_telemetry(db, raw_keep_hours: int | None = None) -> dict:
     for (device_id, hour), b in buckets.items():
         existing = db.get(TelemetryRollup, (device_id, hour))
         if existing:
-            # Merge (a prior partial roll of the same hour). up_minutes can only be
-            # approximated on merge, so take the max — never undercount uptime.
+            # Merge path — only reachable if an hour is rolled twice, which the
+            # 48h-floored cutoff makes not happen (an hour is complete before its
+            # single roll). Defensive only. NOTE: without storing the minute-set we
+            # can't union, so this max() can UNDERCOUNT up_minutes if two partial
+            # rolls covered different minutes (0-29 then 30-59 -> 30, not 60). It
+            # never overcounts. Bounded by up_minutes never exceeding 60.
             existing.samples += b["samples"]
-            existing.up_minutes = max(existing.up_minutes, len(b["minutes"]))
+            existing.up_minutes = min(60, max(existing.up_minutes, len(b["minutes"])))
             existing.first_ts = min(_naive(existing.first_ts), b["first"])
             existing.last_ts = max(_naive(existing.last_ts), b["last"])
         else:

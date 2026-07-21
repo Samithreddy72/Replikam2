@@ -425,12 +425,22 @@ def add_user(body: dict, actor=Depends(auth.require_admin),
         raise HTTPException(400, "bad email")
     if role not in ("admin", "presenter"):
         raise HTTPException(400, "role must be admin or presenter")
-    if db.scalar(select(User).where(User.email == email)):
+    # Existence check scoped to the caller's org — a global check would let an
+    # admin probe whether an email has an account in ANOTHER org (cross-tenant
+    # enumeration). If the email exists in a different org, the DB's global-unique
+    # constraint below still rejects it, but with the same generic 409 so the
+    # caller can't tell which org (or that it's another org at all).
+    if db.scalar(select(User).where(User.email == email, User.org_id == actor.org)):
         raise HTTPException(409, "user already exists")
     import secrets as _s
+    from sqlalchemy.exc import IntegrityError
     invite = _s.token_urlsafe(24)
     db.add(User(email=email, org_id=actor.org, role=role, invite_hash=auth.hash_token(invite)))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "user already exists")   # same message, no cross-org leak
     _audit(db, actor, "user:add", "%s (%s)" % (email, role))
     return {"email": email, "role": role, "invite": invite}
 
@@ -473,9 +483,15 @@ def request_magic_link(body: dict, db: Session = Depends(get_db)):
     they'd never redeemed an invite, becomes their first login."""
     import re as _re, secrets as _s
     from .models import User, utcnow
+    import threading
     from . import notifier
     email = str(body.get("email") or "").strip().lower()
-    base = str(body.get("base_url") or settings.public_base_url or "").rstrip("/")
+    # SECURITY: the link host comes ONLY from server config, never the request.
+    # Trusting a request-supplied base_url would let an attacker have the server
+    # email a victim a VALID sign-in link pointing at the attacker's domain
+    # (reset-poisoning → account takeover). If public_base_url is unset the email
+    # carries just the paste-in code, which is all the app needs anyway.
+    base = (settings.public_base_url or "").rstrip("/")
     generic = {"ok": True, "message": "If that email has an account, a sign-in link is on its way."}
     if not _re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         return generic
@@ -486,18 +502,21 @@ def request_magic_link(body: dict, db: Session = Depends(get_db)):
     u.login_hash = auth.hash_token(code)
     u.login_expires = utcnow() + dt.timedelta(minutes=15)
     db.commit()
-    # Point at the panel root (served at /) with the code as a query param — the
-    # panel redeems it on load. A /signin path would 404 against the static mount.
     link = ("%s/?code=%s" % (base, code)) if base else None
     lines = ["Sign in to NetBridge.", ""]
     if link:
         lines += ["Open this link to sign in:", link, ""]
     lines += ["Or paste this code into the NetBridge app:", "", "    %s" % code, "",
               "It expires in 15 minutes. If you didn't ask to sign in, ignore this email."]
-    try:
-        notifier.send_mail(email, "Your NetBridge sign-in link", "\n".join(lines))
-    except Exception:
-        pass                                # never leak SMTP state to the caller
+    # Send in a background thread so the response time does NOT reveal whether the
+    # account exists (a synchronous SMTP round-trip only on the found path would be
+    # a timing side channel that defeats the no-enumeration guarantee above).
+    def _send():
+        try:
+            notifier.send_mail(email, "Your NetBridge sign-in link", "\n".join(lines))
+        except Exception:
+            pass
+    threading.Thread(target=_send, daemon=True).start()
     return generic
 
 
@@ -548,9 +567,14 @@ def alerts_history(actor=Depends(auth.require_admin), db: Session = Depends(get_
     first — so an admin can see that a bridge flapped overnight even though no
     one had the panel open."""
     from .models import AlertEvent
-    org_ids = {d.id for d in db.scalars(select(Device).where(Device.org_id == actor.org)).all()}
-    rows = db.scalars(select(AlertEvent).order_by(desc(AlertEvent.opened_at)).limit(200)).all()
-    rows = [e for e in rows if e.device_id in org_ids][:50]
+    # Filter to the org's devices IN SQL before LIMIT — fetching the newest 200
+    # globally then filtering in Python could return an EMPTY history for a quiet
+    # org if noisier tenants produced 200 newer events (noisy-neighbor starvation).
+    org_ids = [d.id for d in db.scalars(select(Device.id).where(Device.org_id == actor.org)).all()]
+    if not org_ids:
+        return []
+    rows = db.scalars(select(AlertEvent).where(AlertEvent.device_id.in_(org_ids))
+                      .order_by(desc(AlertEvent.opened_at)).limit(50)).all()
     return [{"device_id": e.device_id, "kind": e.kind, "detail": e.detail,
              "opened_at": e.opened_at.isoformat() if e.opened_at else None,
              "notified": e.notified_at is not None,

@@ -60,13 +60,15 @@ def sweep(db) -> dict:
         delete(AuditLog).where(AuditLog.ts < cutoff),
         execution_options={"synchronize_session": False}).rowcount or 0
 
-    # Finished commands. Pending/sent ones are left alone at any age: a command
-    # still in flight to an offline bridge must survive until that bridge comes
-    # back, however long that takes.
+    # Finished commands, and 'sent' ones this old too: a command DELIVERED to a
+    # bridge that never posts a result within the retention window belongs to a
+    # dead/decommissioned device and would otherwise accumulate forever. 'pending'
+    # (never delivered) is still kept at any age so a briefly-offline bridge gets
+    # it — that one is bounded instead by the device being pruned when truly gone.
     cutoff = now - dt.timedelta(days=settings.command_retention_days)
     deleted["commands"] = db.execute(
         delete(Command).where(Command.created_at < cutoff,
-                              Command.status.in_(("done", "failed", "rejected"))),
+                              Command.status.in_(("done", "failed", "rejected", "sent"))),
         execution_options={"synchronize_session": False}).rowcount or 0
 
     db.commit()
