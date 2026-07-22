@@ -42,6 +42,23 @@ gh secret set OTA_SIGNING_KEY < ~/Downloads/netbridge-ota-keys/ota-signing-key.p
 - `pi/systemd/bridge-firstboot.service` — the first-boot unit `bridge-firstboot.sh` expected but that was missing
 - `pi/systemd/bridge-regen-hostkeys.service` — per-device SSH host-key regen
 
+## A/B signed-OTA tooling now ships in the image
+Earlier the image baked the obsolete `pi/scripts/bridge-update.sh` (a naive `git pull` updater)
+and had **no `bridge-ab` at all** — so a flashed card could not run the signed A/B OTA the
+fleet actually uses. Synced from the proven on-device copies:
+- `pi/scripts/bridge-update.sh` — signed-manifest A/B OTA (verify EC sig → write STANDBY slot
+  → arm auto-commit → `bridge-ab tryboot`); replaces the git-pull version.
+- `pi/scripts/bridge-ab` — A/B slot mgmt via Pi tryboot (`status|tryboot|commit|rollback|healthcheck`).
+- `pi/scripts/bridge-image-build` — snapshot running root → signed-manifest OTA package.
+- `pi/systemd/bridge-ab-healthcheck.service` — enabled; **no-op on a normal boot**, only gates a
+  `bridge_tryboot=1` trial (healthy → auto-commit, unhealthy → auto-rollback).
+
+⚠️ Known caveat (part of the bridge-vs-combined split, tracked separately): `bridge-ab`'s
+health gate requires `fleet-brain` + `:8000/healthz`. On a **pure-bridge** image (fleet-brain
+stripped) a trial would fail that gate and roll back. Fine today — the A/B cards are the
+combined dev-Pi lineage; the pure-bridge health criteria are a follow-up when the control
+plane is split off.
+
 ## Known iteration points (first CI run will likely need a tweak or two)
 - **DKMS on the pinned kernel** (`v4l2loopback` + `update-initramfs -c -k 6.12.93…`) is the
   fragile part in an emulated rootfs — needs the pinned headers + `gcc-12`, which we install;

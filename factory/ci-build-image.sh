@@ -90,6 +90,7 @@ for u in bridge-gadget bridge-feeder-net bridge-uvcd bridge-feeder-audio bridge-
          wifi-guardian bridge-powertrim flight-recorder jitter-sentry bridge-supervisor \
          bridge-watchdog.timer bridge-web bridge-wifi-portal bridge-idle-frame \
          bridge-idle-frame.timer gadget-clean-detach bridge-agent.timer \
+         bridge-ab-healthcheck \
          bridge-firstboot bridge-regen-hostkeys; do
   systemctl enable "$u" 2>/dev/null || echo "WARN: could not enable $u"
 done
