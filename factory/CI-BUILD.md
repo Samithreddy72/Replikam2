@@ -59,6 +59,29 @@ stripped) a trial would fail that gate and roll back. Fine today — the A/B car
 combined dev-Pi lineage; the pure-bridge health criteria are a follow-up when the control
 plane is split off.
 
+## Drift sync: image now matches the proven device state
+The image provisioning had drifted behind the running bridge. Reconciled:
+- **Hardware watchdog armed** — `pi/configs/kit-watchdog.conf` is now `RuntimeWatchdogSec=15`
+  (was `0`). The old `0` dated to commit f370860's boot-with-client reboot-spiral concern;
+  that case was re-tested 2026-07-23 (client enumerated, armed, rebooted) and did **not**
+  spiral. RebootWatchdogSec=2min bounds a hung shutdown.
+- **`bridge-diagnose.sh`** — adds mesh / gadget-AV / media-health capture and uses
+  `vcgencmd get_throttled` for the power section (sticky bits, not dmesg).
+- **`bridge-feeder.sh` + `bridge-up-all.sh`** — idle test-pattern bumped to 640x360@20
+  (local-test / manual bring-up path; production is `bridge-feeder-net`).
+- **`bridge-powertrim.sh`** — re-enables the ACT (mmc0) + PWR LEDs for unit-status
+  visibility instead of blanking them (a few mA; aids field diagnosis).
+
+## Deferred: read-only (overlay) root — NOT shipped here, and why
+Read-only overlay root (`overlayroot="tmpfs:recurse=0"`) is live on the dev card but is
+**deliberately not baked into this CI image yet.** It depends on the separate `/data`
+partition to hold persistent writes (DB, tailscale identity, `/etc/bridge`). This CI image is
+still a single-partition raspios layout (boot + root, **no `/data`, no A/B**) — enabling
+overlayroot on it would send *every* write to tmpfs and lose it on reboot (the exact
+`recurse=0` bug, but unavoidable with no `/data` to exclude). Read-only root must therefore
+land **together with the flashable full-disk image** (the `--disk` build that creates
+BRIDGEBOOT + rootA + rootB + `/data`). Tracked there, not here.
+
 ## Known iteration points (first CI run will likely need a tweak or two)
 - **DKMS on the pinned kernel** (`v4l2loopback` + `update-initramfs -c -k 6.12.93…`) is the
   fragile part in an emulated rootfs — needs the pinned headers + `gcc-12`, which we install;
