@@ -1,0 +1,90 @@
+name: build-image
+
+# Builds a flashable, signed, SECRET-FREE NetBridge OS image (Journey 1 of the product
+# walkthrough) in CI — replacing the manual factory/GOLDEN-IMAGE.md dd process.
+# Trigger: push a tag `vX.Y.Z`, or run manually (workflow_dispatch).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image version, e.g. 2.0.1 (defaults to 2.0.0)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write        # publish the release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute version
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then V="${{ github.event.inputs.version }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then V="${GITHUB_REF_NAME#v}"
+          else V="2.0.0"; fi
+          echo "version=${V}-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # arm-runner emulates a Raspberry Pi OS arm64 rootfs and runs our provisioning
+      # inside it (chroot + binfmt/qemu). The repo checkout is copied to /opt/replikam2.
+      - name: Build Raspberry Pi OS image
+        id: build
+        uses: pguyot/arm-runner-action@v2
+        with:
+          base_image: raspios_lite_arm64:latest
+          image_additional_mb: 2500
+          copy_repository_path: /opt/replikam2
+          optimize_image: 'yes'
+          commands: |
+            IMAGE_VERSION="${{ steps.ver.outputs.version }}" REPLIKAM_REPO=/opt/replikam2 \
+              bash /opt/replikam2/factory/ci-build-image.sh
+
+      - name: Package, hash, and sign manifest
+        id: pkg
+        env:
+          OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          OUT="netbridge-os-${V}.img"
+          mv "${{ steps.build.outputs.image }}" "$OUT"
+          xz -T0 -6 "$OUT"                                   # -> ${OUT}.xz
+          SHA=$(sha256sum "${OUT}.xz" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "${OUT}.xz")
+          cat > manifest.txt <<EOF
+          product=netbridge-os
+          version=${V}
+          image=${OUT}.xz
+          sha256=${SHA}
+          size=${SIZE}
+          kernel=6.12.93+rpt-rpi-v8
+          built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EOF
+          if [ -n "${OTA_SIGNING_KEY:-}" ]; then
+            printf '%s' "$OTA_SIGNING_KEY" > /tmp/ota-key.pem
+            openssl dgst -sha256 -sign /tmp/ota-key.pem -out manifest.txt.sig manifest.txt
+            shred -u /tmp/ota-key.pem
+            echo "signed=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::OTA_SIGNING_KEY secret not set — publishing UNSIGNED. Add the repo secret to enable signing."
+            echo "signed=no" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          SIG=""; [ -f manifest.txt.sig ] && SIG=manifest.txt.sig
+          gh release create "v${V}" \
+            --title "netbridge-os ${V}" \
+            --notes "Automated secret-free image build. Signed: ${{ steps.pkg.outputs.signed }}." \
+            netbridge-os-*.img.xz manifest.txt $SIG \
+          || gh release upload "v${V}" netbridge-os-*.img.xz manifest.txt $SIG --clobber
