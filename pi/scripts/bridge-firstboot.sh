@@ -12,6 +12,23 @@
 set -euo pipefail
 log(){ logger -t bridge-firstboot "$*"; echo "bridge-firstboot: $*"; }
 
+# 0. grow /data (p4, the LAST partition) to fill the card. The factory disk image
+# (factory/build-disk-image.sh) ships a minimal p4 so the .img stays small; expand it
+# once so the DB/logs/tailscale state get the whole card. Idempotent + only ever touches
+# partition 4 (never rootA/rootB). Marker lives on /data so a reflash re-expands but an
+# OTA (which never rewrites /data) does not. Runs before the provision-conf early-exit.
+DISK=/dev/mmcblk0
+if mountpoint -q /data && [ -b "${DISK}p4" ] && [ ! -f /data/.expanded ]; then
+  if command -v growpart >/dev/null 2>&1; then
+    growpart "$DISK" 4 && log "grew ${DISK}p4" || log "growpart: no change (already full?)"
+  else
+    parted -s "$DISK" resizepart 4 100% && log "resized ${DISK}p4 (parted)" || log "parted resizepart: no change"
+  fi
+  partprobe "$DISK" 2>/dev/null || true
+  resize2fs "${DISK}p4" && log "resize2fs ${DISK}p4 done" || log "resize2fs: no change"
+  touch /data/.expanded 2>/dev/null || true
+fi
+
 CONF=/boot/firmware/bridge-provision.conf
 [ -f "$CONF" ] || CONF=/boot/bridge-provision.conf
 [ -f "$CONF" ] || { log "no provision conf found; nothing to do"; exit 0; }
