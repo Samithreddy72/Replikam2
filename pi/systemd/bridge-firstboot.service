@@ -1,0 +1,14 @@
+[Unit]
+Description=NetBridge first-boot provisioning (applies bridge-provision.conf, generates per-device setup-AP key, then self-disables)
+# Runs once on a freshly flashed card, before the agent could enroll or the gadget comes up.
+After=local-fs.target systemd-tmpfiles-setup.service
+Before=bridge-agent.service bridge-gadget.service
+ConditionPathExists=/usr/local/bin/bridge-firstboot.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bridge-firstboot.sh
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
