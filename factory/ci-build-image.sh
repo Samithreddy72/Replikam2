@@ -43,6 +43,16 @@ cp -v /boot/vmlinuz-$KVER    /boot/firmware/kernel612.img
 cp -v /boot/initrd.img-$KVER /boot/firmware/initramfs612
 apt-mark hold linux-image-rpi-v8 linux-headers-rpi-v8 || true
 
+# Overlay-capable initramfs for READ-ONLY ROOT. This single-partition image stays
+# writable (its config.txt uses the plain initramfs612 above); the OVERLAY initramfs is
+# only *engaged* by the flashable full-disk image (factory/build-disk-image.sh), which is
+# safe because that image has a separate /data to hold writes. We build it here so p1
+# carries it. Install overlayroot, rebuild the initramfs (now with the overlayroot hook),
+# ship it as initramfs612-overlay, leaving initramfs612 overlay-free. Mirrors the device.
+apt-get install -y --no-install-recommends overlayroot
+update-initramfs -u -k "$KVER"
+cp -v /boot/initrd.img-$KVER /boot/firmware/initramfs612-overlay
+
 # ---------------- Stage 4: boot config ----------------
 log "boot config (dwc2 peripheral + pinned kernel)"
 CFG=/boot/firmware/config.txt; CMD=/boot/firmware/cmdline.txt

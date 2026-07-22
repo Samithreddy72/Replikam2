@@ -48,16 +48,27 @@ Runs on a Linux host / CI runner as root (loop devices + mkfs). **Verified struc
 PARTUUIDs/labels/fstypes, per-slot fstab (root 02 vs 03), overlayroot + remount-fs mask,
 cmdline/config, ssh-host-key strip, `/data` skeleton + pubkey — all correct.
 
-## CI wiring — the remaining step (NOT done yet)
-To emit this from a tag push, a CI job must feed a rootfs + boot into the builder. Two
-prerequisites on the rootfs build (`ci-build-image.sh`) first:
-1. **Install `overlayroot` + build `initramfs612-overlay`** (`update-initramfs -c -k
-   6.12.93+rpt-rpi-v8` with overlayroot present) so p1 carries the overlay-capable initramfs —
-   otherwise read-only root will not engage (the builder warns when it's missing). Mirror the
-   device's proven steps.
-2. Decide **combined vs pure-bridge**: today's card is bridge+control-plane (ships fleet-brain);
-   the CI rootfs is pure-bridge (fleet-brain stripped). A combined flashable image should source
-   a rootfs that still carries fleet-brain. Part of the bridge-vs-combined split (see CI-BUILD.md).
+## CI wiring — DONE (`.github/workflows/build-image.yml` + `factory/ci-disk-from-image.sh`)
+A tag push now produces + signs BOTH fleet artifacts from one arm-runner build:
+- `rootfs.tar.zst` — the OTA payload `bridge-update.sh` consumes (manifest.txt, `image=rootfs.tar.zst`).
+- `netbridge-os-<V>.img.xz` — this flashable full-disk image (manifest-disk.txt).
+- plus `ota-pubkey.pem` (derived from the signing key) as the shipped root of trust.
 
-Physical validation (flash a card + boot) is still pending — the structural build proves the
-assembler, not a real boot.
+`ci-build-image.sh` now also installs `overlayroot` and builds `initramfs612-overlay` so p1
+carries the overlay-capable initramfs (else read-only root would not engage — the builder warns).
+`ci-disk-from-image.sh` holds all the glue (loop-extract rootfs+boot → build-disk-image.sh →
+manifests + EC signatures) so it is testable off-CI against any raspios-style `.img`.
+
+**Verified off-CI** 2026-07-23 on the Pi: a synthetic 2-partition raspios image through
+`ci-disk-from-image.sh` produced all artifacts, both manifests **signature-verified** against the
+derived pubkey, OTA sha256 matched, and the disk image had correct PARTUUIDs / per-slot fstab /
+overlay+remount-fs mask / host-key strip / `/data` skeleton.
+
+### Still pending
+1. **A real CI run** — the arm-runner build itself (incl. the new `overlayroot` +
+   `initramfs612-overlay` step in `ci-build-image.sh`, which runs in the emulated rootfs) is only
+   exercised on an actual tag push. Watch that step on the first run.
+2. **Combined vs pure-bridge** — the CI rootfs is pure-bridge (fleet-brain stripped), so the disk
+   image is a pure-bridge card. A combined flashable image needs a rootfs that still carries
+   fleet-brain (bridge-vs-combined split, see CI-BUILD.md).
+3. **Physical flash-boot test** — the structural build proves the assembler, not a real boot.
