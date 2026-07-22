@@ -1,0 +1,97 @@
+#!/bin/bash
+# bridge-ab — A/B slot management via Raspberry Pi tryboot (single boot partition).
+# Committed slot lives in cmdline.txt; a trial slot lives in cmdline.tryboot and is
+# selected only during a `reboot "tryboot"` one-shot via config.txt's [tryboot] filter.
+# Run as root (via sudo) for tryboot/commit/rollback. healthcheck is run by systemd.
+set -uo pipefail
+BOOT=/boot/firmware
+CMDLINE="$BOOT/cmdline.txt"
+TRYCMD="$BOOT/cmdline.tryboot"
+TRYBOOTTXT="$BOOT/tryboot.txt"   # read INSTEAD of config.txt during a tryboot trial
+A_UUID="0d18cc81-02"   # rootA = p2
+B_UUID="0d18cc81-03"   # rootB = p3
+
+slot_of_uuid(){ case "$1" in "$A_UUID") echo A;; "$B_UUID") echo B;; *) echo "?";; esac; }
+uuid_of_slot(){ case "$1" in A|a) echo "$A_UUID";; B|b) echo "$B_UUID";; *) echo "";; esac; }
+running_uuid(){ sed -n 's/.*root=PARTUUID=\([0-9a-fA-F-]*\).*/\1/p' /proc/cmdline; }
+committed_uuid(){ sed -n 's/.*root=PARTUUID=\([0-9a-fA-F-]*\).*/\1/p' "$CMDLINE"; }
+is_trial(){ grep -q 'bridge_tryboot=1' /proc/cmdline; }
+
+health_ok(){
+  local up ts hz
+  up=$(systemctl is-active bridge-gadget bridge-uvcd bridge-feeder-net \
+        bridge-feeder-audio bridge-return-audio fleet-brain 2>/dev/null | grep -c '^active$')
+  tailscale status >/dev/null 2>&1 && ts=1 || ts=0
+  hz=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/healthz 2>/dev/null)
+  [ "$up" = "6" ] && [ "$ts" = "1" ] && [ "$hz" = "200" ]
+}
+
+case "${1:-status}" in
+  status)
+    ru=$(running_uuid); cu=$(committed_uuid)
+    rs=$(slot_of_uuid "$ru"); cs=$(slot_of_uuid "$cu")
+    other=A; [ "$cs" = "A" ] && other=B
+    echo "running slot : $rs  (PARTUUID=$ru)"
+    echo "committed    : $cs  (PARTUUID=$cu)"
+    echo "standby slot : $other  (PARTUUID=$(uuid_of_slot $other))"
+    is_trial && echo "boot type    : *** TRYBOOT TRIAL (uncommitted) ***" || echo "boot type    : normal"
+    [ -e "$TRYCMD" ] && echo "pending trial: $TRYCMD exists"
+    exit 0   # status must never report failure just because no trial file exists
+    ;;
+  tryboot)
+    tgt="${2:?usage: bridge-ab tryboot <A|B>}"
+    tu=$(uuid_of_slot "$tgt"); [ -n "$tu" ] || { echo "bad slot '$tgt'"; exit 1; }
+    # Build trial cmdline from the committed cmdline (which never carries the marker),
+    # swap root=, append the trial marker.
+    sed "s/root=PARTUUID=[0-9a-fA-F-]*/root=PARTUUID=$tu/" "$CMDLINE" > /tmp/.cmdline.tryboot
+    sed -i 's/[[:space:]]*$/ bridge_tryboot=1/' /tmp/.cmdline.tryboot
+    cp /tmp/.cmdline.tryboot "$TRYCMD"; rm -f /tmp/.cmdline.tryboot
+    echo "trial cmdline -> slot ${tgt^^} (PARTUUID=$tu):"; cat "$TRYCMD"
+    # This firmware ignores the [tryboot] cmdline filter in config.txt, so regenerate a full
+    # tryboot.txt (read INSTEAD of config.txt during a trial) from the LIVE config.txt so it
+    # never goes stale, pointing the cmdline at cmdline.tryboot.
+    { grep -v '^cmdline=' "$BOOT/config.txt"; printf '\n[all]\ncmdline=cmdline.tryboot\n'; } > "$TRYBOOTTXT"
+    echo "regenerated $TRYBOOTTXT from live config.txt"
+    echo ">>> rebooting into TRYBOOT now (one-shot; a power-cycle rolls back to committed slot)"
+    # systemd 257 ignores the positional `reboot "0 tryboot"` arg — must use --reboot-argument
+    systemctl reboot --reboot-argument="0 tryboot"
+    ;;
+  commit)
+    ru=$(running_uuid)
+    is_trial || echo "note: not in a trial boot; committing the running slot anyway."
+    sed -i "s/root=PARTUUID=[0-9a-fA-F-]*/root=PARTUUID=$ru/; s/[[:space:]]*bridge_tryboot=1//g" "$CMDLINE"
+    rm -f "$TRYCMD" "$TRYBOOTTXT"
+    echo "COMMITTED running slot $(slot_of_uuid "$ru") (PARTUUID=$ru) as permanent."
+    echo "cmdline.txt now:"; cat "$CMDLINE"
+    ;;
+  rollback)
+    rm -f "$TRYCMD"
+    echo "rolling back: rebooting to committed slot $(slot_of_uuid "$(committed_uuid)")..."
+    reboot
+    ;;
+  healthcheck)
+    if ! is_trial; then echo "normal boot — no trial to evaluate."; exit 0; fi
+    echo "TRYBOOT TRIAL on slot $(slot_of_uuid "$(running_uuid)") — health-checking up to 120s..."
+    for i in $(seq 1 24); do
+      if health_ok; then
+        : > /run/bridge-ab-trial-ok
+        if [ -e "$BOOT/.ota-autocommit" ]; then
+          rm -f "$BOOT/.ota-autocommit"
+          logger -t bridge-ab "TRIAL HEALTHY + auto-commit armed — committing slot $(running_uuid)"
+          echo "TRIAL HEALTHY — auto-committing (OTA)."
+          "$0" commit
+        else
+          logger -t bridge-ab "TRIAL HEALTHY on $(running_uuid) — awaiting manual 'bridge-ab commit'"
+          echo "TRIAL HEALTHY — run 'sudo bridge-ab commit' to persist, or power-cycle to roll back."
+        fi
+        exit 0
+      fi
+      sleep 5
+    done
+    rm -f "$BOOT/.ota-autocommit"
+    logger -t bridge-ab "TRIAL FAILED health-check — auto-rolling back (reboot)"
+    echo "TRIAL FAILED — auto-rolling back."
+    reboot
+    ;;
+  *) echo "usage: bridge-ab {status|tryboot <A|B>|commit|rollback|healthcheck}"; exit 1;;
+esac

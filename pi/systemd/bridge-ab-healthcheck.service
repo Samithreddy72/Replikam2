@@ -1,0 +1,12 @@
+[Unit]
+Description=NetBridge A/B tryboot health-check + auto-rollback
+After=multi-user.target network-online.target fleet-brain.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bridge-ab healthcheck
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

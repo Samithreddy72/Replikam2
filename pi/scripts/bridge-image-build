@@ -1,0 +1,63 @@
+#!/bin/bash
+# bridge-image-build — snapshot the running root into a signed-manifest OTA package.
+# Produces <outdir>/rootfs.tar.zst + <outdir>/manifest.txt.
+# The manifest is signed separately (off-device, by the build host / CI) — see bridge-image-sign.
+# Usage: bridge-image-build <version> [outdir]
+set -euo pipefail
+VERSION="${1:?usage: bridge-image-build <version> [outdir]}"
+OUT="${2:-/data/ota-build}"
+VERFILE_REL="etc/netbridge-image-version"
+
+mkdir -p "$OUT"
+TAR="$OUT/rootfs.tar"
+ZST="$OUT/rootfs.tar.zst"
+MAN="$OUT/manifest.txt"
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE" "$TAR"' EXIT
+
+echo "[build] snapshotting running root ($(findmnt -no PARTUUID /)) -> tar ..."
+# --one-file-system keeps us inside rootfs (skips /data, /boot/firmware, binds, virtual FS).
+# Explicitly exclude virtual/mount dirs too (quiets 'file changed' noise on /sys etc.).
+# Exclude the live version file so we can inject the new one; exclude machine-specific cruft.
+# tar exits 1 on benign 'file changed as we read it'; tolerate <=1, fail on >=2 (real error).
+tar --one-file-system --numeric-owner --acls --xattrs \
+    --warning=no-file-changed --warning=no-file-removed \
+    --exclude='./proc/*' --exclude='./sys/*' --exclude='./dev/*' \
+    --exclude='./run/*' --exclude='./tmp/*' --exclude='./mnt/*' --exclude='./media/*' \
+    --exclude='./data' --exclude='./boot/firmware/*' \
+    --exclude='./etc/NetworkManager/system-connections/*' \
+    --exclude="./$VERFILE_REL" \
+    --exclude='./lost+found' \
+    --exclude='./var/cache/apt/archives/*.deb' \
+    --exclude='./var/log/*' \
+    --exclude='./root/.cache' \
+    --exclude='./home/*/.cache' \
+    -cf "$TAR" -C / . || [ $? -le 1 ]
+
+echo "[build] injecting version marker: $VERSION"
+mkdir -p "$STAGE/etc"
+printf '%s\n' "$VERSION" > "$STAGE/$VERFILE_REL"
+tar --append -f "$TAR" -C "$STAGE" "$VERFILE_REL"
+
+echo "[build] compressing (zstd -12 --long, multithreaded) ..."
+zstd -q -12 --long=27 -T0 -f "$TAR" -o "$ZST"
+
+SHA=$(sha256sum "$ZST" | cut -d' ' -f1)
+SIZE=$(stat -c%s "$ZST")
+KERNEL=$(uname -r)
+BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+cat > "$MAN" <<EOF
+version=$VERSION
+image=rootfs.tar.zst
+sha256=$SHA
+size=$SIZE
+kernel=$KERNEL
+built=$BUILT
+EOF
+
+echo "[build] done:"
+echo "  image:    $ZST ($(numfmt --to=iec $SIZE 2>/dev/null || echo ${SIZE}B))"
+echo "  manifest: $MAN"
+echo "  sha256:   $SHA"
+echo "  --- manifest.txt ---"; sed 's/^/  /' "$MAN"
