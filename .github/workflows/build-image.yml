@@ -83,9 +83,12 @@ jobs:
         run: |
           set -euo pipefail
           V="${{ steps.ver.outputs.version }}"
+          REPO="${{ github.repository }}"
           cd /mnt/work/out
-          gh release create "v${V}" \
+          # --repo is REQUIRED here: we cd'd out of the checkout, so gh can't infer the
+          # repo from git (it errored "not a git repository" otherwise).
+          gh release create "v${V}" --repo "$REPO" \
             --title "netbridge-os ${V}" \
             --notes "Automated build. Signed: ${{ steps.pkg.outputs.signed }}. Assets: full-disk flashable image (netbridge-os-${V}.img.xz, A/B + /data + read-only root), OTA rootfs (rootfs.tar.zst for bridge-update.sh), signed manifests, and the OTA public key." \
             ./* \
-          || gh release upload "v${V}" ./* --clobber
+          || gh release upload "v${V}" --repo "$REPO" ./* --clobber

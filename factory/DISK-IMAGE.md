@@ -64,10 +64,21 @@ manifests + EC signatures) so it is testable off-CI against any raspios-style `.
 derived pubkey, OTA sha256 matched, and the disk image had correct PARTUUIDs / per-slot fstab /
 overlay+remount-fs mask / host-key strip / `/data` skeleton.
 
+### Known limits observed on the first real CI run (`v0.0.2-citest`, run 29959662109)
+- The build+assemble+sign path **passed on a full-size image**: `rootfs.tar.zst` 1.11 GB,
+  `netbridge-os-*.img.xz` 2.03 GB (8.8 GB raw), both manifests signed. Only the Publish step
+  failed — a `gh` bug (missing `--repo` after `cd` out of the checkout), fixed.
+- ⚠️ **The `.img.xz` is 2.03 GB — just under GitHub's 2 GiB (2,147,483,648 B) release-asset
+  limit.** As the rootfs grows it will cross that and break the upload. Mitigations to take
+  before then: shrink the image (populate only rootA at factory, fill rootB on first OTA), or
+  publish the disk image as a split/multipart asset.
+- ⚠️ **`xz -6` on the ~8.8 GB image is slow (~15–20 min).** Can't just lower the preset — a
+  weaker ratio would push the asset over 2 GiB. Coupled with the shrink above, a faster preset
+  becomes safe.
+
 ### Still pending
-1. **A real CI run** — the arm-runner build itself (incl. the new `overlayroot` +
-   `initramfs612-overlay` step in `ci-build-image.sh`, which runs in the emulated rootfs) is only
-   exercised on an actual tag push. Watch that step on the first run.
+1. ✅ **A real CI run happened** (run 29959662109): build + assemble + sign all green; only
+   Publish failed (now fixed). Re-tag to get a fully-green publish.
 2. **Combined vs pure-bridge** — the CI rootfs is pure-bridge (fleet-brain stripped), so the disk
    image is a pure-bridge card. A combined flashable image needs a rootfs that still carries
    fleet-brain (bridge-vs-combined split, see CI-BUILD.md).
