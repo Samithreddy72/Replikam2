@@ -4,7 +4,7 @@ set +e
 sudo modprobe libcomposite
 sudo modprobe -r v4l2loopback 2>/dev/null
 sudo modprobe v4l2loopback video_nr=40 card_label=BridgeCam exclusive_caps=1
-sudo v4l2loopback-ctl set-caps /dev/video40 "YUYV:320x180@15/1"
+sudo v4l2loopback-ctl set-caps /dev/video40 "YUYV:640x360@20/1"
 sudo /usr/local/bin/bridge-gadget-down.sh
 sudo bash /home/pi/uvc-raw-setup.sh start >/dev/null 2>&1
 pkill -9 -f gst-launch 2>/dev/null; sleep 1
