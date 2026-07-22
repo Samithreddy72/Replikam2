@@ -45,36 +45,37 @@ jobs:
             IMAGE_VERSION="${{ steps.ver.outputs.version }}" REPLIKAM_REPO=/opt/replikam2 \
               bash /opt/replikam2/factory/ci-build-image.sh
 
-      - name: Package, hash, and sign manifest
+      # From the arm-runner's single-partition image, derive BOTH fleet artifacts and
+      # sign them: the OTA rootfs.tar.zst (bridge-update.sh) AND the flashable full-disk
+      # A/B + /data image (factory/build-disk-image.sh). All logic lives in the script so
+      # it can be tested off-CI against any raspios-style .img. Heavy work on /mnt (the
+      # large ephemeral disk) so the ~8GB disk image + xz don't exhaust the root fs.
+      - name: Assemble disk image + OTA rootfs, sign
         id: pkg
         env:
           OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
         run: |
           set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends dosfstools parted zstd xz-utils
           V="${{ steps.ver.outputs.version }}"
-          OUT="netbridge-os-${V}.img"
-          mv "${{ steps.build.outputs.image }}" "$OUT"
-          xz -T0 -6 "$OUT"                                   # -> ${OUT}.xz
-          SHA=$(sha256sum "${OUT}.xz" | cut -d' ' -f1)
-          SIZE=$(stat -c%s "${OUT}.xz")
-          cat > manifest.txt <<EOF
-          product=netbridge-os
-          version=${V}
-          image=${OUT}.xz
-          sha256=${SHA}
-          size=${SIZE}
-          kernel=6.12.93+rpt-rpi-v8
-          built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          EOF
+          sudo mkdir -p /mnt/work && sudo chmod 777 /mnt/work
+          export TMPDIR=/mnt/work
+          KEYARG=""
           if [ -n "${OTA_SIGNING_KEY:-}" ]; then
-            printf '%s' "$OTA_SIGNING_KEY" > /tmp/ota-key.pem
-            openssl dgst -sha256 -sign /tmp/ota-key.pem -out manifest.txt.sig manifest.txt
-            shred -u /tmp/ota-key.pem
+            printf '%s' "$OTA_SIGNING_KEY" > "$TMPDIR/ota-key.pem"
+            KEYARG="--signing-key $TMPDIR/ota-key.pem"
             echo "signed=yes" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::OTA_SIGNING_KEY secret not set — publishing UNSIGNED. Add the repo secret to enable signing."
             echo "signed=no" >> "$GITHUB_OUTPUT"
           fi
+          sudo TMPDIR=/mnt/work bash factory/ci-disk-from-image.sh \
+            --image "${{ steps.build.outputs.image }}" \
+            --version "$V" --outdir /mnt/work/out $KEYARG
+          [ -f "$TMPDIR/ota-key.pem" ] && shred -u "$TMPDIR/ota-key.pem" || true
+          sudo chown -R "$(id -u):$(id -g)" /mnt/work/out
+          ls -la /mnt/work/out
 
       - name: Publish release
         env:
@@ -82,9 +83,9 @@ jobs:
         run: |
           set -euo pipefail
           V="${{ steps.ver.outputs.version }}"
-          SIG=""; [ -f manifest.txt.sig ] && SIG=manifest.txt.sig
+          cd /mnt/work/out
           gh release create "v${V}" \
             --title "netbridge-os ${V}" \
-            --notes "Automated secret-free image build. Signed: ${{ steps.pkg.outputs.signed }}." \
-            netbridge-os-*.img.xz manifest.txt $SIG \
-          || gh release upload "v${V}" netbridge-os-*.img.xz manifest.txt $SIG --clobber
+            --notes "Automated build. Signed: ${{ steps.pkg.outputs.signed }}. Assets: full-disk flashable image (netbridge-os-${V}.img.xz, A/B + /data + read-only root), OTA rootfs (rootfs.tar.zst for bridge-update.sh), signed manifests, and the OTA public key." \
+            ./* \
+          || gh release upload "v${V}" ./* --clobber

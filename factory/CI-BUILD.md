@@ -9,9 +9,14 @@ On a tag push (`vX.Y.Z`) or a manual run, `.github/workflows/build-image.yml`:
    (`pguyot/arm-runner-action`), running `factory/ci-build-image.sh` — which replays
    `setup.sh` stages 2–7 (packages, pinned kernel 6.12.93, boot config, the `pi/` payload,
    Tailscale daemon **unjoined**, unit enablement) then **generalizes** the image.
-2. **Signs** a `manifest.txt` (product, version, sha256, size, kernel, built) with your OTA
-   key (`openssl dgst -sha256`) → `manifest.txt.sig`.
-3. **Publishes** a GitHub release with `netbridge-os-<version>.img.xz` + manifest + signature.
+2. **Derives** the two fleet artifacts from that image (`factory/ci-disk-from-image.sh`):
+   the OTA `rootfs.tar.zst` (for `bridge-update.sh`) and the flashable full-disk
+   `netbridge-os-<version>.img.xz` (A/B + `/data` + read-only root — see `DISK-IMAGE.md`).
+   `ci-build-image.sh` also builds `initramfs612-overlay` so the disk image can boot read-only.
+3. **Signs** both manifests (`manifest.txt` for OTA, `manifest-disk.txt` for the disk image)
+   with your OTA key (`openssl dgst -sha256`), and derives+ships `ota-pubkey.pem`.
+4. **Publishes** a GitHub release with the disk image, the OTA rootfs, both signed manifests,
+   and the OTA public key.
 
 ## Secret-free = generalized
 `ci-build-image.sh` strips every per-device identity, so one image flashes any number of
