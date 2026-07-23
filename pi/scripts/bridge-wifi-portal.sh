@@ -34,17 +34,23 @@ ap_ssid() {
 # receiver typed the venue's WiFi password. Now: 12 random chars, generated once
 # per device on first use and persisted, so it matches the printed label for the
 # life of the card. Regenerating would strand the label, hence create-if-absent.
+# The setup-AP WPA2 key. Fixed default "bridge2626" (>=8 chars, always valid). CRITICAL: this
+# must NEVER return empty — wifi-connect rejects a 0-length password and the AP never appears
+# (the 2026-07-24 defect: /etc/bridge was read-only, the file was empty, the portal looped).
+# So: use the persisted file if it has content; else try to write the default; and no matter
+# what, echo a valid password so the AP always comes up.
+SETUP_PASS_DEFAULT="bridge2626"
 ap_pass() {
-  if [ ! -s "$PASS_FILE" ]; then
-    install -d -m 755 /etc/bridge
-    # Ambiguity-free alphabet (no O/0, I/1/l) — this gets read off a sticker and
-    # typed on a phone keyboard by someone who cannot ask us for help.
-    (umask 077; LC_ALL=C tr -dc 'ABCDEFGHJKMNPQRSTUVWXYZ23456789' </dev/urandom \
-       | head -c 12 > "$PASS_FILE") 2>/dev/null
-    chmod 600 "$PASS_FILE"
-    logger -t bridge-wifi-portal "generated new setup-AP passphrase (label must match $PASS_FILE)"
+  if [ -s "$PASS_FILE" ]; then cat "$PASS_FILE"; return; fi
+  install -d -m 755 /etc/bridge 2>/dev/null || true
+  if printf '%s' "$SETUP_PASS_DEFAULT" > "$PASS_FILE" 2>/dev/null; then
+    chmod 600 "$PASS_FILE" 2>/dev/null || true
+    logger -t bridge-wifi-portal "wrote setup-AP passphrase to $PASS_FILE"
+    cat "$PASS_FILE"
+  else
+    logger -t bridge-wifi-portal "WARN: $PASS_FILE unwritable — using built-in default"
+    printf '%s' "$SETUP_PASS_DEFAULT"
   fi
-  cat "$PASS_FILE"
 }
 
 # Give NetworkManager time to (re)connect to a known WiFi / Ethernet on boot before deciding

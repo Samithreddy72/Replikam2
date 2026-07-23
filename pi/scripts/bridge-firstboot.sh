@@ -66,15 +66,14 @@ EOF
 chmod 600 /etc/default/bridge-agent
 echo "${BRIDGE_VERSION:-dev}" >/etc/bridge/version
 
-# 2b. per-device setup-AP passphrase. Generated HERE (not baked into the image)
-# so every unit gets a different key — a shared or SSID-derived key would let
-# anyone in radio range join the setup AP and watch the venue's WiFi password
-# being typed. `bridge setup-pass` prints it for the label.
+# 2b. setup-AP passphrase. Fixed to "bridge2626" for now (Samith's call) so the label /
+# onboarding is predictable while we get the portal working; can move back to a per-device
+# random key later. Written to /etc/bridge (a /data bind) so it persists.
+SETUP_PASS="${SETUP_PASS:-bridge2626}"
 if [ ! -s /etc/bridge/setup-wifi-pass ]; then
-  LC_ALL=C tr -dc 'ABCDEFGHJKMNPQRSTUVWXYZ23456789' </dev/urandom | head -c 12 \
-    >/etc/bridge/setup-wifi-pass
-  chmod 600 /etc/bridge/setup-wifi-pass
-  log "generated per-device setup-AP passphrase"
+  printf '%s' "$SETUP_PASS" >/etc/bridge/setup-wifi-pass 2>/dev/null \
+    && { chmod 600 /etc/bridge/setup-wifi-pass; log "set setup-AP passphrase"; } \
+    || log "WARN: could not write /etc/bridge/setup-wifi-pass (is /data mounted?)"
 fi
 
 # 3. start the agent (enrolls on first tick, then heartbeats)

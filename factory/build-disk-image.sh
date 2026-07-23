@@ -125,12 +125,28 @@ else tar -xf "$BOOTSRC" -C "$MNT/p1"; fi
 cat > "$MNT/p1/cmdline.txt" <<EOF
 console=serial0,115200 console=tty1 root=PARTUUID=0d18cc81-02 rootfstype=ext4 fsck.repair=yes rootwait modules-load=dwc2 cfg80211.ieee80211_regdom=IN overlayroot=tmpfs:recurse=0
 EOF
-# ensure config.txt selects the pinned kernel + the overlay-capable initramfs
-if [ -f "$MNT/p1/config.txt" ]; then
-  grep -q '^kernel=kernel612.img'                 "$MNT/p1/config.txt" || echo 'kernel=kernel612.img'                 >> "$MNT/p1/config.txt"
-  grep -q 'initramfs612-overlay'                  "$MNT/p1/config.txt" || echo 'initramfs initramfs612-overlay followkernel' >> "$MNT/p1/config.txt"
+# Complete the NetBridge boot config. ci-build-image's stage 4 could NOT do this (the arm-runner
+# chroot never mounts the real boot partition), so author it here: pinned kernel, overlay-capable
+# initramfs, dwc2 in PERIPHERAL mode (the USB webcam gadget — host mode breaks it), disable-bt,
+# arm_freq. Appended under [all] so it wins over any earlier conditional section.
+if [ -f "$MNT/p1/config.txt" ] && ! grep -q 'dtoverlay=dwc2,dr_mode=peripheral' "$MNT/p1/config.txt"; then
+  cat >> "$MNT/p1/config.txt" <<'CFG'
+
+# --- NetBridge ---
+[all]
+kernel=kernel612.img
+initramfs initramfs612-overlay followkernel
+dtoverlay=dwc2,dr_mode=peripheral
+dtoverlay=disable-bt
+arm_freq=900
+CFG
 fi
-[ -f "$MNT/p1/initramfs612-overlay" ] || log "WARN: initramfs612-overlay missing on boot src — read-only root will NOT engage (rootfs build must create it)"
+# FAIL LOUD: the pinned kernel + overlay initramfs MUST be on the boot partition, else the card
+# boots the wrong kernel and read-only root never engages (the 2026-07-24 flash-test defect).
+for _bf in kernel612.img initramfs612-overlay; do
+  [ -f "$MNT/p1/$_bf" ] || die "boot partition missing $_bf — pinned kernel / read-only root would fail"
+done
+log "  boot: kernel612.img + initramfs612-overlay present, config set"
 # drop stale committed-slot artifacts a snapshot might carry
 rm -f "$MNT/p1/tryboot.txt" "$MNT/p1/cmdline.tryboot" "$MNT/p1/.ota-autocommit" \
       "$MNT/p1"/cmdline.txt.* "$MNT/p1"/config.txt.* 2>/dev/null || true
@@ -163,7 +179,8 @@ FSTAB
   rm -f "$mp/etc/default/bridge-agent" 2>/dev/null || true    # provision writes it
   # bind mountpoints must exist + be empty (their content lives on /data)
   install -d "$mp/etc/bridge" "$mp/var/lib/tailscale" \
-             "$mp/etc/NetworkManager/system-connections" "$mp/home/pi/diagnostics"
+             "$mp/etc/NetworkManager/system-connections" "$mp/home/pi/diagnostics" \
+             "$mp/data"
   sync
   umount "$mp"
 }

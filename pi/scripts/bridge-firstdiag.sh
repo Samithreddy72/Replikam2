@@ -13,6 +13,10 @@ OUT=/boot/firmware/BRIDGE-DIAG.txt
   echo; echo "--- nmcli ---"; nmcli -t dev 2>&1; echo "radio: $(nmcli radio 2>&1)"; echo "conn: $(nmcli -t -f CONNECTIVITY general 2>&1)"
   echo; echo "--- wifi-connect present? ---"; ls -la /usr/local/sbin/wifi-connect 2>&1; ls /usr/local/share/wifi-connect/ui/index.html 2>&1
   echo; echo "--- setup AP pass generated? ---"; test -s /etc/bridge/setup-wifi-pass && echo present || echo MISSING
+  echo; echo "--- kernel (want 6.12.93 pinned) ---"; uname -r 2>&1; echo "config kernel line: $(grep -E '^kernel=' /boot/firmware/config.txt 2>&1)"
+  echo; echo "--- root + /data mounts ---"; findmnt -no SOURCE,FSTYPE,OPTIONS / 2>&1; findmnt -no SOURCE,FSTYPE,OPTIONS /data 2>&1
+  echo "data.mount: $(systemctl is-active data.mount 2>&1)"; systemctl status data.mount --no-pager 2>&1 | head -8
+  echo "etc-bridge writable? $(touch /etc/bridge/.w 2>&1 && echo yes && rm -f /etc/bridge/.w || echo NO-READONLY)"
   echo; echo "--- /data expanded? ---"; df -h /data 2>&1; echo; lsblk -o NAME,SIZE,LABEL 2>&1
   echo; echo "--- brcm/wlan/regulatory dmesg ---"; dmesg 2>&1 | grep -iE "brcmfmac|wlan|cfg80211|regulatory|rfkill|firmware.*brcm" | tail -40
   echo; echo "--- bridge-wifi-unblock ---"; systemctl status bridge-wifi-unblock.service --no-pager 2>&1 | head -12
