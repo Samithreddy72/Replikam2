@@ -18,10 +18,23 @@ not configured (settings.ts_api_key empty), minting raises MeshNotConfigured and
 the endpoint answers 503 — the feature is simply off, not broken.
 """
 import json
+import re
 import urllib.request
 import urllib.error
 
 from .config import settings
+
+
+def _safe_desc(s: str) -> str:
+    """Tailscale rejects key descriptions containing characters like @ ( ) .
+    (seen live: 'description had invalid characters'). Keep a conservative subset —
+    letters, numbers, spaces, hyphen, underscore — so an email/org label like
+    'samithreddy72@gmail.com (default)' becomes a valid 'samithreddy72 at gmail com
+    default'. Still audit-useful, always accepted."""
+    s = s.replace("@", " at ")
+    s = re.sub(r"[^A-Za-z0-9 _-]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:200] or "netbridge-source"
 
 
 class MeshNotConfigured(Exception):
@@ -56,7 +69,7 @@ def mint_ephemeral_key(description: str) -> dict:
             "tags": _source_tags(),
         }}},
         "expirySeconds": settings.ts_key_ttl_s,
-        "description": description[:200],
+        "description": _safe_desc(description),
     }
     req = urllib.request.Request(
         url, data=json.dumps(body).encode(), method="POST",
