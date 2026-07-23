@@ -27,7 +27,8 @@ apt-get install -y --no-install-recommends \
   python3 python3-pil git meson ninja-build build-essential \
   gcc-12 cpp-12 gcc-12-base libgcc-12-dev \
   network-manager dnsmasq-base rsync ca-certificates curl \
-  cloud-guest-utils parted e2fsprogs
+  cloud-guest-utils parted e2fsprogs \
+  rfkill iw
 
 # ---------------- Stage 3: pinned kernel 6.12.93 (dwc2 freeze fix) ----------------
 log "pinned kernel $KVER"
@@ -134,7 +135,7 @@ for u in bridge-gadget bridge-feeder-net bridge-uvcd bridge-feeder-audio bridge-
          wifi-guardian bridge-powertrim flight-recorder jitter-sentry bridge-supervisor \
          bridge-watchdog.timer bridge-web bridge-wifi-portal bridge-idle-frame \
          bridge-idle-frame.timer gadget-clean-detach bridge-agent.timer \
-         bridge-ab-healthcheck \
+         bridge-ab-healthcheck bridge-wifi-unblock bridge-firstdiag \
          bridge-firstboot bridge-regen-hostkeys; do
   systemctl enable "$u" 2>/dev/null || echo "WARN: could not enable $u"
 done

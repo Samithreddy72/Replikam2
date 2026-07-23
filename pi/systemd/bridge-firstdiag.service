@@ -1,0 +1,10 @@
+[Unit]
+Description=NetBridge boot diagnostic dump to the boot partition
+After=bridge-wifi-portal.service NetworkManager.service
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 100
+ExecStart=/usr/local/bin/bridge-firstdiag.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
