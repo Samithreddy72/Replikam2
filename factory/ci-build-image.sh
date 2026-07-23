@@ -12,6 +12,7 @@ set -uo pipefail
 REPO="${REPLIKAM_REPO:-/opt/replikam2}"
 IMAGE_VERSION="${IMAGE_VERSION:-2.0.0-dev}"
 KVER=6.12.93+rpt-rpi-v8
+WC_VER=v4.11.84            # balena wifi-connect (setup portal)
 cd "$REPO" || { echo "FATAL: repo not found at $REPO"; exit 1; }
 log(){ echo "== ci-build: $* =="; }
 export DEBIAN_FRONTEND=noninteractive
@@ -25,7 +26,7 @@ apt-get install -y --no-install-recommends \
   v4l2loopback-dkms v4l2loopback-utils v4l-utils alsa-utils \
   python3 python3-pil git meson ninja-build build-essential \
   gcc-12 cpp-12 gcc-12-base libgcc-12-dev \
-  network-manager rsync ca-certificates curl
+  network-manager dnsmasq-base rsync ca-certificates curl
 
 # ---------------- Stage 3: pinned kernel 6.12.93 (dwc2 freeze fix) ----------------
 log "pinned kernel $KVER"
@@ -88,6 +89,31 @@ install -m 0644 pi/configs/kit-watchdog.conf       /etc/systemd/system.conf.d/99
 install -m 0644 pi/configs/wifi-powersave-off.conf pi/configs/no-mac-rand.conf /etc/NetworkManager/conf.d/
 tar xzf sources/patched-uvc-gadget-sources.tgz -C /home/pi 2>/dev/null || true
 chown -R 1000:1000 /home/pi 2>/dev/null || true
+
+# ---------------- Stage 5b: WiFi setup portal binary (balena wifi-connect) ----------
+# bridge-wifi-portal.service needs NetworkManager + dnsmasq-base + this binary. Without
+# it the portal loops on "wifi-connect: not found" and the setup AP NEVER appears, so a
+# freshly flashed card can't be onboarded at all — found by the 2026-07-23 flash-boot
+# test, where the image booted fine but broadcast no BridgeSetup-* network.
+# The UI ships in a SEPARATE tarball (the per-arch binary tarball carries none).
+log "wifi setup portal (wifi-connect $WC_VER)"
+WC_BASE="https://github.com/balena-os/wifi-connect/releases/download/${WC_VER}"
+WC_BIN_SHA=413d70e6d1c1366cbe2b32555e8476f3e92878178ed1b9c82205985f055f1936
+WC_UI_SHA=e57a3cec559729516decf892beb1e7f191b23e71b2e13bcd43d36b980034ffbe
+_wc_tmp="$(mktemp -d)"
+curl -fsSL -o "$_wc_tmp/wc.tar.gz" "$WC_BASE/wifi-connect-aarch64-unknown-linux-gnu.tar.gz"
+curl -fsSL -o "$_wc_tmp/ui.tar.gz" "$WC_BASE/wifi-connect-ui.tar.gz"
+# Pin by hash: this image is signed, so what goes into it is verified too.
+echo "$WC_BIN_SHA  $_wc_tmp/wc.tar.gz" | sha256sum -c - || { echo "FATAL: wifi-connect binary hash mismatch"; exit 1; }
+echo "$WC_UI_SHA  $_wc_tmp/ui.tar.gz"  | sha256sum -c - || { echo "FATAL: wifi-connect UI hash mismatch"; exit 1; }
+tar xzf "$_wc_tmp/wc.tar.gz" -C "$_wc_tmp"
+install -D -m 0755 "$_wc_tmp/wifi-connect" /usr/local/sbin/wifi-connect
+install -d /usr/local/share/wifi-connect/ui
+tar xzf "$_wc_tmp/ui.tar.gz" -C /usr/local/share/wifi-connect/ui
+rm -rf "$_wc_tmp"
+# Fail loudly here rather than shipping another un-onboardable image.
+[ -x /usr/local/sbin/wifi-connect ] || { echo "FATAL: wifi-connect not installed"; exit 1; }
+[ -f /usr/local/share/wifi-connect/ui/index.html ] || { echo "FATAL: wifi-connect UI missing"; exit 1; }
 
 # ---------------- Stage 6: Tailscale daemon (installed, NOT joined) ----------------
 log "tailscale daemon (key-at-claim: never joined in the image)"
