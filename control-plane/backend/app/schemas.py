@@ -39,3 +39,9 @@ class ClaimIn(BaseModel):
 class IssueCommandIn(BaseModel):
     type: str                       # restart | reset-clock | profile | set-peer
     args: dict[str, Any] = {}
+
+
+class RolloutCreateIn(BaseModel):
+    version: str                       # target image version, e.g. "1.4.2"
+    source: str                        # base URL/dir that holds manifest.txt + image
+    stage_pct: Optional[int] = 10      # opening wave (10 -> 25 -> 50 -> 100)

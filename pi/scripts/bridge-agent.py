@@ -13,7 +13,7 @@ Config lives in /etc/default/bridge-agent:
     CONTROL_URL=https://control.example.ts.net   # control plane base URL (on the tailnet)
     BOOTSTRAP_TOKEN=...                           # one-time enroll token (injected at flash)
 """
-import json, os, ssl, subprocess, urllib.request, urllib.error, importlib.util
+import json, os, re, ssl, subprocess, urllib.request, urllib.error, importlib.util
 
 CONF = "/etc/default/bridge-agent"
 STATE_DIR = "/etc/bridge"
@@ -28,7 +28,10 @@ ALLOWED = {
     "reset-clock": lambda a: ["bridge", "reset-clock"],
     "profile":     lambda a: ["bridge", "profile", _enum(a.get("mode"), ("lan", "wan"))],
     "set-peer":    lambda a: ["bridge", "set-peer", _ip(a.get("ip")), _port(a.get("port", "5004"))],
-    "update":      lambda a: ["sudo", "/usr/local/bin/bridge-update.sh"],
+    # A staged rollout names the image to install; with no source we fall back to
+    # the device's own BRIDGE_UPDATE_URL (previous behaviour, unchanged).
+    "update":      lambda a: ["sudo", "/usr/local/bin/bridge-update.sh"]
+                             + ([_src(a["source"])] if a.get("source") else []),
     "reboot":      lambda a: ["sudo", "systemctl", "reboot"],
     "start":       lambda a: ["bridge", "restart"],
     "stop":        lambda a: ["bridge", "stop"],
@@ -43,6 +46,21 @@ def _pin(v):
     v = str(v or "")
     if not (v.isdigit() and 4 <= len(v) <= 8):
         raise ValueError("pin must be 4-8 digits")
+    return v
+
+
+def _src(v):
+    """Update source handed down by the control plane (staged rollout).
+
+    Passed to subprocess as an ARGV element, never through a shell, so this is
+    shape validation rather than the security boundary: bridge-update.sh still
+    refuses any source whose manifest does not verify against the on-device OTA
+    public key, so a bogus URL cannot install anything."""
+    v = str(v or "").strip()
+    if len(v) > 512:
+        raise ValueError("update source too long")
+    if not re.match(r"^(https://|http://|file://|/)[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+$", v):
+        raise ValueError("bad update source %r" % (v,))
     return v
 
 
