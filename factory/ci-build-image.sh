@@ -27,7 +27,8 @@ apt-get install -y --no-install-recommends \
   python3 python3-pil git meson ninja-build build-essential \
   gcc-12 cpp-12 gcc-12-base libgcc-12-dev \
   network-manager dnsmasq-base rsync ca-certificates curl \
-  cloud-guest-utils parted e2fsprogs
+  cloud-guest-utils parted e2fsprogs \
+  rfkill iw
 
 # ---------------- Stage 3: pinned kernel 6.12.93 (dwc2 freeze fix) ----------------
 log "pinned kernel $KVER"
@@ -41,8 +42,23 @@ mv /tmp/dkms.postinst.bak /etc/kernel/postinst.d/dkms        2>/dev/null || true
 mv /tmp/dkms.header.bak   /etc/kernel/header_postinst.d/dkms 2>/dev/null || true
 dkms autoinstall -k "$KVER" || echo "WARN: dkms autoinstall non-zero (continuing)"
 update-initramfs -c -k "$KVER"
-cp -v /boot/vmlinuz-$KVER    /boot/firmware/kernel612.img
-cp -v /boot/initrd.img-$KVER /boot/firmware/initramfs612
+# Locate the REAL boot partition = the directory where config.txt actually lives. arm-runner
+# does NOT reliably mount it at /boot/firmware, so the previous builds wrote the pinned kernel
+# to a path that never reached the card. Co-locating with config.txt guarantees it lands on the
+# boot filesystem that gets flashed. The probe below makes the layout explicit in the log.
+echo "== ci-build: BOOT LAYOUT PROBE =="
+findmnt -o TARGET,SOURCE,FSTYPE 2>/dev/null | grep -iE 'boot|firmware|[[:space:]]/[[:space:]]' || true
+echo "  config.txt found at: $(find /boot -maxdepth 3 -name config.txt 2>/dev/null | tr '\n' ' ')"
+echo "  /boot: $(ls /boot 2>/dev/null | tr '\n' ' ')"
+echo "  /boot/firmware: $(ls /boot/firmware 2>/dev/null | tr '\n' ' ')"
+BOOTDIR=""
+for d in /boot/firmware /boot; do [ -f "$d/config.txt" ] && { BOOTDIR="$d"; break; }; done
+[ -n "$BOOTDIR" ] || BOOTDIR="$(dirname "$(find /boot -maxdepth 3 -name config.txt 2>/dev/null | head -1)")"
+[ -f "$BOOTDIR/config.txt" ] || { echo "FATAL: cannot locate config.txt under /boot"; find /boot -maxdepth 3 2>/dev/null | head -60; exit 1; }
+export BOOTDIR
+echo "== ci-build: BOOTDIR = $BOOTDIR =="
+cp -v /boot/vmlinuz-$KVER    "$BOOTDIR/kernel612.img"
+cp -v /boot/initrd.img-$KVER "$BOOTDIR/initramfs612"
 apt-mark hold linux-image-rpi-v8 linux-headers-rpi-v8 || true
 
 # Overlay-capable initramfs for READ-ONLY ROOT. This single-partition image stays
@@ -53,11 +69,11 @@ apt-mark hold linux-image-rpi-v8 linux-headers-rpi-v8 || true
 # ship it as initramfs612-overlay, leaving initramfs612 overlay-free. Mirrors the device.
 apt-get install -y --no-install-recommends overlayroot
 update-initramfs -u -k "$KVER"
-cp -v /boot/initrd.img-$KVER /boot/firmware/initramfs612-overlay
+cp -v /boot/initrd.img-$KVER "$BOOTDIR/initramfs612-overlay"
 
 # ---------------- Stage 4: boot config ----------------
 log "boot config (dwc2 peripheral + pinned kernel)"
-CFG=/boot/firmware/config.txt; CMD=/boot/firmware/cmdline.txt
+CFG="$BOOTDIR/config.txt"; CMD="$BOOTDIR/cmdline.txt"
 if ! grep -q 'dtoverlay=dwc2,dr_mode=peripheral' "$CFG"; then
 cat >> "$CFG" <<'EOF'
 
@@ -86,6 +102,7 @@ ldconfig
 install -d /etc/modprobe.d /etc/systemd/journald.conf.d /etc/systemd/system.conf.d /etc/NetworkManager/conf.d
 install -m 0644 pi/configs/v4l2loopback.conf       /etc/modprobe.d/
 install -m 0644 pi/configs/size-cap.conf           /etc/systemd/journald.conf.d/
+install -m 0644 pi/configs/journald-persistent.conf /etc/systemd/journald.conf.d/
 install -m 0644 pi/configs/kit-watchdog.conf       /etc/systemd/system.conf.d/99-watchdog.conf
 install -m 0644 pi/configs/wifi-powersave-off.conf pi/configs/no-mac-rand.conf /etc/NetworkManager/conf.d/
 tar xzf sources/patched-uvc-gadget-sources.tgz -C /home/pi 2>/dev/null || true
@@ -134,7 +151,7 @@ for u in bridge-gadget bridge-feeder-net bridge-uvcd bridge-feeder-audio bridge-
          wifi-guardian bridge-powertrim flight-recorder jitter-sentry bridge-supervisor \
          bridge-watchdog.timer bridge-web bridge-wifi-portal bridge-idle-frame \
          bridge-idle-frame.timer gadget-clean-detach bridge-agent.timer \
-         bridge-ab-healthcheck \
+         bridge-ab-healthcheck bridge-wifi-unblock bridge-firstdiag \
          bridge-firstboot bridge-regen-hostkeys; do
   systemctl enable "$u" 2>/dev/null || echo "WARN: could not enable $u"
 done
@@ -159,4 +176,8 @@ grep -rIlE 'tskey-|BEGIN OPENSSH PRIVATE KEY|psk=.+|ADMIN_API_KEY=.+' \
    /etc/NetworkManager /etc/default /var/lib/tailscale /etc/ssh /etc/bridge 2>/dev/null | while read -r f; do
    echo "  LEAK: $f"; LEAK=1
 done
+# ---------------- PREFLIGHT: image contains everything its own code calls ----------
+log "preflight dependency check"
+bash "$REPO/factory/preflight-check.sh"
+
 echo "== ci-build: done (version $IMAGE_VERSION) =="

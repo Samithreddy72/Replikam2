@@ -1,0 +1,16 @@
+[Unit]
+Description=Unblock the WiFi radio + set regulatory domain
+# Raspberry Pi OS soft-blocks WiFi via rfkill until a regulatory country is set, so a fresh
+# card's wlan0 cannot broadcast the setup AP at all. Nothing else in the image does this.
+# Must run before anything that touches WiFi (the portal, wifi-guardian, NetworkManager).
+Before=NetworkManager.service bridge-wifi-portal.service wifi-guardian.service
+Wants=network-pre.target
+After=systemd-modules-load.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/usr/sbin/rfkill unblock wifi
+ExecStart=-/usr/sbin/rfkill unblock all
+ExecStart=-/usr/sbin/iw reg set IN
+[Install]
+WantedBy=multi-user.target

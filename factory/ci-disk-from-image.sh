@@ -57,6 +57,16 @@ tar --numeric-owner --acls --xattrs --warning=no-file-changed \
     --exclude='./tmp/*' --exclude='./lost+found' \
     -C "$WORK/root" -cf "$WORK/rootfs.tar" . || [ $? -le 1 ]
 cp -r "$WORK/boot"/. "$WORK/bootsrc"/
+# ci-build-image writes the pinned kernel + overlay initramfs to /boot/firmware INSIDE the
+# rootfs (the arm-runner chroot never mounts the real boot partition), so they land on the
+# ROOT fs, not the boot partition. Lift them onto the boot-partition contents here — without
+# this the card boots the default kernel and read-only root never engages.
+for _f in kernel612.img initramfs612 initramfs612-overlay; do
+  if [ -f "$WORK/bootsrc/$_f" ]; then log "  $_f already on boot partition"; continue; fi
+  _src="$(find "$WORK/root" -maxdepth 4 -name "$_f" 2>/dev/null | head -1)"
+  if [ -n "$_src" ]; then cp -f "$_src" "$WORK/bootsrc/$_f"; log "  lifted $_f onto boot (from ${_src#$WORK/root})"
+  else log "  WARN: $_f found on NEITHER boot partition NOR rootfs"; fi
+done
 umount "$WORK/root" "$WORK/boot"
 losetup -d "$LOOP"; LOOP=""
 log "compressing rootfs.tar.zst (zstd -12 --long)"

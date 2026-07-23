@@ -125,12 +125,28 @@ else tar -xf "$BOOTSRC" -C "$MNT/p1"; fi
 cat > "$MNT/p1/cmdline.txt" <<EOF
 console=serial0,115200 console=tty1 root=PARTUUID=0d18cc81-02 rootfstype=ext4 fsck.repair=yes rootwait modules-load=dwc2 cfg80211.ieee80211_regdom=IN overlayroot=tmpfs:recurse=0
 EOF
-# ensure config.txt selects the pinned kernel + the overlay-capable initramfs
-if [ -f "$MNT/p1/config.txt" ]; then
-  grep -q '^kernel=kernel612.img'                 "$MNT/p1/config.txt" || echo 'kernel=kernel612.img'                 >> "$MNT/p1/config.txt"
-  grep -q 'initramfs612-overlay'                  "$MNT/p1/config.txt" || echo 'initramfs initramfs612-overlay followkernel' >> "$MNT/p1/config.txt"
+# Complete the NetBridge boot config. ci-build-image's stage 4 could NOT do this (the arm-runner
+# chroot never mounts the real boot partition), so author it here: pinned kernel, overlay-capable
+# initramfs, dwc2 in PERIPHERAL mode (the USB webcam gadget — host mode breaks it), disable-bt,
+# arm_freq. Appended under [all] so it wins over any earlier conditional section.
+if [ -f "$MNT/p1/config.txt" ] && ! grep -q 'dtoverlay=dwc2,dr_mode=peripheral' "$MNT/p1/config.txt"; then
+  cat >> "$MNT/p1/config.txt" <<'CFG'
+
+# --- NetBridge ---
+[all]
+kernel=kernel612.img
+initramfs initramfs612-overlay followkernel
+dtoverlay=dwc2,dr_mode=peripheral
+dtoverlay=disable-bt
+arm_freq=900
+CFG
 fi
-[ -f "$MNT/p1/initramfs612-overlay" ] || log "WARN: initramfs612-overlay missing on boot src — read-only root will NOT engage (rootfs build must create it)"
+# FAIL LOUD: the pinned kernel + overlay initramfs MUST be on the boot partition, else the card
+# boots the wrong kernel and read-only root never engages (the 2026-07-24 flash-test defect).
+for _bf in kernel612.img initramfs612-overlay; do
+  [ -f "$MNT/p1/$_bf" ] || die "boot partition missing $_bf — pinned kernel / read-only root would fail"
+done
+log "  boot: kernel612.img + initramfs612-overlay present, config set"
 # drop stale committed-slot artifacts a snapshot might carry
 rm -f "$MNT/p1/tryboot.txt" "$MNT/p1/cmdline.tryboot" "$MNT/p1/.ota-autocommit" \
       "$MNT/p1"/cmdline.txt.* "$MNT/p1"/config.txt.* 2>/dev/null || true
@@ -152,10 +168,43 @@ PARTUUID=0d18cc81-04  /data  ext4  defaults,noatime,nofail,x-systemd.device-time
 /data/etc-bridge    /etc/bridge           none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
 /data/diagnostics   /home/pi/diagnostics  none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
 /data/config/nm-connections  /etc/NetworkManager/system-connections  none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
+# Runtime-writable scratch on a READ-ONLY root. Without these, services that must write
+# outside /data fail hard — dnsmasq could not create /var/lib/misc/dnsmasq.leases, so the
+# setup AP came up but served NO DHCP and phones spun forever without an IP (2026-07-24).
+# These are all ephemeral by nature, so tmpfs is the right home (and survives power cuts by
+# simply not existing). Persistent state still lives on /data.
+tmpfs  /var/lib/misc            tmpfs  defaults,noatime,nosuid,nodev,size=8M   0  0
+tmpfs  /var/lib/NetworkManager  tmpfs  defaults,noatime,nosuid,nodev,size=8M   0  0
+tmpfs  /var/lib/dhcp            tmpfs  defaults,noatime,nosuid,nodev,size=4M   0  0
+tmpfs  /var/tmp                 tmpfs  defaults,noatime,nosuid,nodev,size=32M  0  0
+# tailscaled uses CacheDirectory=; without a writable /var/cache it dies in a loop with
+# "Failed at step CACHE_DIRECTORY ... Read-only file system" (seen 2026-07-24).
+tmpfs  /var/cache               tmpfs  defaults,noatime,nosuid,nodev,size=64M  0  0
+tmpfs  /var/lib/systemd         tmpfs  defaults,noatime,nosuid,nodev,size=8M   0  0
+tmpfs  /var/lib/dhcpcd          tmpfs  defaults,noatime,nosuid,nodev,size=4M   0  0
+tmpfs  /var/spool               tmpfs  defaults,noatime,nosuid,nodev,size=8M   0  0
+# Persistent logs on /data. Without this journald is volatile on the read-only root and a
+# failure is unreadable after power-off - which is what made the portal bugs so hard to find.
+/data/log-journal   /var/log/journal   none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
 FSTAB
   # read-only overlay root (safe: /data holds writes) + remount-fs masked (fails under overlay)
   install -d "$mp/etc"
   echo 'overlayroot="tmpfs:recurse=0"' > "$mp/etc/overlayroot.conf"
+  # DNS on a read-only root. /etc/resolv.conf MUST be a real readable file at boot: dnsmasq
+  # reads it when the setup AP starts, and a missing/dangling one makes wifi-connect abort so
+  # NO setup AP ever appears (learned the hard way 2026-07-24 - a symlink here broke the AP).
+  cat > "$mp/etc/resolv.conf" <<'RESOLV'
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+RESOLV
+  chmod 644 "$mp/etc/resolv.conf"
+  # ...and stop NetworkManager trying to rewrite it (it logged "could not commit DNS changes
+  # ... Read-only file system" on every connect, so the device reported itself offline even
+  # though it had associated and taken a DHCP lease).
+  install -d -m 755 "$mp/etc/NetworkManager/conf.d"
+  printf '[main]\nrc-manager=unmanaged\n' > "$mp/etc/NetworkManager/conf.d/90-rc-manager-unmanaged.conf"
+  # flight-recorder writes every second; /home/pi is read-only, so point it at /data.
+  install -d "$mp/home/pi"; ln -sf /data/flight.txt "$mp/home/pi/flight.txt"
   ln -sf /dev/null "$mp/etc/systemd/system/systemd-remount-fs.service"
   echo "$VERSION" > "$mp/etc/netbridge-image-version"
   # GENERALIZE (defence in depth; rootfs should already be secret-free)
@@ -163,7 +212,10 @@ FSTAB
   rm -f "$mp/etc/default/bridge-agent" 2>/dev/null || true    # provision writes it
   # bind mountpoints must exist + be empty (their content lives on /data)
   install -d "$mp/etc/bridge" "$mp/var/lib/tailscale" \
-             "$mp/etc/NetworkManager/system-connections" "$mp/home/pi/diagnostics"
+             "$mp/etc/NetworkManager/system-connections" "$mp/home/pi/diagnostics" \
+             "$mp/data" "$mp/var/lib/misc" "$mp/var/lib/NetworkManager" \
+             "$mp/var/lib/dhcp" "$mp/var/tmp" "$mp/var/cache" "$mp/var/lib/systemd" \
+             "$mp/var/lib/dhcpcd" "$mp/var/spool" "$mp/var/log/journal"
   sync
   umount "$mp"
 }
@@ -183,6 +235,8 @@ fi
 # ---- p4: /data skeleton (grown to fill the card on first boot) --------------
 mount "${LOOP}p4" "$MNT/p4"
 log "data: writing /data skeleton"
+install -d "$MNT/p4"/log-journal
+touch "$MNT/p4"/flight.txt
 install -d "$MNT/p4"/config "$MNT/p4"/config/nm-connections "$MNT/p4"/etc-bridge \
            "$MNT/p4"/diagnostics "$MNT/p4"/tailscale
 install -d -o 1000 -g 1000 "$MNT/p4"/fleet-brain 2>/dev/null || install -d "$MNT/p4"/fleet-brain
