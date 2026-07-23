@@ -16,7 +16,7 @@ formatted PARTUUIDs don't come out as `0d18cc81-0{1..4}`.
 |---|---|---|---|---|
 | p1 | BRIDGEBOOT | vfat (bootable) | `0d18cc81-01` | firmware + `kernel612.img` + `initramfs612-overlay` |
 | p2 | rootA | ext4 | `0d18cc81-02` | committed slot (`root=` in cmdline.txt) |
-| p3 | rootB | ext4 | `0d18cc81-03` | standby slot — populated **identically** at factory (A/B works from first boot) |
+| p3 | rootB | ext4 | `0d18cc81-03` | standby slot — **EMPTY at factory** (fills on the first OTA; A/B rollback active after the first update). `POPULATE_ROOTB=1` ships it cloned instead. |
 | p4 | bridgedata | ext4 | `0d18cc81-04` | **last** partition ⇒ grown to fill the card on first boot |
 
 ## Read-only overlay root is baked in here (and this is *why* it lives here, not in the CI image)
@@ -68,13 +68,15 @@ overlay+remount-fs mask / host-key strip / `/data` skeleton.
 - The build+assemble+sign path **passed on a full-size image**: `rootfs.tar.zst` 1.11 GB,
   `netbridge-os-*.img.xz` 2.03 GB (8.8 GB raw), both manifests signed. Only the Publish step
   failed — a `gh` bug (missing `--repo` after `cd` out of the checkout), fixed.
-- ⚠️ **The `.img.xz` is 2.03 GB — just under GitHub's 2 GiB (2,147,483,648 B) release-asset
-  limit.** As the rootfs grows it will cross that and break the upload. Mitigations to take
-  before then: shrink the image (populate only rootA at factory, fill rootB on first OTA), or
-  publish the disk image as a split/multipart asset.
-- ⚠️ **`xz -6` on the ~8.8 GB image is slow (~15–20 min).** Can't just lower the preset — a
-  weaker ratio would push the asset over 2 GiB. Coupled with the shrink above, a faster preset
-  becomes safe.
+- ✅ **RESOLVED — factory shrink.** rootB now ships **empty** (fills on first OTA), so the
+  published `.img.xz` carries only ONE populated rootfs — roughly **halving** it (from ~2.0 GB
+  to well under GitHub's 2 GiB cap) with comfortable headroom as the rootfs grows.
+- ✅ **RESOLVED — faster `xz`.** With the smaller image, `ci-disk-from-image.sh` uses `xz -3`
+  (was `-6`), tunable via `XZ_LEVEL`. The weaker ratio is now safe (plenty of margin under 2 GiB).
+- Note: an OTA-filled rootB currently boots **writable** (the extracted `rootfs.tar.zst` carries
+  no overlayroot config), unlike the read-only committed slot. Functional but inconsistent —
+  making OTA'd slots read-only is a separate tracked item (would add the overlay config to
+  `bridge-update.sh`'s standby write, in step with the device copy).
 
 ### Still pending
 1. ✅ **A real CI run happened** (run 29959662109): build + assemble + sign all green; only

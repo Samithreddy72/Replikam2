@@ -12,7 +12,8 @@
 # Layout reproduced EXACTLY from the proven dev card (MBR sig 0x0d18cc81 => PARTUUIDs):
 #   p1 BRIDGEBOOT vfat  0d18cc81-01  (bootable)   firmware + kernel612 + overlay initramfs
 #   p2 rootA      ext4  0d18cc81-02  committed slot (root= in cmdline.txt)
-#   p3 rootB      ext4  0d18cc81-03  standby slot (populated identically at factory)
+#   p3 rootB      ext4  0d18cc81-03  standby slot — EMPTY at factory (fills on 1st OTA);
+#                                    set POPULATE_ROOTB=1 to clone rootA into it instead
 #   p4 bridgedata ext4  0d18cc81-04  LAST partition => grown to fill the card on 1st boot
 #
 # Read-only overlay root is baked in (overlayroot=tmpfs:recurse=0 + remount-fs masked):
@@ -167,7 +168,17 @@ FSTAB
   umount "$mp"
 }
 populate_root "${LOOP}p2" "$MNT/p2" "0d18cc81-02" "rootA"
-populate_root "${LOOP}p3" "$MNT/p3" "0d18cc81-03" "rootB"
+# Factory shrink: rootB is left EMPTY (freshly mkfs'd) so it compresses to ~nothing in the
+# published .img.xz — halving the asset (clears GitHub's 2 GiB cap) and letting xz run a
+# faster preset. bridge-update.sh mkfs's + fully writes + normalizes the standby on the
+# FIRST OTA, so A/B rollback becomes available after the first update. Booting rootB before
+# then (nobody should) just fails the health-check and rolls back. Set POPULATE_ROOTB=1 to
+# ship both slots populated instead (bigger image, A/B live from flash).
+if [ "${POPULATE_ROOTB:-0}" = "1" ]; then
+  populate_root "${LOOP}p3" "$MNT/p3" "0d18cc81-03" "rootB"
+else
+  log "rootB left EMPTY (factory shrink) — first OTA populates it; A/B rollback active after first update"
+fi
 
 # ---- p4: /data skeleton (grown to fill the card on first boot) --------------
 mount "${LOOP}p4" "$MNT/p4"

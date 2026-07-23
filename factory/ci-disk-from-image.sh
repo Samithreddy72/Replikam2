@@ -80,9 +80,9 @@ log "assembling full-disk image (ROOT_MB=$ROOT_MB DATA_MB=$DATA_MB)"
 ROOT_MB="$ROOT_MB" DATA_MB="$DATA_MB" bash "$HERE/build-disk-image.sh" \
   --rootfs "$OUTDIR/rootfs.tar.zst" --boot "$WORK/bootsrc" \
   --version "$VERSION" --out "$DISK" $PUBKEY_ARG
-log "compressing disk image -> .img.xz"
-xz -T0 -6 -f "$DISK"
-mv "${DISK}.xz" "$OUTDIR/"
+log "compressing disk image -> .img.xz (xz -${XZ_LEVEL:-3} -T0)"
+xz -T0 "-${XZ_LEVEL:-3}" -f "$DISK"   # rootB is empty (factory shrink) so a fast preset
+mv "${DISK}.xz" "$OUTDIR/"            # still lands well under GitHub's 2 GiB asset cap
 
 # ---- 4. manifests (OTA + disk) + signatures ---------------------------------
 BUILT="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
