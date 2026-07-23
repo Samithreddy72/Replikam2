@@ -21,8 +21,12 @@ DISK=/dev/mmcblk0
 if mountpoint -q /data && [ -b "${DISK}p4" ] && [ ! -f /data/.expanded ]; then
   if command -v growpart >/dev/null 2>&1; then
     growpart "$DISK" 4 && log "grew ${DISK}p4" || log "growpart: no change (already full?)"
-  else
+  elif command -v parted >/dev/null 2>&1; then
     parted -s "$DISK" resizepart 4 100% && log "resized ${DISK}p4 (parted)" || log "parted resizepart: no change"
+  else
+    # Don't fail silently: without a partition tool /data stays at its factory size
+    # and the card's remaining space is simply unusable.
+    log "ERROR: neither growpart nor parted present — /data CANNOT expand; image is missing cloud-guest-utils/parted"
   fi
   partprobe "$DISK" 2>/dev/null || true
   resize2fs "${DISK}p4" && log "resize2fs ${DISK}p4 done" || log "resize2fs: no change"

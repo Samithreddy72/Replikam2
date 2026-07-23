@@ -26,7 +26,8 @@ apt-get install -y --no-install-recommends \
   v4l2loopback-dkms v4l2loopback-utils v4l-utils alsa-utils \
   python3 python3-pil git meson ninja-build build-essential \
   gcc-12 cpp-12 gcc-12-base libgcc-12-dev \
-  network-manager dnsmasq-base rsync ca-certificates curl
+  network-manager dnsmasq-base rsync ca-certificates curl \
+  cloud-guest-utils parted e2fsprogs
 
 # ---------------- Stage 3: pinned kernel 6.12.93 (dwc2 freeze fix) ----------------
 log "pinned kernel $KVER"
@@ -114,6 +115,13 @@ rm -rf "$_wc_tmp"
 # Fail loudly here rather than shipping another un-onboardable image.
 [ -x /usr/local/sbin/wifi-connect ] || { echo "FATAL: wifi-connect not installed"; exit 1; }
 [ -f /usr/local/share/wifi-connect/ui/index.html ] || { echo "FATAL: wifi-connect UI missing"; exit 1; }
+
+# First-boot /data expansion needs these; without them p4 silently stays at its
+# factory ~256MB and the rest of the card is wasted (seen on the 2026-07-23 test
+# card: /data 272MB with 54.5GB unallocated). Fail the build rather than ship that.
+for _t in growpart parted partprobe resize2fs; do
+  command -v "$_t" >/dev/null || { echo "FATAL: $_t missing — /data would never expand"; exit 1; }
+done
 
 # ---------------- Stage 6: Tailscale daemon (installed, NOT joined) ----------------
 log "tailscale daemon (key-at-claim: never joined in the image)"
