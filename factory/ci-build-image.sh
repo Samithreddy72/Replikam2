@@ -102,6 +102,7 @@ ldconfig
 install -d /etc/modprobe.d /etc/systemd/journald.conf.d /etc/systemd/system.conf.d /etc/NetworkManager/conf.d
 install -m 0644 pi/configs/v4l2loopback.conf       /etc/modprobe.d/
 install -m 0644 pi/configs/size-cap.conf           /etc/systemd/journald.conf.d/
+install -m 0644 pi/configs/journald-persistent.conf /etc/systemd/journald.conf.d/
 install -m 0644 pi/configs/kit-watchdog.conf       /etc/systemd/system.conf.d/99-watchdog.conf
 install -m 0644 pi/configs/wifi-powersave-off.conf pi/configs/no-mac-rand.conf /etc/NetworkManager/conf.d/
 tar xzf sources/patched-uvc-gadget-sources.tgz -C /home/pi 2>/dev/null || true

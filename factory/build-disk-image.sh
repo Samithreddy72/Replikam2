@@ -177,10 +177,34 @@ tmpfs  /var/lib/misc            tmpfs  defaults,noatime,nosuid,nodev,size=8M   0
 tmpfs  /var/lib/NetworkManager  tmpfs  defaults,noatime,nosuid,nodev,size=8M   0  0
 tmpfs  /var/lib/dhcp            tmpfs  defaults,noatime,nosuid,nodev,size=4M   0  0
 tmpfs  /var/tmp                 tmpfs  defaults,noatime,nosuid,nodev,size=32M  0  0
+# tailscaled uses CacheDirectory=; without a writable /var/cache it dies in a loop with
+# "Failed at step CACHE_DIRECTORY ... Read-only file system" (seen 2026-07-24).
+tmpfs  /var/cache               tmpfs  defaults,noatime,nosuid,nodev,size=64M  0  0
+tmpfs  /var/lib/systemd         tmpfs  defaults,noatime,nosuid,nodev,size=8M   0  0
+tmpfs  /var/lib/dhcpcd          tmpfs  defaults,noatime,nosuid,nodev,size=4M   0  0
+tmpfs  /var/spool               tmpfs  defaults,noatime,nosuid,nodev,size=8M   0  0
+# Persistent logs on /data. Without this journald is volatile on the read-only root and a
+# failure is unreadable after power-off - which is what made the portal bugs so hard to find.
+/data/log-journal   /var/log/journal   none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
 FSTAB
   # read-only overlay root (safe: /data holds writes) + remount-fs masked (fails under overlay)
   install -d "$mp/etc"
   echo 'overlayroot="tmpfs:recurse=0"' > "$mp/etc/overlayroot.conf"
+  # DNS on a read-only root. /etc/resolv.conf MUST be a real readable file at boot: dnsmasq
+  # reads it when the setup AP starts, and a missing/dangling one makes wifi-connect abort so
+  # NO setup AP ever appears (learned the hard way 2026-07-24 - a symlink here broke the AP).
+  cat > "$mp/etc/resolv.conf" <<'RESOLV'
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+RESOLV
+  chmod 644 "$mp/etc/resolv.conf"
+  # ...and stop NetworkManager trying to rewrite it (it logged "could not commit DNS changes
+  # ... Read-only file system" on every connect, so the device reported itself offline even
+  # though it had associated and taken a DHCP lease).
+  install -d -m 755 "$mp/etc/NetworkManager/conf.d"
+  printf '[main]\nrc-manager=unmanaged\n' > "$mp/etc/NetworkManager/conf.d/90-rc-manager-unmanaged.conf"
+  # flight-recorder writes every second; /home/pi is read-only, so point it at /data.
+  install -d "$mp/home/pi"; ln -sf /data/flight.txt "$mp/home/pi/flight.txt"
   ln -sf /dev/null "$mp/etc/systemd/system/systemd-remount-fs.service"
   echo "$VERSION" > "$mp/etc/netbridge-image-version"
   # GENERALIZE (defence in depth; rootfs should already be secret-free)
@@ -190,7 +214,8 @@ FSTAB
   install -d "$mp/etc/bridge" "$mp/var/lib/tailscale" \
              "$mp/etc/NetworkManager/system-connections" "$mp/home/pi/diagnostics" \
              "$mp/data" "$mp/var/lib/misc" "$mp/var/lib/NetworkManager" \
-             "$mp/var/lib/dhcp" "$mp/var/tmp"
+             "$mp/var/lib/dhcp" "$mp/var/tmp" "$mp/var/cache" "$mp/var/lib/systemd" \
+             "$mp/var/lib/dhcpcd" "$mp/var/spool" "$mp/var/log/journal"
   sync
   umount "$mp"
 }
@@ -210,6 +235,8 @@ fi
 # ---- p4: /data skeleton (grown to fill the card on first boot) --------------
 mount "${LOOP}p4" "$MNT/p4"
 log "data: writing /data skeleton"
+install -d "$MNT/p4"/log-journal
+touch "$MNT/p4"/flight.txt
 install -d "$MNT/p4"/config "$MNT/p4"/config/nm-connections "$MNT/p4"/etc-bridge \
            "$MNT/p4"/diagnostics "$MNT/p4"/tailscale
 install -d -o 1000 -g 1000 "$MNT/p4"/fleet-brain 2>/dev/null || install -d "$MNT/p4"/fleet-brain

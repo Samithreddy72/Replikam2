@@ -77,5 +77,14 @@ while true; do
                --portal-passphrase "$pass" \
                --ui-directory /usr/local/share/wifi-connect/ui \
                --activity-timeout "$PORTAL_TIMEOUT" 2>&1 | logger -t bridge-wifi-portal
-  sleep 5
+  # wifi-connect exits as soon as it hands credentials to NetworkManager; NM still needs
+  # ~15-30s to associate + DHCP. Waiting only 5s here re-raised the AP mid-handshake and
+  # killed the connection ("unable to connect" - 2026-07-24). Poll up to 60s before re-raising.
+  for _i in $(seq 1 12); do
+    sleep 5
+    if have_internet; then
+      logger -t bridge-wifi-portal "connected after portal handoff - not re-raising AP"
+      break
+    fi
+  done
 done
