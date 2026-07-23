@@ -42,8 +42,23 @@ mv /tmp/dkms.postinst.bak /etc/kernel/postinst.d/dkms        2>/dev/null || true
 mv /tmp/dkms.header.bak   /etc/kernel/header_postinst.d/dkms 2>/dev/null || true
 dkms autoinstall -k "$KVER" || echo "WARN: dkms autoinstall non-zero (continuing)"
 update-initramfs -c -k "$KVER"
-cp -v /boot/vmlinuz-$KVER    /boot/firmware/kernel612.img
-cp -v /boot/initrd.img-$KVER /boot/firmware/initramfs612
+# Locate the REAL boot partition = the directory where config.txt actually lives. arm-runner
+# does NOT reliably mount it at /boot/firmware, so the previous builds wrote the pinned kernel
+# to a path that never reached the card. Co-locating with config.txt guarantees it lands on the
+# boot filesystem that gets flashed. The probe below makes the layout explicit in the log.
+echo "== ci-build: BOOT LAYOUT PROBE =="
+findmnt -o TARGET,SOURCE,FSTYPE 2>/dev/null | grep -iE 'boot|firmware|[[:space:]]/[[:space:]]' || true
+echo "  config.txt found at: $(find /boot -maxdepth 3 -name config.txt 2>/dev/null | tr '\n' ' ')"
+echo "  /boot: $(ls /boot 2>/dev/null | tr '\n' ' ')"
+echo "  /boot/firmware: $(ls /boot/firmware 2>/dev/null | tr '\n' ' ')"
+BOOTDIR=""
+for d in /boot/firmware /boot; do [ -f "$d/config.txt" ] && { BOOTDIR="$d"; break; }; done
+[ -n "$BOOTDIR" ] || BOOTDIR="$(dirname "$(find /boot -maxdepth 3 -name config.txt 2>/dev/null | head -1)")"
+[ -f "$BOOTDIR/config.txt" ] || { echo "FATAL: cannot locate config.txt under /boot"; find /boot -maxdepth 3 2>/dev/null | head -60; exit 1; }
+export BOOTDIR
+echo "== ci-build: BOOTDIR = $BOOTDIR =="
+cp -v /boot/vmlinuz-$KVER    "$BOOTDIR/kernel612.img"
+cp -v /boot/initrd.img-$KVER "$BOOTDIR/initramfs612"
 apt-mark hold linux-image-rpi-v8 linux-headers-rpi-v8 || true
 
 # Overlay-capable initramfs for READ-ONLY ROOT. This single-partition image stays
@@ -54,11 +69,11 @@ apt-mark hold linux-image-rpi-v8 linux-headers-rpi-v8 || true
 # ship it as initramfs612-overlay, leaving initramfs612 overlay-free. Mirrors the device.
 apt-get install -y --no-install-recommends overlayroot
 update-initramfs -u -k "$KVER"
-cp -v /boot/initrd.img-$KVER /boot/firmware/initramfs612-overlay
+cp -v /boot/initrd.img-$KVER "$BOOTDIR/initramfs612-overlay"
 
 # ---------------- Stage 4: boot config ----------------
 log "boot config (dwc2 peripheral + pinned kernel)"
-CFG=/boot/firmware/config.txt; CMD=/boot/firmware/cmdline.txt
+CFG="$BOOTDIR/config.txt"; CMD="$BOOTDIR/cmdline.txt"
 if ! grep -q 'dtoverlay=dwc2,dr_mode=peripheral' "$CFG"; then
 cat >> "$CFG" <<'EOF'
 

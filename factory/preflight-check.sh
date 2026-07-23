@@ -32,8 +32,8 @@ echo "== preflight: critical files =="
 need_file /usr/local/sbin/wifi-connect                "portal binary"
 need_file /usr/local/share/wifi-connect/ui/index.html "portal UI assets"
 need_file /usr/local/bin/uvc-gadget                   "smooth-video gadget"
-need_file /boot/firmware/kernel612.img                "pinned kernel"
-need_file /boot/firmware/initramfs612-overlay         "overlay initramfs (read-only root)"
+need_file "${BOOTDIR:-/boot/firmware}/kernel612.img"        "pinned kernel"
+need_file "${BOOTDIR:-/boot/firmware}/initramfs612-overlay" "overlay initramfs (read-only root)"
 
 echo "== preflight: critical services enabled =="
 for u in bridge-gadget bridge-feeder-net bridge-uvcd bridge-feeder-audio bridge-return-audio \
