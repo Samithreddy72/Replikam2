@@ -168,6 +168,15 @@ PARTUUID=0d18cc81-04  /data  ext4  defaults,noatime,nofail,x-systemd.device-time
 /data/etc-bridge    /etc/bridge           none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
 /data/diagnostics   /home/pi/diagnostics  none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
 /data/config/nm-connections  /etc/NetworkManager/system-connections  none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
+# Runtime-writable scratch on a READ-ONLY root. Without these, services that must write
+# outside /data fail hard — dnsmasq could not create /var/lib/misc/dnsmasq.leases, so the
+# setup AP came up but served NO DHCP and phones spun forever without an IP (2026-07-24).
+# These are all ephemeral by nature, so tmpfs is the right home (and survives power cuts by
+# simply not existing). Persistent state still lives on /data.
+tmpfs  /var/lib/misc            tmpfs  defaults,noatime,nosuid,nodev,size=8M   0  0
+tmpfs  /var/lib/NetworkManager  tmpfs  defaults,noatime,nosuid,nodev,size=8M   0  0
+tmpfs  /var/lib/dhcp            tmpfs  defaults,noatime,nosuid,nodev,size=4M   0  0
+tmpfs  /var/tmp                 tmpfs  defaults,noatime,nosuid,nodev,size=32M  0  0
 FSTAB
   # read-only overlay root (safe: /data holds writes) + remount-fs masked (fails under overlay)
   install -d "$mp/etc"
@@ -180,7 +189,8 @@ FSTAB
   # bind mountpoints must exist + be empty (their content lives on /data)
   install -d "$mp/etc/bridge" "$mp/var/lib/tailscale" \
              "$mp/etc/NetworkManager/system-connections" "$mp/home/pi/diagnostics" \
-             "$mp/data"
+             "$mp/data" "$mp/var/lib/misc" "$mp/var/lib/NetworkManager" \
+             "$mp/var/lib/dhcp" "$mp/var/tmp"
   sync
   umount "$mp"
 }
