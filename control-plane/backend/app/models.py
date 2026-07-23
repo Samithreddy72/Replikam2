@@ -142,3 +142,46 @@ class Command(Base):
     completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     device: Mapped[Device] = relationship(back_populates="commands")
+
+
+class Rollout(Base):
+    """A staged fleet image update (walkthrough J4: "A/B image update, staged
+    10% -> 100% · 22 of 25 updated · 0 rollbacks · SF Lab queued until online").
+
+    The per-DEVICE engine already exists: bridge-update.sh verifies the signed
+    manifest, writes the STANDBY slot, tryboots it, and the on-device health
+    check auto-commits or auto-rolls-back. This model is only the FLEET-side
+    orchestration on top — which devices, in what wave, and how far to go.
+    """
+    __tablename__ = "rollouts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[str] = mapped_column(String, default="default", index=True)
+    version: Mapped[str] = mapped_column(String)     # target image version, e.g. 1.4.2
+    source: Mapped[str] = mapped_column(String)      # base URL/dir handed to bridge-update.sh
+    stage_pct: Mapped[int] = mapped_column(Integer, default=10)      # current wave: 10/25/50/100
+    status: Mapped[str] = mapped_column(String, default="active")    # active|paused|completed|aborted
+    created_by: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    targets: Mapped[list["RolloutTarget"]] = relationship(back_populates="rollout")
+
+
+class RolloutTarget(Base):
+    """One device's place in a rollout.
+
+    A target stays `queued` while its device is offline — that is exactly the
+    walkthrough's "SF Lab queued until online": the wave does not skip it and
+    does not fail it, it simply waits and dispatches when the device reappears.
+    """
+    __tablename__ = "rollout_targets"
+
+    rollout_id: Mapped[int] = mapped_column(ForeignKey("rollouts.id"), primary_key=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), primary_key=True)
+    status: Mapped[str] = mapped_column(String, default="queued")  # queued|dispatched|succeeded|failed
+    command_id: Mapped[int | None] = mapped_column(ForeignKey("commands.id"), nullable=True)
+    wave: Mapped[int | None] = mapped_column(Integer, nullable=True)   # stage_pct it went out in
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    rollout: Mapped[Rollout] = relationship(back_populates="targets")

@@ -18,9 +18,10 @@ from .config import settings
 from .db import Base, engine, get_db
 from . import auth, models
 from .alerts import device_alerts, is_online
-from .models import Device, Telemetry, Command, DiagBundle, User, AuditLog, utcnow
+from .models import (Device, Telemetry, Command, DiagBundle, User, AuditLog,
+                     Rollout, RolloutTarget, utcnow)
 from .schemas import (EnrollIn, EnrollOut, CommandOut, CommandResultIn,
-                      ClaimIn, IssueCommandIn)
+                      ClaimIn, IssueCommandIn, RolloutCreateIn)
 
 ALLOWED_COMMANDS = {"restart", "reset-clock", "profile", "set-peer", "update", "reboot", "start", "stop", "diagnose", "set-pin", "unlock", "lock"}
 
@@ -650,3 +651,242 @@ from fastapi.staticfiles import StaticFiles
 _static = _os.path.join(_os.path.dirname(__file__), "..", "static")
 if _os.path.isdir(_static):
     app.mount("/", StaticFiles(directory=_static, html=True), name="panel")
+
+
+# ----------------------------- staged rollouts (walkthrough J4) -----------------------------
+# "A/B image update, staged 10% -> 100% · 22 of 25 updated · 0 rollbacks ·
+#  SF Lab queued until online."
+#
+# Division of labour: the DEVICE already owns the risky half — bridge-update.sh
+# verifies the signed manifest, writes the standby slot and tryboots it, and the
+# on-device health check auto-commits or auto-rolls-back. So a failed update is
+# already safe by the time we hear about it. What lives here is only the fleet
+# question: who gets it, in what wave, and whether it is safe to widen.
+
+ROLLOUT_STAGES = [10, 25, 50, 100]
+
+
+def _next_stage(pct: int) -> int | None:
+    for s in ROLLOUT_STAGES:
+        if s > pct:
+            return s
+    return None
+
+
+def _ro_targets(db: Session, ro: Rollout) -> list[RolloutTarget]:
+    # Deterministic order so waves are reproducible and an operator can predict
+    # which devices go first (never random, never "whoever polled last").
+    return db.scalars(
+        select(RolloutTarget).where(RolloutTarget.rollout_id == ro.id)
+        .order_by(RolloutTarget.device_id)
+    ).all()
+
+
+def _sync_rollout(db: Session, ro: Rollout) -> None:
+    """Fold finished command results back into target state.
+
+    Derived on read rather than hooked into /v1/commands/{id}/result, so the hot
+    device-facing path stays untouched (and a rollout can never slow it down).
+    """
+    changed = False
+    for t in _ro_targets(db, ro):
+        if t.status != "dispatched" or not t.command_id:
+            continue
+        c = db.get(Command, t.command_id)
+        if not c:
+            continue
+        if c.status == "done":
+            t.status, t.updated_at, changed = "succeeded", utcnow(), True
+        elif c.status in ("failed", "rejected"):
+            # The device already rolled itself back into the previous slot.
+            t.status, t.updated_at, changed = "failed", utcnow(), True
+    if changed:
+        db.commit()
+
+
+def _dispatch_rollout(db: Session, ro: Rollout) -> int:
+    """Queue `update` commands up to the current wave, ONLINE devices only.
+
+    Offline devices are deliberately left `queued` (not skipped, not failed) —
+    they pick the update up on a later dispatch once they are back.
+    """
+    if ro.status != "active":
+        return 0
+    targets = _ro_targets(db, ro)
+    total = len(targets)
+    if not total:
+        return 0
+    # ceil() so a 10% wave over a small fleet still moves at least one device.
+    allowed = max(1, -(-total * ro.stage_pct // 100))
+    started = sum(1 for t in targets if t.status != "queued")
+    room = allowed - started
+    sent = 0
+    for t in targets:
+        if room <= 0:
+            break
+        if t.status != "queued":
+            continue
+        dev = db.get(Device, t.device_id)
+        if not dev or not is_online(dev):
+            continue                      # "queued until online"
+        c = Command(device_id=dev.id, type="update", args={"source": ro.source})
+        db.add(c)
+        db.flush()
+        t.command_id, t.status, t.wave, t.updated_at = c.id, "dispatched", ro.stage_pct, utcnow()
+        room -= 1
+        sent += 1
+    if sent:
+        ro.updated_at = utcnow()
+        db.commit()
+    return sent
+
+
+def _rollout_view(db: Session, ro: Rollout) -> dict:
+    targets = _ro_targets(db, ro)
+    by = {"queued": 0, "dispatched": 0, "succeeded": 0, "failed": 0}
+    waiting_offline = []
+    for t in targets:
+        by[t.status] = by.get(t.status, 0) + 1
+        if t.status == "queued":
+            dev = db.get(Device, t.device_id)
+            if dev and not is_online(dev):
+                waiting_offline.append(dev.name or dev.id)
+    return {
+        "id": ro.id, "version": ro.version, "source": ro.source,
+        "status": ro.status, "stage_pct": ro.stage_pct,
+        "next_stage": _next_stage(ro.stage_pct),
+        "total": len(targets),
+        "updated": by["succeeded"], "rollbacks": by["failed"],
+        "in_flight": by["dispatched"], "queued": by["queued"],
+        "queued_offline": waiting_offline,
+        "created_by": ro.created_by,
+        "created_at": ro.created_at.isoformat() if ro.created_at else None,
+        # the walkthrough's one-liner, rendered server-side
+        "summary": "%d of %d updated · %d rollback%s%s" % (
+            by["succeeded"], len(targets), by["failed"],
+            "" if by["failed"] == 1 else "s",
+            " · %s queued until online" % ", ".join(waiting_offline) if waiting_offline else ""),
+    }
+
+
+@app.post("/admin/rollouts")
+def create_rollout(body: RolloutCreateIn, actor=Depends(auth.require_admin),
+                   db: Session = Depends(get_db)):
+    """Open a staged rollout over the caller's org and dispatch the first wave."""
+    if body.stage_pct not in ROLLOUT_STAGES:
+        raise HTTPException(400, "stage_pct must be one of %s" % ROLLOUT_STAGES)
+    if db.scalar(select(Rollout).where(Rollout.org_id == actor.org, Rollout.status == "active")):
+        raise HTTPException(409, "an active rollout already exists for this org")
+    ro = Rollout(org_id=actor.org, version=body.version, source=body.source,
+                 stage_pct=body.stage_pct, created_by=getattr(actor, "email", "admin"))
+    db.add(ro)
+    db.flush()
+    # Devices already on the target version are not targets — re-running a
+    # rollout must never re-flash a device that is already there.
+    for dev in db.scalars(select(Device).where(Device.org_id == actor.org)).all():
+        if (dev.version or "") == body.version:
+            continue
+        db.add(RolloutTarget(rollout_id=ro.id, device_id=dev.id))
+    db.commit()
+    sent = _dispatch_rollout(db, ro)
+    _audit(db, actor, "rollout:create", "%s -> %d device(s), wave %d%%" %
+           (body.version, len(_ro_targets(db, ro)), ro.stage_pct))
+    out = _rollout_view(db, ro)
+    out["dispatched_now"] = sent
+    return out
+
+
+@app.get("/admin/rollouts")
+def list_rollouts(actor=Depends(auth.require_viewer), db: Session = Depends(get_db)):
+    ros = db.scalars(select(Rollout).where(Rollout.org_id == actor.org)
+                     .order_by(desc(Rollout.created_at))).all()
+    for ro in ros:
+        _sync_rollout(db, ro)
+    return [_rollout_view(db, ro) for ro in ros]
+
+
+def _scoped_rollout(db: Session, rollout_id: int, actor) -> Rollout:
+    ro = db.get(Rollout, rollout_id)
+    if not ro or ro.org_id != actor.org:
+        raise HTTPException(404, "rollout not found")
+    return ro
+
+
+@app.get("/admin/rollouts/{rollout_id}")
+def get_rollout(rollout_id: int, actor=Depends(auth.require_viewer),
+                db: Session = Depends(get_db)):
+    ro = _scoped_rollout(db, rollout_id, actor)
+    _sync_rollout(db, ro)
+    view = _rollout_view(db, ro)
+    view["devices"] = [
+        {"device_id": t.device_id, "status": t.status, "wave": t.wave,
+         "command_id": t.command_id}
+        for t in _ro_targets(db, ro)
+    ]
+    return view
+
+
+@app.post("/admin/rollouts/{rollout_id}/dispatch")
+def dispatch_rollout(rollout_id: int, actor=Depends(auth.require_admin),
+                     db: Session = Depends(get_db)):
+    """Catch up the current wave — picks up devices that have come back online."""
+    ro = _scoped_rollout(db, rollout_id, actor)
+    _sync_rollout(db, ro)
+    sent = _dispatch_rollout(db, ro)
+    out = _rollout_view(db, ro)
+    out["dispatched_now"] = sent
+    return out
+
+
+@app.post("/admin/rollouts/{rollout_id}/advance")
+def advance_rollout(rollout_id: int, force: bool = False,
+                    actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
+    """Widen to the next wave — refused while the current one is unhealthy.
+
+    This is the "0 rollbacks" guard: any device that rolled itself back halts
+    the fleet here instead of letting a bad image reach everyone. `force=true`
+    is the deliberate operator override.
+    """
+    ro = _scoped_rollout(db, rollout_id, actor)
+    if ro.status != "active":
+        raise HTTPException(409, "rollout is %s" % ro.status)
+    _sync_rollout(db, ro)
+    view = _rollout_view(db, ro)
+    if view["rollbacks"] and not force:
+        raise HTTPException(409, "%d device(s) rolled back — halting; pass force=true to override"
+                            % view["rollbacks"])
+    if view["in_flight"] and not force:
+        raise HTTPException(409, "%d device(s) still updating" % view["in_flight"])
+    nxt = _next_stage(ro.stage_pct)
+    if nxt is None:
+        # Already at the widest wave: finish once nothing is left outstanding.
+        if not view["queued"] and not view["in_flight"]:
+            ro.status = "completed"
+            ro.updated_at = utcnow()
+            db.commit()
+            _audit(db, actor, "rollout:complete", ro.version)
+        done = _rollout_view(db, ro)
+        done["dispatched_now"] = 0        # keep the response shape consistent
+        return done
+    ro.stage_pct, ro.updated_at = nxt, utcnow()
+    db.commit()
+    sent = _dispatch_rollout(db, ro)
+    _audit(db, actor, "rollout:advance", "%s -> %d%%" % (ro.version, nxt))
+    out = _rollout_view(db, ro)
+    out["dispatched_now"] = sent
+    return out
+
+
+@app.post("/admin/rollouts/{rollout_id}/{action}")
+def control_rollout(rollout_id: int, action: str, actor=Depends(auth.require_admin),
+                    db: Session = Depends(get_db)):
+    """pause | resume | abort. Abort stops further waves; it never un-does a
+    device that already updated (that is what a new rollout is for)."""
+    if action not in ("pause", "resume", "abort"):
+        raise HTTPException(404, "unknown action")
+    ro = _scoped_rollout(db, rollout_id, actor)
+    ro.status = {"pause": "paused", "resume": "active", "abort": "aborted"}[action]
+    ro.updated_at = utcnow()
+    db.commit()
+    _audit(db, actor, "rollout:%s" % action, ro.version)
+    return _rollout_view(db, ro)
