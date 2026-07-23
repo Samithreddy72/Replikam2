@@ -160,4 +160,8 @@ grep -rIlE 'tskey-|BEGIN OPENSSH PRIVATE KEY|psk=.+|ADMIN_API_KEY=.+' \
    /etc/NetworkManager /etc/default /var/lib/tailscale /etc/ssh /etc/bridge 2>/dev/null | while read -r f; do
    echo "  LEAK: $f"; LEAK=1
 done
+# ---------------- PREFLIGHT: image contains everything its own code calls ----------
+log "preflight dependency check"
+bash "$REPO/factory/preflight-check.sh"
+
 echo "== ci-build: done (version $IMAGE_VERSION) =="
