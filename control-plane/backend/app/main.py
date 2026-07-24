@@ -767,27 +767,32 @@ def alerts_test(who=Depends(auth.require_admin)):
 
 
 # ----------------------------- admin panel (static) -----------------------------
-# Serve the built React panel from the same process (declared last so API routes win).
+# Serve the built React panel from the same process.
+#
+# CRITICAL ORDERING: a StaticFiles mount at "/" matches EVERY path, and Starlette
+# tries routes in registration order. So this mount must be registered AFTER every
+# API route, or it silently shadows the ones declared below it — the exact bug that
+# made staged rollouts (declared further down) return 405/404 and look "never wired"
+# when the panel was present. It is therefore defined here but CALLED at the very
+# bottom of the module, once all @app routes exist. Do not app.mount() inline here.
 import os as _os
 from fastapi.staticfiles import StaticFiles
 
-# The built panel has lived at control-plane/panel-dist, but this only looked for
-# backend/static — and os.path.isdir() failing just SKIPS the mount, so "/" answered 404
-# with no error anywhere. The panel appeared to be missing rather than mis-located, which
-# is a bad way to find out you have no admin UI. Check the real locations, log which one
-# won, and say so loudly when none match.
-_here = _os.path.dirname(__file__)
-_static = ""
-for _cand in (_os.path.join(_here, "..", "..", "panel-dist"),   # control-plane/panel-dist
-              _os.path.join(_here, "..", "static"),             # backend/static
-              _os.path.join(_here, "..", "panel-dist")):
-    if _os.path.isdir(_cand):
-        _static = _os.path.abspath(_cand)
-        break
-if _static:
-    print("[panel] serving admin UI from %s" % _static)
-    app.mount("/", StaticFiles(directory=_static, html=True), name="panel")
-else:
+
+def _mount_panel():
+    # The built panel has lived at control-plane/panel-dist, but an earlier version only
+    # looked for backend/static — and os.path.isdir() failing just SKIPS the mount, so "/"
+    # answered 404 with no error anywhere. Check the real locations, log which one won, and
+    # say so loudly when none match.
+    _here = _os.path.dirname(__file__)
+    for _cand in (_os.path.join(_here, "..", "..", "panel-dist"),   # control-plane/panel-dist
+                  _os.path.join(_here, "..", "static"),             # backend/static
+                  _os.path.join(_here, "..", "panel-dist")):
+        if _os.path.isdir(_cand):
+            static = _os.path.abspath(_cand)
+            print("[panel] serving admin UI from %s" % static)
+            app.mount("/", StaticFiles(directory=static, html=True), name="panel")
+            return
     print("[panel] NO admin UI found — '/' will 404. Looked for panel-dist / static "
           "next to app/. Build the panel or check the checkout.")
 
@@ -1029,3 +1034,9 @@ def control_rollout(rollout_id: int, action: str, actor=Depends(auth.require_adm
     db.commit()
     _audit(db, actor, "rollout:%s" % action, ro.version)
     return _rollout_view(db, ro)
+
+
+# Mount the static panel LAST — after every @app route above — so its catch-all "/"
+# never shadows an API route (see _mount_panel's note). This must remain the final
+# statement that touches `app`.
+_mount_panel()
