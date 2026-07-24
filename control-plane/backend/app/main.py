@@ -742,9 +742,25 @@ def alerts_test(who=Depends(auth.require_admin)):
 import os as _os
 from fastapi.staticfiles import StaticFiles
 
-_static = _os.path.join(_os.path.dirname(__file__), "..", "static")
-if _os.path.isdir(_static):
+# The built panel has lived at control-plane/panel-dist, but this only looked for
+# backend/static — and os.path.isdir() failing just SKIPS the mount, so "/" answered 404
+# with no error anywhere. The panel appeared to be missing rather than mis-located, which
+# is a bad way to find out you have no admin UI. Check the real locations, log which one
+# won, and say so loudly when none match.
+_here = _os.path.dirname(__file__)
+_static = ""
+for _cand in (_os.path.join(_here, "..", "..", "panel-dist"),   # control-plane/panel-dist
+              _os.path.join(_here, "..", "static"),             # backend/static
+              _os.path.join(_here, "..", "panel-dist")):
+    if _os.path.isdir(_cand):
+        _static = _os.path.abspath(_cand)
+        break
+if _static:
+    print("[panel] serving admin UI from %s" % _static)
     app.mount("/", StaticFiles(directory=_static, html=True), name="panel")
+else:
+    print("[panel] NO admin UI found — '/' will 404. Looked for panel-dist / static "
+          "next to app/. Build the panel or check the checkout.")
 
 
 # ----------------------------- staged rollouts (walkthrough J4) -----------------------------
