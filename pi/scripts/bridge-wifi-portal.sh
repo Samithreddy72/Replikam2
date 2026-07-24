@@ -60,18 +60,21 @@ ap_ssid() {
 # (the 2026-07-24 defect: /etc/bridge was read-only, the file was empty, the portal looped).
 # So: use the persisted file if it has content; else try to write the default; and no matter
 # what, echo a valid password so the AP always comes up.
-SETUP_PASS_DEFAULT="bridge2626"
 ap_pass() {
-  if [ -s "$PASS_FILE" ]; then cat "$PASS_FILE"; return; fi
-  install -d -m 755 /etc/bridge 2>/dev/null || true
-  if printf '%s' "$SETUP_PASS_DEFAULT" > "$PASS_FILE" 2>/dev/null; then
-    chmod 600 "$PASS_FILE" 2>/dev/null || true
-    logger -t bridge-wifi-portal "wrote setup-AP passphrase to $PASS_FILE"
-    cat "$PASS_FILE"
-  else
-    logger -t bridge-wifi-portal "WARN: $PASS_FILE unwritable — using built-in default"
-    printf '%s' "$SETUP_PASS_DEFAULT"
+  # Single source of truth, shared with `bridge setup-pass` and bridge-firstboot.sh, so the
+  # AP passphrase and the printed label can never disagree. Derived per device from the CPU
+  # serial: a fixed fleet-wide passphrase (we shipped "bridge2626" during portal bring-up)
+  # meant one leaked label unlocked EVERY bridge's setup AP.
+  if [ -x /usr/local/bin/bridge-derive-pass ]; then
+    /usr/local/bin/bridge-derive-pass
+    return
   fi
+  # bridge-derive-pass missing: derive inline rather than emit an empty passphrase, which
+  # wifi-connect rejects (<8 chars) so the setup AP would never appear at all.
+  _s="$(awk -F': *' '/^Serial/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+  [ -n "${_s:-}" ] || _s="$(cat /etc/machine-id 2>/dev/null)"
+  [ -n "${_s:-}" ] || _s="netbridge-unknown-serial"
+  printf 'netbridge-setup-ap|%s' "$_s" | sha256sum | cut -c1-12 | tr 'a-f' 'A-F'
 }
 
 # Give NetworkManager time to (re)connect to a known WiFi / Ethernet on boot before deciding

@@ -1,0 +1,42 @@
+#!/bin/sh
+# The device's setup-AP passphrase — the one printed on the label (walkthrough J1 step 3).
+#
+# Derived deterministically from the Pi's CPU serial, exactly like the pairing code.
+# This is the SINGLE source of truth: bridge-wifi-portal.sh, `bridge setup-pass` and
+# bridge-firstboot.sh all call this, so the AP, the label and the docs can never disagree.
+#
+# Why derived and not random-in-a-file:
+#   * /etc/bridge is a bind from /data, so a random passphrase is DESTROYED by any reflash
+#     or /data loss — silently invalidating a label that is already stuck on the box.
+#   * a derived one is stable for the life of the hardware: reflash it, wipe /data, swap
+#     the card, and the printed label still works.
+#   * it is still per-device. A fixed fleet-wide passphrase (we shipped "bridge2626" for a
+#     while during portal bring-up) means one leaked label unlocks the setup AP of EVERY
+#     bridge, and anyone nearby can watch a venue's WiFi credentials being typed in.
+#
+# It is NOT derivable from anything public: the pairing code is sha256(serial)[:4], while
+# this is sha256("netbridge-setup-ap|" + serial)[:12]. Knowing the SSID (which carries the
+# pairing code) tells you nothing about the passphrase — you cannot invert sha256 to get
+# the serial back.
+#
+# An admin can still pin a custom passphrase by writing /etc/bridge/setup-wifi-pass; that
+# file always wins, so nothing here takes away manual control.
+set -u
+PASS_FILE=/etc/bridge/setup-wifi-pass
+
+# 1. explicit override wins
+if [ -s "$PASS_FILE" ]; then
+  cat "$PASS_FILE"
+  exit 0
+fi
+
+# 2. derive from the hardware serial
+serial="$(awk -F': *' '/^Serial/{print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
+[ -n "${serial:-}" ] || serial="$(cat /etc/machine-id 2>/dev/null || true)"
+# 3. last resort: never emit an empty passphrase — wifi-connect refuses one shorter than
+#    8 chars and the setup AP then never appears at all (the 2026-07-23 flash-test defect).
+[ -n "${serial:-}" ] || serial="netbridge-unknown-serial"
+
+# 12 uppercase hex chars: 48 bits, and hex contains no O/I/l so it is unambiguous to read
+# off a printed label and type on a phone.
+printf 'netbridge-setup-ap|%s' "$serial" | sha256sum | cut -c1-12 | tr 'a-f' 'A-F'

@@ -116,15 +116,10 @@ case "$1" in
     restart_media; sleep 1; cmd_status ;;
   setup-pass )
     # What goes on the printed setup label (walkthrough J1 step 3 / J2 step 2).
-    # The passphrase is random per device and generated on first use, so this is
-    # the ONLY place to read it — there is no way to derive it from the SSID.
+    # Derived per device from the CPU serial via bridge-derive-pass, so it is STABLE:
+    # a reflash or a lost /data no longer changes it, and a label already stuck on the
+    # box keeps working. An admin can pin a custom one by writing the file; that wins.
     PF=/etc/bridge/setup-wifi-pass
-    if [ ! -s "$PF" ]; then
-      sudo install -d -m 755 /etc/bridge
-      sudo sh -c "umask 077; LC_ALL=C tr -dc 'ABCDEFGHJKMNPQRSTUVWXYZ23456789' </dev/urandom | head -c 12 > $PF"
-      sudo chmod 600 "$PF"
-      echo "(generated a new setup passphrase)"
-    fi
     PC=$(curl -s --max-time 2 http://localhost:8080/api/status 2>/dev/null \
          | grep -o '"pairing_code": *"[^"]*"' | cut -d'"' -f4)
     echo "=== NetBridge setup label ==="
