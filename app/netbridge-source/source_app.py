@@ -19,7 +19,7 @@ thing that turns J3's six steps into software:
 Deliberately NOT in this app: any admin capability. It signs in as a viewer, so the
 control plane refuses fleet mutations even if the UI asked for them.
 """
-import json, os, pathlib, shutil, socket, subprocess, sys, threading, time
+import json, os, pathlib, re, shutil, socket, subprocess, sys, threading, time
 import urllib.request, urllib.error
 
 STATE_DIR = pathlib.Path(os.path.expanduser("~/.netbridge-source"))
@@ -69,30 +69,108 @@ def api(method, url, token=None, body=None, timeout=10):
         return {"_error": str(e)}
 
 
+# --------------------------------------------------------------------------- platform
+# macOS and Windows differ in every part of the capture path: the ffmpeg input format,
+# how a device is addressed, and which h264 encoder exists. Keep those differences in ONE
+# place so the rest of the app never branches on sys.platform.
+IS_WIN = sys.platform.startswith("win")
+IS_MAC = sys.platform == "darwin"
+
+# avfoundation addresses devices by INDEX ("0:none"); dshow addresses them by NAME
+# (video="Integrated Camera"). That is why the app stores the device NAME and resolves it
+# at go-live: it is the only identifier both platforms share, and on macOS the index moves
+# when you plug in a headset.
+AV_FMT = "dshow" if IS_WIN else "avfoundation"
+
+
+def _ffmpeg():
+    """Prefer an ffmpeg shipped next to this app, fall back to one on PATH.
+
+    A packaged build bundles its own binary so a presenter installs nothing (walkthrough
+    J3 step 1: "the app brings everything"). Running from source, the system one is fine.
+    """
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    local = os.path.join(base, "ffmpeg.exe" if IS_WIN else "ffmpeg")
+    if os.path.isfile(local) and os.access(local, os.X_OK):
+        return local
+    return shutil.which("ffmpeg") or "ffmpeg"
+
+
+def _gst():
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    local = os.path.join(base, "gst-launch-1.0.exe" if IS_WIN else "gst-launch-1.0")
+    if os.path.isfile(local) and os.access(local, os.X_OK):
+        return local
+    return shutil.which("gst-launch-1.0")
+
+
+def _logdir():
+    """Windows has no /tmp. Keep leg logs beside the app's state instead."""
+    d = STATE_DIR / "logs"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return pathlib.Path(os.environ.get("TEMP", ".")) if IS_WIN else pathlib.Path("/tmp")
+    return d
+
+
+def _open_browser(url):
+    try:
+        if IS_WIN:
+            os.startfile(url)                                    # noqa: S606
+        elif IS_MAC:
+            subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
 # --------------------------------------------------------------------------- devices
 def av_devices():
-    """Enumerate cameras and mics BY NAME via ffmpeg's avfoundation lister."""
-    if not shutil.which("ffmpeg"):
+    """Enumerate cameras and mics BY NAME.
+
+    Both platforms print their device list to STDERR from a deliberately-failing probe
+    command, but in different shapes:
+      avfoundation:  [AVFoundation indev @ ...] [0] FaceTime HD Camera
+      dshow:         [dshow @ ...]  "Integrated Camera" (video)
+    Names are what we persist, so the two are normalised to the same {index,name} pairs.
+    """
+    ff = _ffmpeg()
+    if not ff:
         return {"video": [], "audio": [], "error": "ffmpeg not found"}
+    args = ([ff, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]
+            if IS_WIN else
+            [ff, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""])
     try:
-        p = subprocess.run(["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
-                           capture_output=True, text=True, timeout=20)
+        p = subprocess.run(args, capture_output=True, text=True, timeout=25)
     except Exception as e:
         return {"video": [], "audio": [], "error": str(e)}
-    video, audio, section = [], [], None
-    for line in (p.stderr or "").splitlines():
-        low = line.lower()
-        if "video devices" in low:
-            section = "v"; continue
-        if "audio devices" in low:
-            section = "a"; continue
-        if "] [" in line and section:
-            try:
-                idx = line.split("] [")[1].split("]")[0]
-                name = line.split("] ", 2)[-1].strip()
-                (video if section == "v" else audio).append({"index": idx, "name": name})
-            except Exception:
-                pass
+    err = p.stderr or ""
+
+    video, audio = [], []
+    if IS_WIN:
+        # dshow prints:  "Name" (video)   /   "Name" (audio)
+        for line in err.splitlines():
+            m = re.search(r'"([^"]+)"\s*\((video|audio)\)', line)
+            if m:
+                (video if m.group(2) == "video" else audio).append(
+                    {"index": m.group(1), "name": m.group(1)})
+    else:
+        section = None
+        for line in err.splitlines():
+            low = line.lower()
+            if "video devices" in low:
+                section = "v"; continue
+            if "audio devices" in low:
+                section = "a"; continue
+            if "] [" in line and section:
+                try:
+                    idx = line.split("] [")[1].split("]")[0]
+                    name = line.split("] ", 2)[-1].strip()
+                    (video if section == "v" else audio).append({"index": idx, "name": name})
+                except Exception:
+                    pass
     return {"video": video, "audio": audio}
 
 
@@ -139,37 +217,48 @@ class Session:
     def start(self, pi_host, video_idx, audio_idx, fps=20, mic_gain=8, return_port=5004):
         self.stop()
         self.bridge, self.return_port = pi_host, return_port
-        common = ["ffmpeg", "-hide_banner", "-loglevel", "warning"]
-        # These are mac/mac-stream.sh's PROVEN invocations, not re-derived ones. Two things
-        # here were learned the hard way and must not be "simplified":
-        #   * capture at 1280x720/uyvy422 and scale down. Asking the camera for 320x180 or
-        #     640x360 fails outright - "Selected video size is not supported by the device"
-        #     - and the leg dies instantly while the audio leg keeps running, which looks
-        #     like a network fault rather than a bad argument.
-        #   * -bsf:v dump_extra=freq=keyframe repeats SPS/PPS on every keyframe. Without it
-        #     a receiver that joins late never gets the decoder config and shows nothing.
-        # Opus FEC (-fec 1) is deliberately absent: ffmpeg's RTP muxer rejects it and the
-        # mic leg crash-loops (2026-06-27).
-        v = common + ["-f", "avfoundation", "-framerate", "30",
-                      "-video_size", "1280x720", "-pixel_format", "uyvy422",
-                      "-i", "%s:none" % video_idx,
-                      "-vf", "scale=320:180,format=nv12", "-fps_mode", "cfr", "-r", str(fps),
-                      "-c:v", "h264_videotoolbox", "-realtime", "1", "-b:v", "400k",
-                      "-g", str(fps), "-bsf:v", "dump_extra=freq=keyframe", "-an",
-                      "-f", "rtp", "rtp://%s:%d?pkt_size=1100" % (pi_host, RTP_VIDEO)]
-        a = common + ["-f", "avfoundation", "-i", ":%s" % audio_idx,
-                      "-af", "volume=%ddB,alimiter=limit=0.9" % mic_gain,
-                      "-c:a", "libopus", "-b:a", "64k", "-ar", "48000", "-ac", "2",
-                      "-application", "lowdelay", "-payload_type", "97",
-                      "-f", "rtp", "rtp://%s:%d" % (pi_host, RTP_VOICE)]
+        ff = _ffmpeg()
+        common = [ff, "-hide_banner", "-loglevel", "warning"]
+        # The macOS arguments are mac/mac-stream.sh's PROVEN ones and must not be
+        # "simplified": asking the camera for 320x180 or 640x360 fails outright
+        # ("Selected video size is not supported by the device") and the video leg dies
+        # instantly while the audio leg keeps running - which reads as a network fault
+        # rather than a bad argument. Capture large, scale down.
+        # -bsf:v dump_extra=freq=keyframe repeats SPS/PPS so a receiver joining late can
+        # decode. Opus -fec is deliberately absent: ffmpeg's RTP muxer rejects it.
+        if IS_WIN:
+            # dshow takes device NAMES, and there is no videotoolbox: libx264 ultrafast
+            # is the portable choice that every Windows ffmpeg build has.
+            vin = ["-f", "dshow", "-rtbufsize", "64M", "-i", "video=%s" % video_idx]
+            venc = ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency"]
+            ain = ["-f", "dshow", "-i", "audio=%s" % audio_idx]
+        else:
+            vin = ["-f", "avfoundation", "-framerate", "30",
+                   "-video_size", "1280x720", "-pixel_format", "uyvy422",
+                   "-i", "%s:none" % video_idx]
+            venc = ["-c:v", "h264_videotoolbox", "-realtime", "1"]
+            ain = ["-f", "avfoundation", "-i", ":%s" % audio_idx]
+
+        v = common + vin + [
+            "-vf", "scale=320:180,format=nv12", "-fps_mode", "cfr", "-r", str(fps),
+        ] + venc + [
+            "-b:v", "400k", "-g", str(fps), "-bsf:v", "dump_extra=freq=keyframe", "-an",
+            "-f", "rtp", "rtp://%s:%d?pkt_size=1100" % (pi_host, RTP_VIDEO)]
+        a = common + ain + [
+            "-af", "volume=%ddB,alimiter=limit=0.9" % mic_gain,
+            "-c:a", "libopus", "-b:a", "64k", "-ar", "48000", "-ac", "2",
+            "-application", "lowdelay", "-payload_type", "97",
+            "-f", "rtp", "rtp://%s:%d" % (pi_host, RTP_VOICE)]
+
         # Keep each leg's stderr so a dead leg can be explained instead of guessed at.
         self.logs = []
+        logdir = _logdir()
         for name, argv in (("video", v), ("voice", a)):
-            lf = open("/tmp/netbridge-source-%s.log" % name, "w")
+            lf = open(os.path.join(str(logdir), "netbridge-source-%s.log" % name), "w")
             self.logs.append(lf)
             self.procs.append(subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=lf))
-        # return-audio listener (gstreamer's jitter buffer absorbs WiFi timing variance)
-        gst = shutil.which("gst-launch-1.0")
+
+        gst = _gst()
         if gst:
             caps = ("application/x-rtp,media=audio,encoding-name=OPUS,"
                     "payload=97,clock-rate=48000")
@@ -300,6 +389,14 @@ class Handler(BaseHTTPRequestHandler):
             save_state(st)
             return self._send({"ok": True, "email": st["email"]})
 
+        if self.path == "/api/signout":
+            # Drop the identity, keep control_url and the remembered devices: a forced
+            # sign-out should not make the presenter re-pick their camera and mic.
+            for k in ("token", "email"):
+                st.pop(k, None)
+            save_state(st)
+            return self._send({"ok": True})
+
         if self.path == "/api/remember":
             for k in ("bridge_id", "camera_name", "mic_name"):
                 if b.get(k) is not None:
@@ -372,7 +469,9 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
 </style>
 <div class=w>
 <h1>NetBridge Source</h1><p class=sub>Sign in, unlock your bridge, go live.</p>
-<div class=who><span id=who>not signed in</span><span id=livepill></span></div>
+<div class=who><span id=who>not signed in</span>
+  <span><button id=signout onclick=signout() style="display:none;width:auto;padding:3px 10px;font-size:11.5px;background:var(--ink);color:var(--pa)">sign out</button>
+  <span id=livepill></span></span></div>
 
 <div class=card id=signin>
   <label>Control plane URL</label><input id=curl placeholder="http://192.168.29.155:8000">
@@ -409,13 +508,14 @@ function host(){const b=BR.find(x=>x.id===$('bridge').value);return b?(b.tailsca
 async function boot(){
   const s=await j('/api/state');
   if(s.control_url)$('curl').value=s.control_url;
-  if(s.signed_in){$('who').textContent='Signed in as '+(s.email||'');
+  if(s.signed_in){$('who').textContent='Signed in as '+(s.email||'');$('signout').style.display='';
     $('signin').style.display='none';$('main').style.display='';await load(s)}
   setLive(s.live)
 }
 function setLive(v){$('livepill').innerHTML=v?'<span class="pill on">● LIVE</span>':'';
   $('go').textContent=v?'End session':'Go live';$('health').style.display=v?'':'none';
   if(v&&!timer)timer=setInterval(poll,4000); if(!v&&timer){clearInterval(timer);timer=null}}
+async function signout(){await j('/api/signout',{method:'POST'});location.reload()}
 async function req(){const r=await j('/api/signin-request',{method:'POST',
   headers:{'Content-Type':'application/json'},
   body:JSON.stringify({control_url:$('curl').value,email:$('email').value})});
@@ -424,7 +524,18 @@ async function redeem(){const r=await j('/api/signin-redeem',{method:'POST',
   headers:{'Content-Type':'application/json'},body:JSON.stringify({code:$('code').value})});
   if(r._error){$('m1').textContent=r._error;return} location.reload()}
 async function load(s){
-  const b=await j('/api/bridges'); if(b._error){$('m2').textContent=b._error;return}
+  const b=await j('/api/bridges');
+  if(b._error){
+    // A 401 here means the signed-in account no longer exists or its token was revoked.
+    // Showing an empty bridge list makes that look like "you have no bridges", which is
+    // the wrong problem to go hunting for.
+    if(b._code===401){
+      $('m2').innerHTML='Your sign-in is no longer valid — <b>sign out and sign in again</b>.';
+      $('signout').style.display='';
+      return;
+    }
+    $('m2').textContent=b._error; return;
+  }
   BR=b; $('bridge').innerHTML=b.map(x=>`<option value="${x.id}">${x.name} · ${x.pairing_code}`+
     `${x.online?'':' (offline)'}</option>`).join('');
   if(s.last_bridge)$('bridge').value=s.last_bridge;
@@ -471,10 +582,7 @@ def main():
     url = "http://%s:%d/" % (HOST, PORT)
     print("NetBridge Source  ->  %s" % url)
     print("(local only; ctrl-c to quit)")
-    try:
-        subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
+    _open_browser(url)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
