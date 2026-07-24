@@ -129,6 +129,17 @@ for _u in userconfig cloud-config cloud-init-local cloud-init-network cloud-init
   systemctl mask "$_u.service" 2>/dev/null || ln -sf /dev/null "/etc/systemd/system/$_u.service"
 done
 
+# bridge-web.service runs as User=pi, and /dev/vcio is root:video 0660. The old manual
+# setup.sh inherited the stock pi group membership; this CI image never reproduced it, so
+# every vcgencmd call from bridge-web failed with "Can't open device file: /dev/vcio_gencmd"
+# and the fleet was BLIND to temperature and undervoltage on flashed cards - exactly the
+# telemetry that matters on a Pi with a marginal PSU. Found 2026-07-24.
+log "hardware group membership for the pi user"
+for _g in video gpio i2c spi input render; do
+  getent group "$_g" >/dev/null 2>&1 && usermod -aG "$_g" pi 2>/dev/null || true
+done
+id pi 2>/dev/null || true
+
 # ---------------- Stage 5b: WiFi setup portal binary (balena wifi-connect) ----------
 # bridge-wifi-portal.service needs NetworkManager + dnsmasq-base + this binary. Without
 # it the portal loops on "wifi-connect: not found" and the setup AP NEVER appears, so a
