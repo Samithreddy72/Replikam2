@@ -22,7 +22,7 @@ control plane refuses fleet mutations even if the UI asked for them.
 import json, os, pathlib, re, shutil, socket, subprocess, sys, threading, time
 import urllib.request, urllib.error
 
-APP_VERSION = "1.0.0"          # stamped into the diagnostics report; bump with each release
+APP_VERSION = "1.0.1"          # stamped into the diagnostics report; bump with each release
 
 STATE_DIR = pathlib.Path(os.path.expanduser("~/.netbridge-source"))
 STATE_FILE = STATE_DIR / "state.json"
