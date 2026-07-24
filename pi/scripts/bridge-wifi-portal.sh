@@ -19,6 +19,24 @@ have_internet() {
   return 1
 }
 
+# Associated to a REAL network? This is what decides whether the setup AP is raised -
+# NOT internet reachability. A bridge that is on WiFi but whose ISP blipped is still a
+# working bridge on a working meeting LAN; tearing that link down to broadcast a setup
+# AP would kill a live meeting over a transient upstream problem. Our own setup AP does
+# not count as being connected to anything.
+have_wifi() {
+  local st
+  st="$(nmcli -t -f DEVICE,STATE,CONNECTION dev status 2>/dev/null | grep "^${PORTAL_IFACE}:connected:" || true)"
+  [ -n "$st" ] || return 1
+  case "$st" in *:BridgeSetup-*) return 1 ;; esac
+  return 0
+}
+
+# Consecutive failed association checks before we give up on the saved network and raise
+# the portal. At CHECK_INTERVAL=30s this is ~2 minutes, which covers a router reboot, a
+# roam between APs, and DHCP renewal without ever flapping the link.
+GRACE_CHECKS="${GRACE_CHECKS:-4}"
+
 PASS_FILE=/etc/bridge/setup-wifi-pass
 
 ap_ssid() {
@@ -60,11 +78,25 @@ ap_pass() {
 # we're stranded — avoids racing a normal connect.
 sleep 60
 
+fails=0
 while true; do
-  if have_internet; then
+  if have_wifi; then
+    fails=0
+    # Associated but no internet: say so and STAY PUT. Previously this raised the setup
+    # AP, which dropped the bridge off a working WiFi over a transient ISP outage.
+    have_internet || logger -t bridge-wifi-portal \
+      "on WiFi but no internet - staying connected, NOT raising the setup AP"
     sleep "$CHECK_INTERVAL"
     continue
   fi
+  fails=$((fails + 1))
+  if [ "$fails" -lt "$GRACE_CHECKS" ]; then
+    logger -t bridge-wifi-portal \
+      "$PORTAL_IFACE not associated ($fails/$GRACE_CHECKS) - waiting before raising setup AP"
+    sleep "$CHECK_INTERVAL"
+    continue
+  fi
+  fails=0
   ssid="$(ap_ssid)"
   logger -t bridge-wifi-portal "offline -> raising setup hotspot '$ssid' on $PORTAL_IFACE"
   # Open AP (no passphrase) for easy onboarding; captive portal on :80. wifi-connect exits when
