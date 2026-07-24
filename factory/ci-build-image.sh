@@ -108,6 +108,16 @@ install -m 0644 pi/configs/wifi-powersave-off.conf pi/configs/no-mac-rand.conf /
 tar xzf sources/patched-uvc-gadget-sources.tgz -C /home/pi 2>/dev/null || true
 chown -R 1000:1000 /home/pi 2>/dev/null || true
 
+# Mask stock Raspberry Pi OS units that have no business on an A/B card.
+# rpi-resize / systemd-growfs-root try to GROW THE ROOT PARTITION on first boot - on this
+# layout rootA is followed by rootB, so "growing" root would eat the standby slot. They
+# failed harmlessly (read-only root) but showed up as failed units; mask them outright.
+# cloud-init is not used at all here and just adds three more failures + boot delay.
+log "mask stock units that conflict with the A/B layout"
+for _u in cloud-config cloud-init-local cloud-init-network cloud-init rpi-resize systemd-growfs-root; do
+  systemctl mask "$_u.service" 2>/dev/null || ln -sf /dev/null "/etc/systemd/system/$_u.service"
+done
+
 # ---------------- Stage 5b: WiFi setup portal binary (balena wifi-connect) ----------
 # bridge-wifi-portal.service needs NetworkManager + dnsmasq-base + this binary. Without
 # it the portal loops on "wifi-connect: not found" and the setup AP NEVER appears, so a

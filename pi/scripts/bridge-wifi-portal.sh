@@ -25,7 +25,10 @@ ap_ssid() {
   local pc
   pc=$(curl -s --max-time 2 http://localhost:8080/api/status 2>/dev/null \
        | grep -o '"pairing_code": *"[^"]*"' | cut -d'"' -f4)
-  echo "BridgeSetup-${pc:-Pi}"
+  # The pairing code already starts with "BRIDGE-", so a naive prefix produced
+  # "BridgeSetup-BRIDGE-2626" - confusing on a phone's WiFi list, and it cost a whole
+  # flash cycle on 2026-07-24 when the AP was up but nobody recognised the name.
+  echo "BridgeSetup-${pc:-Pi}" | sed "s/BridgeSetup-BRIDGE-/BridgeSetup-/"
 }
 
 # The setup AP's WPA2 key. MUST NOT be derivable from the broadcast SSID — it
