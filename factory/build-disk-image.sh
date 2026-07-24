@@ -186,9 +186,20 @@ tmpfs  /var/spool               tmpfs  defaults,noatime,nosuid,nodev,size=8M   0
 # Persistent logs on /data. Without this journald is volatile on the read-only root and a
 # failure is unreadable after power-off - which is what made the portal bugs so hard to find.
 /data/log-journal   /var/log/journal   none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
+# `bridge set-peer` (and the /api/set-peer endpoint behind "go live") writes the return-audio
+# destination to /etc/default/bridge-return-audio. /etc/default is on the READ-ONLY root, so on
+# a flashed card that write silently failed and the peer stayed unset - meaning RETURN AUDIO
+# COULD NEVER WORK on any read-only image. Bind the single file onto /data. Found 2026-07-24
+# during the first end-to-end video test (set-peer returned ok=false, peer stayed "?").
+/data/config/bridge-return-audio  /etc/default/bridge-return-audio  none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
 FSTAB
   # read-only overlay root (safe: /data holds writes) + remount-fs masked (fails under overlay)
   install -d "$mp/etc"
+  # bind target for the return-audio peer file (a file bind needs the file to exist)
+  install -d "$mp/etc/default"
+  [ -f "$mp/etc/default/bridge-return-audio" ] || \
+    printf '# speaker-return destination (the remote peer)\nRETURN_DEST_IP=\nRETURN_DEST_PORT=5004\n' \
+      > "$mp/etc/default/bridge-return-audio"
   echo 'overlayroot="tmpfs:recurse=0"' > "$mp/etc/overlayroot.conf"
   # DNS on a read-only root. /etc/resolv.conf MUST be a real readable file at boot: dnsmasq
   # reads it when the setup AP starts, and a missing/dangling one makes wifi-connect abort so
@@ -237,6 +248,8 @@ mount "${LOOP}p4" "$MNT/p4"
 log "data: writing /data skeleton"
 install -d "$MNT/p4"/log-journal
 touch "$MNT/p4"/flight.txt
+printf '# speaker-return destination (the remote peer)\nRETURN_DEST_IP=\nRETURN_DEST_PORT=5004\n' \
+  > "$MNT/p4"/config/bridge-return-audio
 install -d "$MNT/p4"/config "$MNT/p4"/config/nm-connections "$MNT/p4"/etc-bridge \
            "$MNT/p4"/diagnostics "$MNT/p4"/tailscale
 install -d -o 1000 -g 1000 "$MNT/p4"/fleet-brain 2>/dev/null || install -d "$MNT/p4"/fleet-brain
