@@ -12,5 +12,11 @@ RemainAfterExit=yes
 ExecStart=-/usr/sbin/rfkill unblock wifi
 ExecStart=-/usr/sbin/rfkill unblock all
 ExecStart=-/usr/sbin/iw reg set IN
+# Delete any leftover setup-AP profile BEFORE NetworkManager starts. wifi-connect saves the
+# AP as a normal NM connection and system-connections is bind-mounted to /data, so it would
+# otherwise survive reboots, auto-activate, and bring wlan0 up in AP mode - which makes the
+# radio unable to scan (portal then lists only itself) and steals the radio back after a
+# successful join. Runs here because this unit is already ordered Before=NetworkManager.
+ExecStart=-/bin/sh -c 'rm -f /etc/NetworkManager/system-connections/BridgeSetup-*'
 [Install]
 WantedBy=multi-user.target

@@ -217,7 +217,12 @@ def main():
     conf = load_conf()
     base = conf.get("CONTROL_URL", "").rstrip("/")
     if not base:
-        raise SystemExit("CONTROL_URL not set in %s" % CONF)
+        # An unprovisioned card is a NORMAL state, not a failure - every freshly flashed
+        # card is unprovisioned until it is claimed. Exiting non-zero made systemd log a
+        # failed unit on every timer tick (29x on the 2026-07-24 test card) and made a
+        # healthy card look broken in `systemctl --failed`.
+        print("CONTROL_URL not set in %s - card not provisioned yet; nothing to do" % CONF)
+        raise SystemExit(0)
     tel = telemetry()
     token = enroll(base, conf, tel)
     # heartbeat
