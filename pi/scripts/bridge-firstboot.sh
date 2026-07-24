@@ -66,15 +66,11 @@ EOF
 chmod 600 /etc/default/bridge-agent
 echo "${BRIDGE_VERSION:-dev}" >/etc/bridge/version
 
-# 2b. setup-AP passphrase. Fixed to "bridge2626" for now (Samith's call) so the label /
-# onboarding is predictable while we get the portal working; can move back to a per-device
-# random key later. Written to /etc/bridge (a /data bind) so it persists.
-SETUP_PASS="${SETUP_PASS:-bridge2626}"
-if [ ! -s /etc/bridge/setup-wifi-pass ]; then
-  printf '%s' "$SETUP_PASS" >/etc/bridge/setup-wifi-pass 2>/dev/null \
-    && { chmod 600 /etc/bridge/setup-wifi-pass; log "set setup-AP passphrase"; } \
-    || log "WARN: could not write /etc/bridge/setup-wifi-pass (is /data mounted?)"
-fi
+# 2b. setup-AP passphrase. NOT written here any more: it is derived per device from the
+# CPU serial by bridge-derive-pass, which every consumer calls. Writing a value here was
+# how "bridge2626" became a FLEET-WIDE shared passphrase - one leaked label would have
+# unlocked the setup AP of every bridge we ship. A stored random value was no better: it
+# lives on /data, so a reflash destroyed it and silently invalidated the printed label.
 
 # 3. start the agent (enrolls on first tick, then heartbeats)
 systemctl enable --now bridge-agent.timer || log "WARN: could not enable bridge-agent.timer"
