@@ -54,7 +54,7 @@ def _source_tags() -> list[str]:
     return [t.strip() for t in settings.ts_source_tag.split(",") if t.strip()]
 
 
-def mint_ephemeral_key(description: str) -> dict:
+def mint_ephemeral_key(description: str, tags: list[str] | None = None) -> dict:
     """Create one scoped ephemeral auth key. Returns {"key": "tskey-auth-…",
     "expires": <iso8601|None>}. Raises MeshNotConfigured if unconfigured, MeshError
     on API failure. Separated from the endpoint so it can be mocked in tests."""
@@ -66,7 +66,7 @@ def mint_ephemeral_key(description: str) -> dict:
             "reusable": False,
             "ephemeral": True,
             "preauthorized": True,
-            "tags": _source_tags(),
+            "tags": tags or _source_tags(),
         }}},
         "expirySeconds": settings.ts_key_ttl_s,
         "description": _safe_desc(description),
