@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import Base, engine, get_db
-from . import auth, models
+from . import auth, models, notifier
 from .alerts import device_alerts, is_online
 from .models import (Device, Telemetry, Command, DiagBundle, User, AuditLog,
                      Rollout, RolloutTarget, utcnow)
@@ -89,7 +89,8 @@ def enroll(body: EnrollIn, db: Session = Depends(get_db)):
         raise HTTPException(401, "invalid bootstrap token")
     token, token_hash = auth.new_device_token()
     dev = db.get(Device, body.device_id)
-    if dev is None:
+    is_new = dev is None
+    if is_new:
         # The bootstrap token decides which org the device enrolls into, so a
         # customer's cards land directly in their org (never visible to others).
         dev = Device(id=body.device_id, org_id=settings.bootstrap_tokens[body.bootstrap_token])
@@ -100,7 +101,35 @@ def enroll(body: EnrollIn, db: Session = Depends(get_db)):
     dev.hostname = body.hostname
     dev.token_hash = token_hash  # re-enroll rotates the token
     db.commit()
+    # A brand-new device_id = a new SD card contacting the fleet for the first time.
+    # That is not a "fault" the level-triggered alert loop would ever catch (a healthy
+    # card firing nothing), so page it here, once, as its own edge event.
+    if is_new:
+        _notify_new_device(db, dev)
     return EnrollOut(device_id=dev.id, device_token=token)
+
+
+def _notify_new_device(db, dev):
+    """Email/webhook a one-time 'new SD card enrolled' alert. Best-effort: a delivery
+    failure must never break enrollment (the card still gets its token)."""
+    import logging
+    from .models import AlertEvent
+    log = logging.getLogger("main")
+    try:
+        detail = "new SD card enrolled: %s (v%s)" % (dev.hostname or dev.id, dev.version or "?")
+        ev = AlertEvent(device_id=dev.id, kind="new_device", detail=detail)
+        db.add(ev)
+        db.flush()
+        if notifier.any_channel_configured():
+            payload = notifier.build_message(
+                dev.hostname or dev.pairing_code or dev.id, dev.id,
+                "new_device", detail, "firing", None)
+            if any(notifier.deliver(payload).values()):
+                ev.notified_at = utcnow()
+        db.commit()
+    except Exception:
+        log.exception("new-device alert failed for %s", getattr(dev, "id", "?"))
+        db.rollback()
 
 
 @app.post("/v1/telemetry")
