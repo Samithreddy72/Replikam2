@@ -21,6 +21,36 @@ def sh(cmd):
     except Exception:
         return ""
 
+def soc_temp():
+    """SoC temperature. Prefer sysfs: it is world-readable, so it works even when
+    /dev/vcio is not (bridge-web runs as 'pi'). vcgencmd stays as a fallback."""
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            return "%.1f'C" % (int(f.read().strip()) / 1000.0)
+    except Exception:
+        pass
+    return sh("vcgencmd measure_temp").replace("temp=", "") or "?"
+
+
+def soc_throttled():
+    """Undervoltage / throttling. The firmware sysfs node gives the same bitmask as
+    vcgencmd get_throttled; the hwmon alarm is a coarser 'undervolt right now' flag.
+    Either beats returning an error string - this is how we see a brownout coming."""
+    try:
+        with open("/sys/devices/platform/soc/soc:firmware/get_throttled") as f:
+            return f.read().strip()
+    except Exception:
+        pass
+    import glob
+    for p_ in glob.glob("/sys/class/hwmon/hwmon*/in0_lcrit_alarm"):
+        try:
+            with open(p_) as f:
+                return "undervoltage" if f.read().strip() == "1" else "0x0"
+        except Exception:
+            pass
+    return sh("vcgencmd get_throttled").replace("throttled=", "") or "?"
+
+
 def read(path):
     try:
         with open(path) as f:
@@ -110,8 +140,8 @@ def gather():
     d["functions"] = sh("ls /sys/kernel/config/usb_gadget/g1/functions/ 2>/dev/null").replace("\n", " ")
     d["video40"] = os.path.exists("/dev/video40")
     d["uac2"] = os.path.isdir("/proc/asound/UAC2Gadget")
-    d["temp"] = sh("vcgencmd measure_temp").replace("temp=", "")
-    d["throttled"] = sh("vcgencmd get_throttled").replace("throttled=", "")
+    d["temp"] = soc_temp()
+    d["throttled"] = soc_throttled()
     d["wifi"] = wifi_dbm()
     d["uptime"] = sh("uptime -p").replace("up ", "")
     peer = ""
