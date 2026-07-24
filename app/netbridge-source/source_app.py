@@ -389,6 +389,14 @@ class Handler(BaseHTTPRequestHandler):
             save_state(st)
             return self._send({"ok": True, "email": st["email"]})
 
+        if self.path == "/api/signout":
+            # Drop the identity, keep control_url and the remembered devices: a forced
+            # sign-out should not make the presenter re-pick their camera and mic.
+            for k in ("token", "email"):
+                st.pop(k, None)
+            save_state(st)
+            return self._send({"ok": True})
+
         if self.path == "/api/remember":
             for k in ("bridge_id", "camera_name", "mic_name"):
                 if b.get(k) is not None:
@@ -461,7 +469,9 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
 </style>
 <div class=w>
 <h1>NetBridge Source</h1><p class=sub>Sign in, unlock your bridge, go live.</p>
-<div class=who><span id=who>not signed in</span><span id=livepill></span></div>
+<div class=who><span id=who>not signed in</span>
+  <span><button id=signout onclick=signout() style="display:none;width:auto;padding:3px 10px;font-size:11.5px;background:var(--ink);color:var(--pa)">sign out</button>
+  <span id=livepill></span></span></div>
 
 <div class=card id=signin>
   <label>Control plane URL</label><input id=curl placeholder="http://192.168.29.155:8000">
@@ -498,13 +508,14 @@ function host(){const b=BR.find(x=>x.id===$('bridge').value);return b?(b.tailsca
 async function boot(){
   const s=await j('/api/state');
   if(s.control_url)$('curl').value=s.control_url;
-  if(s.signed_in){$('who').textContent='Signed in as '+(s.email||'');
+  if(s.signed_in){$('who').textContent='Signed in as '+(s.email||'');$('signout').style.display='';
     $('signin').style.display='none';$('main').style.display='';await load(s)}
   setLive(s.live)
 }
 function setLive(v){$('livepill').innerHTML=v?'<span class="pill on">● LIVE</span>':'';
   $('go').textContent=v?'End session':'Go live';$('health').style.display=v?'':'none';
   if(v&&!timer)timer=setInterval(poll,4000); if(!v&&timer){clearInterval(timer);timer=null}}
+async function signout(){await j('/api/signout',{method:'POST'});location.reload()}
 async function req(){const r=await j('/api/signin-request',{method:'POST',
   headers:{'Content-Type':'application/json'},
   body:JSON.stringify({control_url:$('curl').value,email:$('email').value})});
@@ -513,7 +524,18 @@ async function redeem(){const r=await j('/api/signin-redeem',{method:'POST',
   headers:{'Content-Type':'application/json'},body:JSON.stringify({code:$('code').value})});
   if(r._error){$('m1').textContent=r._error;return} location.reload()}
 async function load(s){
-  const b=await j('/api/bridges'); if(b._error){$('m2').textContent=b._error;return}
+  const b=await j('/api/bridges');
+  if(b._error){
+    // A 401 here means the signed-in account no longer exists or its token was revoked.
+    // Showing an empty bridge list makes that look like "you have no bridges", which is
+    // the wrong problem to go hunting for.
+    if(b._code===401){
+      $('m2').innerHTML='Your sign-in is no longer valid — <b>sign out and sign in again</b>.';
+      $('signout').style.display='';
+      return;
+    }
+    $('m2').textContent=b._error; return;
+  }
   BR=b; $('bridge').innerHTML=b.map(x=>`<option value="${x.id}">${x.name} · ${x.pairing_code}`+
     `${x.online?'':' (offline)'}</option>`).join('');
   if(s.last_bridge)$('bridge').value=s.last_bridge;
