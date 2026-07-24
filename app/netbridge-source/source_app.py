@@ -83,6 +83,15 @@ IS_MAC = sys.platform == "darwin"
 AV_FMT = "dshow" if IS_WIN else "avfoundation"
 
 
+def _is_exe(path):
+    """True if path is a runnable binary. os.access(X_OK) is meaningless on Windows -
+    a perfectly good bundled .exe can test False there, which would silently drop us back
+    to a system ffmpeg that a presenter does not have. On Windows, existing is enough."""
+    if not os.path.isfile(path):
+        return False
+    return True if IS_WIN else os.access(path, os.X_OK)
+
+
 def _ffmpeg():
     """Prefer an ffmpeg shipped next to this app, fall back to one on PATH.
 
@@ -91,17 +100,44 @@ def _ffmpeg():
     """
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
     local = os.path.join(base, "ffmpeg.exe" if IS_WIN else "ffmpeg")
-    if os.path.isfile(local) and os.access(local, os.X_OK):
+    if _is_exe(local):
         return local
     return shutil.which("ffmpeg") or "ffmpeg"
 
 
 def _gst():
+    """Path to gst-launch-1.0 — the bundled copy if we shipped one, else the system's."""
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
-    local = os.path.join(base, "gst-launch-1.0.exe" if IS_WIN else "gst-launch-1.0")
-    if os.path.isfile(local) and os.access(local, os.X_OK):
-        return local
+    for cand in (os.path.join(base, "gst", "gst-launch-1.0.exe" if IS_WIN else "gst-launch-1.0"),
+                 os.path.join(base, "gst-launch-1.0.exe" if IS_WIN else "gst-launch-1.0")):
+        if _is_exe(cand):
+            return cand
     return shutil.which("gst-launch-1.0")
+
+
+def _gst_env():
+    """Environment for the bundled GStreamer.
+
+    A relocated GStreamer cannot find its own plugins: the registry paths are baked in at
+    ITS build time and point at wherever it was compiled. Without these two variables the
+    binary starts fine and then fails with "no element udpsrc", which reads like a broken
+    install rather than a missing search path.
+    """
+    env = dict(os.environ)
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    gstdir = os.path.join(base, "gst")
+    plug = os.path.join(gstdir, "plugins")
+    if os.path.isdir(plug):
+        env["GST_PLUGIN_PATH"] = plug
+        env["GST_PLUGIN_SYSTEM_PATH_1_0"] = plug
+        # a stale registry from another install would shadow the bundle
+        env["GST_REGISTRY"] = os.path.join(str(_logdir()), "gst-registry.bin")
+        if IS_WIN:
+            # Windows finds a DLL's dependencies via PATH (and the exe's own dir). The
+            # bundled gst-launch and its DLLs share gst/, so that dir must lead PATH or
+            # the binary starts and immediately fails to load libglib etc.
+            env["PATH"] = gstdir + os.pathsep + env.get("PATH", "")
+    return env
 
 
 def _logdir():
@@ -207,12 +243,20 @@ class Session:
 
     def __init__(self):
         self.procs = []
+        self.logs = []
         self.bridge = None
         self.return_port = 5004
+        self.return_player = "none"
+        self.voice_proc = None
 
     @property
     def live(self):
         return any(p.poll() is None for p in self.procs)
+
+    def voice_sending(self):
+        """True if the mic->bridge leg is alive. A sender-side signal used only as a
+        fallback when the bridge firmware predates the device-side voice_arriving check."""
+        return bool(self.voice_proc and self.voice_proc.poll() is None)
 
     def start(self, pi_host, video_idx, audio_idx, fps=20, mic_gain=8, return_port=5004):
         self.stop()
@@ -252,22 +296,72 @@ class Session:
 
         # Keep each leg's stderr so a dead leg can be explained instead of guessed at.
         self.logs = []
+        self.voice_proc = None
         logdir = _logdir()
         for name, argv in (("video", v), ("voice", a)):
             lf = open(os.path.join(str(logdir), "netbridge-source-%s.log" % name), "w")
             self.logs.append(lf)
-            self.procs.append(subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=lf))
+            proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=lf)
+            self.procs.append(proc)
+            if name == "voice":
+                self.voice_proc = proc          # so the app can report the voice leg is alive
 
+        self.return_player = self._start_return(return_port)
+
+    def _start_return(self, port):
+        """Play the meeting room's audio back. Returns a label for what is playing it.
+
+        GStreamer first: rtpjitterbuffer holds ~250ms and releases at a steady rate, which
+        is what makes WiFi-jittered return audio listenable. ffmpeg is the fallback so a
+        presenter who only has the bundled binary still HEARS the room instead of silence
+        - it has no equivalent jitter buffer, so expect it to be rougher.
+
+        Returning a label matters: previously a missing GStreamer meant this block was
+        skipped entirely, with no error and no sound. Silence that looks like success is
+        the worst outcome here, because the presenter cannot tell it from a quiet room.
+        """
+        caps = ("application/x-rtp,media=audio,encoding-name=OPUS,"
+                "payload=97,clock-rate=48000")
         gst = _gst()
         if gst:
-            caps = ("application/x-rtp,media=audio,encoding-name=OPUS,"
-                    "payload=97,clock-rate=48000")
+            try:
+                self.procs.append(subprocess.Popen(
+                    [gst, "-q", "udpsrc", "port=%d" % port, "caps=" + caps, "!",
+                     "rtpjitterbuffer", "latency=250", "do-lost=true", "!",
+                     "rtpopusdepay", "!", "opusdec", "plc=true", "use-inband-fec=true", "!",
+                     "audioconvert", "!", "audioresample", "!", "autoaudiosink", "sync=false"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_gst_env()))
+                return "gstreamer"
+            except Exception:
+                pass
+
+        # ffmpeg fallback — but ONLY where ffmpeg can actually play audio out. It has an
+        # output device on macOS (audiotoolbox) and Linux (alsa); on WINDOWS it has NONE
+        # (-f sdl is a VIDEO display, not audio), so a fallback there would open a blank
+        # window and play silence. On Windows, GStreamer is the only option, so if the
+        # bundled GStreamer is missing we say so plainly instead of faking a player.
+        if IS_WIN:
+            return "none"
+        sdp = ("v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=NetBridge return\r\n"
+               "c=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio %d RTP/AVP 97\r\n"
+               "a=rtpmap:97 opus/48000/2\r\n" % port)
+        sdp_path = os.path.join(str(_logdir()), "return.sdp")
+        try:
+            with open(sdp_path, "w") as f:
+                f.write(sdp)
+        except Exception:
+            return "none"
+        out = ["-f", "audiotoolbox", "-"] if IS_MAC else ["-f", "alsa", "default"]
+        try:
+            lf = open(os.path.join(str(_logdir()), "netbridge-source-return.log"), "w")
+            self.logs.append(lf)
             self.procs.append(subprocess.Popen(
-                [gst, "-q", "udpsrc", "port=%d" % return_port, "caps=" + caps, "!",
-                 "rtpjitterbuffer", "latency=250", "do-lost=true", "!",
-                 "rtpopusdepay", "!", "opusdec", "plc=true", "use-inband-fec=true", "!",
-                 "audioconvert", "!", "audioresample", "!", "autoaudiosink", "sync=false"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+                [_ffmpeg(), "-hide_banner", "-loglevel", "warning",
+                 "-protocol_whitelist", "file,udp,rtp", "-i", sdp_path] + out,
+                stdout=subprocess.DEVNULL, stderr=lf))
+            return "ffmpeg"
+        except Exception:
+            return "none"
 
     def stop(self):
         for p in self.procs:
@@ -288,6 +382,140 @@ class Session:
 
 
 SESSION = Session()
+
+
+def _mesh_bin():
+    """The embedded mesh client, bundled next to the app or built in mesh/ during dev."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    name = "netbridge-mesh.exe" if IS_WIN else "netbridge-mesh"
+    for cand in (os.path.join(base, name), os.path.join(base, "mesh", name)):
+        if _is_exe(cand):
+            return cand
+    return None
+
+
+class MeshManager:
+    """Runs the embedded mesh client so the app reaches the bridge over the private mesh
+    (walkthrough J3: "joins the private mesh with an embedded client + scoped token from
+    sign-in", "via secure mesh"). The presenter never sees a 100.x address: everything is
+    routed through 127.0.0.1 proxies the helper owns.
+
+    route() decides per bridge. If the bridge has a tailnet address and we have the helper
+    and can mint a scoped key, it brings the mesh up and returns localhost proxy targets.
+    A bridge with no tailnet address (pre-claim / bench) is reached directly - the same
+    app, adapting, not a second code path bolted on.
+    """
+    CTRL_LOCAL = 18080
+
+    def __init__(self):
+        self.proc = None
+        self.bridge_id = None
+        self.tailnet_ip = None      # OUR mesh IP; the bridge returns audio here
+        self.control_port = None
+
+    def _mint_key(self, st):
+        r = api("POST", st["control_url"].rstrip("/") + "/auth/mesh-key",
+                token=st.get("token"), timeout=25)
+        if isinstance(r, dict) and not r.get("_error"):
+            # the endpoint returns the key as "authkey" (not "key")
+            return r.get("authkey"), r.get("login_server") or ""
+        return None, ""
+
+    def route(self, rec, st):
+        """rec: {id, tailscale_ip, ip}. Returns routing for control + media + return."""
+        tsip = (rec or {}).get("tailscale_ip")
+        mesh_bin = _mesh_bin()
+        if not (tsip and mesh_bin and st.get("token") and st.get("control_url")):
+            self.stop()
+            ip = (rec or {}).get("ip")
+            return {"via": "direct", "control_host": ip, "control_port": 8080,
+                    "media_host": ip, "return_peer": local_ip_towards(ip) if ip else ""}
+
+        # reuse a live helper for the same bridge
+        if self.proc and self.proc.poll() is None and self.bridge_id == rec.get("id"):
+            return self._mesh_route()
+
+        self.stop()
+        key, login = self._mint_key(st)
+        if not key:
+            ip = rec.get("ip")
+            return {"via": "direct", "control_host": ip, "control_port": 8080,
+                    "media_host": ip, "return_peer": local_ip_towards(ip) if ip else ""}
+
+        argv = [mesh_bin, "--authkey", key, "--bridge", tsip,
+                "--hostname", "nb-source-%s" % (rec.get("id") or "app")[-6:],
+                "--forward", "%d,%d" % (RTP_VIDEO, RTP_VOICE), "--return", "5004",
+                "--control", "%d:8080" % self.CTRL_LOCAL]
+        if login:
+            argv += ["--login-server", login]
+        lf = open(os.path.join(str(_logdir()), "netbridge-source-mesh.log"), "w")
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=lf, text=True)
+        # read the one-line handshake (helper prints it only once the proxies are wired)
+        line = ""
+        try:
+            for _ in range(60):
+                line = p.stdout.readline()
+                if line.strip():
+                    break
+        except Exception:
+            pass
+        try:
+            hs = json.loads(line or "{}")
+        except Exception:
+            hs = {}
+        if not hs.get("ready"):
+            p.terminate()
+            ip = rec.get("ip")
+            return {"via": "direct-fallback", "error": hs.get("error", "mesh did not start"),
+                    "control_host": ip, "control_port": 8080, "media_host": ip,
+                    "return_peer": local_ip_towards(ip) if ip else ""}
+        self.proc, self.bridge_id = p, rec.get("id")
+        self.tailnet_ip = hs.get("tailnet_ip")
+        self.control_port = int(hs.get("control_port") or self.CTRL_LOCAL)
+        return self._mesh_route()
+
+    def _mesh_route(self):
+        return {"via": "mesh", "control_host": "127.0.0.1", "control_port": self.control_port,
+                "media_host": "127.0.0.1", "return_peer": self.tailnet_ip}
+
+    def stop(self):
+        if self.proc:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=4)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+        self.proc = self.bridge_id = self.tailnet_ip = self.control_port = None
+
+
+MESH = MeshManager()
+_BRIDGES = {"list": [], "ts": 0.0}
+
+
+def _bridge_rec(host, st):
+    """Find the bridge record for a UI-supplied host (its tailnet or LAN IP). Falls back
+    to a bare {ip:host} so a hand-typed address still works."""
+    lst = _BRIDGES["list"]
+    if not lst and st.get("token") and st.get("control_url"):
+        r = api("GET", st["control_url"].rstrip("/") + "/admin/devices", token=st.get("token"))
+        if isinstance(r, list):
+            lst = _BRIDGES["list"] = r
+    for d in lst:
+        if host in (d.get("tailscale_ip"), (d.get("latest") or {}).get("ip"), d.get("ip")):
+            return {"id": d.get("id"), "tailscale_ip": d.get("tailscale_ip"),
+                    "ip": (d.get("latest") or {}).get("ip") or d.get("ip")}
+    return {"id": None, "tailscale_ip": None, "ip": host}
+
+
+def bridge_route(host, st):
+    """Base control URL + routing for a bridge, bringing the mesh up if appropriate."""
+    rec = _bridge_rec(host, st)
+    route = MESH.route(rec, st)
+    route["base"] = "http://%s:%d" % (route["control_host"], route["control_port"])
+    return route
 
 
 # --------------------------------------------------------------------------- server
@@ -336,6 +564,8 @@ class Handler(BaseHTTPRequestHandler):
             if not st.get("token"):
                 return self._send({"_error": "not signed in"}, 401)
             r = api("GET", st["control_url"].rstrip("/") + "/admin/devices", token=st["token"])
+            if isinstance(r, list):
+                _BRIDGES["list"] = r     # cache for mesh routing (tailscale_ip per bridge)
             if isinstance(r, dict) and r.get("_error"):
                 return self._send(r, 502)
             # presenters see their org's bridges; never any secret
@@ -348,7 +578,17 @@ class Handler(BaseHTTPRequestHandler):
             host = self.path.split("host=", 1)[1] if "host=" in self.path else ""
             if not host:
                 return self._send({"_error": "host required"}, 400)
-            return self._send(api("GET", "http://%s:8080/api/checks" % host, timeout=8))
+            route = bridge_route(host, load_state())   # over the mesh when the bridge has one
+            r = api("GET", route["base"] + "/api/checks", timeout=10)
+            if isinstance(r, dict) and "voice_arriving" not in r and not r.get("_error"):
+                # Older bridge firmware does not measure the forward-voice leg. Fall back to
+                # what THIS app can see: the mic->bridge ffmpeg leg is alive and sending.
+                # Weaker than the device confirming receipt, and labelled as such.
+                r["voice_arriving"] = {
+                    "ok": SESSION.voice_sending(),
+                    "detail": ("mic leg sending (bridge firmware pre-dates the receive check)"
+                               if SESSION.voice_sending() else "voice leg not running")}
+            return self._send(r)
         return self._send({"_error": "not found"}, 404)
 
     # ---------------- POST
@@ -395,6 +635,7 @@ class Handler(BaseHTTPRequestHandler):
             for k in ("token", "email"):
                 st.pop(k, None)
             save_state(st)
+            MESH.stop()
             return self._send({"ok": True})
 
         if self.path == "/api/remember":
@@ -408,8 +649,10 @@ class Handler(BaseHTTPRequestHandler):
             host, pin = b.get("host"), str(b.get("pin") or "")
             if not host or not pin:
                 return self._send({"_error": "host and pin required"}, 400)
-            # Verified ON THE DEVICE. The control plane is not asked and cannot override it.
-            r = api("POST", "http://%s:8080/api/unlock" % host, body={"pin": pin}, timeout=15)
+            # Verified ON THE DEVICE, reached over the mesh. The control plane is not asked
+            # and cannot override it.
+            route = bridge_route(host, st)
+            r = api("POST", route["base"] + "/api/unlock", body={"pin": pin}, timeout=20)
             return self._send(r)
 
         if self.path == "/api/golive":
@@ -420,19 +663,29 @@ class Handler(BaseHTTPRequestHandler):
             vidx, vname, _ = resolve_by_name(devs.get("video", []), b.get("camera_name"))
             aidx, aname, _ = resolve_by_name(devs.get("audio", []), b.get("mic_name"), "0")
             port = int(b.get("return_port") or 5004)
-            # Tell the bridge where to send the room back. Registered through the control
-            # plane in production; the device endpoint is the same contract.
-            me = local_ip_towards(host)
-            peer = api("POST", "http://%s:8080/api/set-peer" % host,
+            # Route over the mesh when the bridge has a tailnet address. Media then targets
+            # 127.0.0.1 (the helper's local proxies) and the bridge is told to return audio
+            # to OUR mesh IP - so no 100.x address is ever handled by the app itself.
+            route = bridge_route(host, st)
+            me = route["return_peer"]
+            peer = api("POST", route["base"] + "/api/set-peer",
                        body={"ip": me, "port": port}, timeout=15) if me else {"_error": "no route"}
-            SESSION.start(host, vidx, aidx, return_port=port)
+            SESSION.start(route["media_host"], vidx, aidx, return_port=port)
             st.update({"bridge_host": host, "camera_name": vname, "mic_name": aname})
             save_state(st)
+            player = SESSION.return_player
             return self._send({"ok": True, "camera": vname, "mic": aname,
-                               "return_peer": me, "return_port": port, "peer_result": peer})
+                               "return_peer": me, "return_port": port, "peer_result": peer,
+                               "via": route.get("via"), "return_player": player,
+                               "return_note": {
+                                   "gstreamer": "room audio: GStreamer (best — jitter-buffered)",
+                                   "ffmpeg": "room audio: ffmpeg fallback — install GStreamer for smoother playback",
+                                   "none": "NO ROOM AUDIO — neither GStreamer nor ffmpeg could start a player",
+                               }.get(player, player)})
 
         if self.path == "/api/stop":
             SESSION.stop()
+            MESH.stop()
             return self._send({"ok": True})
 
         return self._send({"_error": "not found"}, 404)
@@ -497,6 +750,7 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
 <div class=card id=health style=display:none>
   <div class=row><span id=c1>Bridge online</span><span class=lat id=l1></span></div>
   <div class=row><span id=c2>Your video arriving at bridge</span><span class=lat id=l2></span></div>
+  <div class=row><span id=c5>Your voice arriving at bridge</span><span class=lat id=l5></span></div>
   <div class=row><span id=c3>Meeting laptop sees the camera</span><span class=lat id=l3></span></div>
   <div class=row><span id=c4>Meeting audio flowing back</span><span class=lat id=l4></span></div>
 </div>
@@ -560,11 +814,14 @@ async function golive(){
   const r=await j('/api/golive',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({host:h,camera_name:$('cam').value,mic_name:$('mic').value})});
   if(r._error){$('m2').textContent=r._error;return}
-  $('m2').textContent=`live · ${r.camera} · ${r.mic} · room returns to ${r.return_peer}:${r.return_port}`;
+  const warn = r.return_player!=='gstreamer';
+  const via = r.via==='mesh' ? 'via secure mesh' : (r.via||'direct');
+  $('m2').innerHTML=`live · ${r.camera} · ${r.mic} · <b>${via}</b><br>`+
+    `<span style="color:${warn?'var(--red)':'var(--ok)'}">${r.return_note||''}</span>`;
   setLive(true); poll()}
 async function poll(){
   const h=host(); if(!h)return; const c=await j('/api/checks?host='+h); if(c._error)return;
-  const map=[['c1','l1','online'],['c2','l2','video_arriving'],
+  const map=[['c1','l1','online'],['c2','l2','video_arriving'],['c5','l5','voice_arriving'],
              ['c3','l3','client_sees_camera'],['c4','l4','return_audio']];
   for(const [ci,li,k] of map){const v=c[k]||{};
     $(ci).className=v.ok?'ok':'bad'; $(li).textContent=(v.detail||'').slice(0,42)}}
@@ -589,6 +846,7 @@ def main():
         pass
     finally:
         SESSION.stop()          # never leave ffmpeg holding the camera
+        MESH.stop()             # remove the ephemeral mesh node
         print("\nstopped.")
 
 

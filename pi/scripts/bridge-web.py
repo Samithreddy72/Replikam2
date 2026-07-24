@@ -210,6 +210,24 @@ def _feeder_cpu_ticks():
     except Exception:
         return pids[0], None
 
+def _voice_feeder_cpu_ticks():
+    """(pid, utime+stime clock ticks) of the FORWARD-voice feeder, or (None, None).
+
+    Exact mirror of the video feeder, on the voice RTP port. Burning CPU here means the
+    feeder is actively decoding the presenter's mic RTP and pushing it to the gadget - i.e.
+    the presenter's voice IS arriving at the bridge. Measured at the RECEIVER, like video,
+    so it means "landed here", not merely "was sent"."""
+    pids = sh("pgrep -f 'udpsrc port=5002'").split()
+    if not pids:
+        return None, None
+    stat = read("/proc/%s/stat" % pids[0])
+    try:
+        f = stat.rsplit(")", 1)[1].split()
+        return pids[0], int(f[11]) + int(f[12])
+    except Exception:
+        return pids[0], None
+
+
 def _return_hw_ptr():
     """Capture-side (from client) hw_ptr in frames, or None if stream closed."""
     st = read(PCM_RETURN_STATUS)
@@ -224,11 +242,13 @@ def _return_hw_ptr():
     return None
 
 def checks():
-    win = 2.0                       # one shared sampling window for both deltas
+    win = 2.0                       # one shared sampling window for all deltas
     pid, t0 = _feeder_cpu_ticks()
+    vpid, vt0 = _voice_feeder_cpu_ticks()
     p0 = _return_hw_ptr()
     time.sleep(win)
     _, t1 = _feeder_cpu_ticks()
+    _, vt1 = _voice_feeder_cpu_ticks()
     p1 = _return_hw_ptr()
 
     if pid is None:
@@ -247,10 +267,20 @@ def checks():
         audio_ok = dp > 40000 * win  # 48 kHz nominal; >40k frames/s = flowing
         audio_detail = "hw_ptr advanced %d frames in %.0fs (~%d/s)" % (dp, win, dp / win)
 
+    if vpid is None:
+        voice_ok, voice_detail = False, "voice feeder process not running"
+    elif vt0 is None or vt1 is None:
+        voice_ok, voice_detail = False, "voice feeder pid %s: could not read /proc stat" % vpid
+    else:
+        vdt = vt1 - vt0
+        voice_ok = vdt > 4          # opus decode is lighter than h264; >4 ticks/2s = flowing
+        voice_detail = "voice feeder pid %s used %d cpu ticks in %.0fs" % (vpid, vdt, win)
+
     udc = _udc_state()
     return {
         "online": {"ok": True, "detail": "bridge-web serving on :%d" % PORT},
         "video_arriving": {"ok": video_ok, "detail": video_detail},
+        "voice_arriving": {"ok": voice_ok, "detail": voice_detail},
         "client_sees_camera": {"ok": udc == "configured",
                                "detail": "usb gadget state: %s" % (udc or "?")},
         "return_audio": {"ok": audio_ok, "detail": audio_detail},

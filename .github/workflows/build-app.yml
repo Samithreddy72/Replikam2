@@ -42,8 +42,23 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The embedded mesh client (J3 phase 5) is Go; build.py compiles it for this target.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
       - name: Install PyInstaller
         run: python -m pip install --upgrade pip pyinstaller
+
+      # GStreamer is the ONLY return-audio player on Windows (ffmpeg has no audio output
+      # device there), so it must be present on the runner for build.py to bundle it.
+      # macOS copies from the runner's own Homebrew GStreamer, installed here too.
+      - name: Install GStreamer (Windows)
+        if: runner.os == 'Windows'
+        run: choco install gstreamer --no-progress -y
+      - name: Install GStreamer (macOS)
+        if: runner.os == 'macOS'
+        run: brew install gstreamer || true
 
       - name: Build
         working-directory: app/netbridge-source
