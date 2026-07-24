@@ -247,10 +247,16 @@ class Session:
         self.bridge = None
         self.return_port = 5004
         self.return_player = "none"
+        self.voice_proc = None
 
     @property
     def live(self):
         return any(p.poll() is None for p in self.procs)
+
+    def voice_sending(self):
+        """True if the mic->bridge leg is alive. A sender-side signal used only as a
+        fallback when the bridge firmware predates the device-side voice_arriving check."""
+        return bool(self.voice_proc and self.voice_proc.poll() is None)
 
     def start(self, pi_host, video_idx, audio_idx, fps=20, mic_gain=8, return_port=5004):
         self.stop()
@@ -290,11 +296,15 @@ class Session:
 
         # Keep each leg's stderr so a dead leg can be explained instead of guessed at.
         self.logs = []
+        self.voice_proc = None
         logdir = _logdir()
         for name, argv in (("video", v), ("voice", a)):
             lf = open(os.path.join(str(logdir), "netbridge-source-%s.log" % name), "w")
             self.logs.append(lf)
-            self.procs.append(subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=lf))
+            proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=lf)
+            self.procs.append(proc)
+            if name == "voice":
+                self.voice_proc = proc          # so the app can report the voice leg is alive
 
         self.return_player = self._start_return(return_port)
 
@@ -569,7 +579,16 @@ class Handler(BaseHTTPRequestHandler):
             if not host:
                 return self._send({"_error": "host required"}, 400)
             route = bridge_route(host, load_state())   # over the mesh when the bridge has one
-            return self._send(api("GET", route["base"] + "/api/checks", timeout=10))
+            r = api("GET", route["base"] + "/api/checks", timeout=10)
+            if isinstance(r, dict) and "voice_arriving" not in r and not r.get("_error"):
+                # Older bridge firmware does not measure the forward-voice leg. Fall back to
+                # what THIS app can see: the mic->bridge ffmpeg leg is alive and sending.
+                # Weaker than the device confirming receipt, and labelled as such.
+                r["voice_arriving"] = {
+                    "ok": SESSION.voice_sending(),
+                    "detail": ("mic leg sending (bridge firmware pre-dates the receive check)"
+                               if SESSION.voice_sending() else "voice leg not running")}
+            return self._send(r)
         return self._send({"_error": "not found"}, 404)
 
     # ---------------- POST
@@ -731,6 +750,7 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
 <div class=card id=health style=display:none>
   <div class=row><span id=c1>Bridge online</span><span class=lat id=l1></span></div>
   <div class=row><span id=c2>Your video arriving at bridge</span><span class=lat id=l2></span></div>
+  <div class=row><span id=c5>Your voice arriving at bridge</span><span class=lat id=l5></span></div>
   <div class=row><span id=c3>Meeting laptop sees the camera</span><span class=lat id=l3></span></div>
   <div class=row><span id=c4>Meeting audio flowing back</span><span class=lat id=l4></span></div>
 </div>
@@ -801,7 +821,7 @@ async function golive(){
   setLive(true); poll()}
 async function poll(){
   const h=host(); if(!h)return; const c=await j('/api/checks?host='+h); if(c._error)return;
-  const map=[['c1','l1','online'],['c2','l2','video_arriving'],
+  const map=[['c1','l1','online'],['c2','l2','video_arriving'],['c5','l5','voice_arriving'],
              ['c3','l3','client_sees_camera'],['c4','l4','return_audio']];
   for(const [ci,li,k] of map){const v=c[k]||{};
     $(ci).className=v.ok?'ok':'bad'; $(li).textContent=(v.detail||'').slice(0,42)}}
