@@ -22,6 +22,8 @@ control plane refuses fleet mutations even if the UI asked for them.
 import json, os, pathlib, re, shutil, socket, subprocess, sys, threading, time
 import urllib.request, urllib.error
 
+APP_VERSION = "1.0.0"          # stamped into the diagnostics report; bump with each release
+
 STATE_DIR = pathlib.Path(os.path.expanduser("~/.netbridge-source"))
 STATE_FILE = STATE_DIR / "state.json"
 HOST, PORT = "127.0.0.1", 8765
@@ -81,6 +83,17 @@ IS_MAC = sys.platform == "darwin"
 # at go-live: it is the only identifier both platforms share, and on macOS the index moves
 # when you plug in a headset.
 AV_FMT = "dshow" if IS_WIN else "avfoundation"
+
+
+# Every child we launch (ffmpeg, gst-launch, the mesh helper, device probes) is a CONSOLE
+# program. Under a windowed PyInstaller build the parent has no console, so Windows gives
+# each such child its OWN black console window that flashes up on every go-live, every
+# device scan, every return-audio start. CREATE_NO_WINDOW suppresses that window while
+# still letting us capture stdout/stderr to the leg logs. No-op off Windows.
+def _win_kw():
+    if IS_WIN:
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
 
 
 def _is_exe(path):
@@ -179,7 +192,7 @@ def av_devices():
             if IS_WIN else
             [ff, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""])
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=25)
+        p = subprocess.run(args, capture_output=True, text=True, timeout=25, **_win_kw())
     except Exception as e:
         return {"video": [], "audio": [], "error": str(e)}
     err = p.stderr or ""
@@ -301,7 +314,7 @@ class Session:
         for name, argv in (("video", v), ("voice", a)):
             lf = open(os.path.join(str(logdir), "netbridge-source-%s.log" % name), "w")
             self.logs.append(lf)
-            proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=lf)
+            proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=lf, **_win_kw())
             self.procs.append(proc)
             if name == "voice":
                 self.voice_proc = proc          # so the app can report the voice leg is alive
@@ -330,7 +343,7 @@ class Session:
                      "rtpjitterbuffer", "latency=250", "do-lost=true", "!",
                      "rtpopusdepay", "!", "opusdec", "plc=true", "use-inband-fec=true", "!",
                      "audioconvert", "!", "audioresample", "!", "autoaudiosink", "sync=false"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_gst_env()))
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_gst_env(), **_win_kw()))
                 return "gstreamer"
             except Exception:
                 pass
@@ -358,7 +371,7 @@ class Session:
             self.procs.append(subprocess.Popen(
                 [_ffmpeg(), "-hide_banner", "-loglevel", "warning",
                  "-protocol_whitelist", "file,udp,rtp", "-i", sdp_path] + out,
-                stdout=subprocess.DEVNULL, stderr=lf))
+                stdout=subprocess.DEVNULL, stderr=lf, **_win_kw()))
             return "ffmpeg"
         except Exception:
             return "none"
@@ -449,7 +462,7 @@ class MeshManager:
         if login:
             argv += ["--login-server", login]
         lf = open(os.path.join(str(_logdir()), "netbridge-source-mesh.log"), "w")
-        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=lf, text=True)
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=lf, text=True, **_win_kw())
         # read the one-line handshake (helper prints it only once the proxies are wired)
         line = ""
         try:
@@ -518,6 +531,108 @@ def bridge_route(host, st):
     return route
 
 
+# --------------------------------------------------------------------------- diagnostics
+def _bin_version(argv, env=None):
+    """First line of `<tool> --version`, or the error, without ever raising or popping a
+    console window. Used to prove the bundled binaries actually run on THIS machine."""
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=15,
+                           env=env, **_win_kw())
+        out = (p.stdout or p.stderr or "").strip().splitlines()
+        return out[0] if out else "(ran, no version line)"
+    except Exception as e:
+        return "ERROR: %s" % e
+
+
+def _tail(path, n=80):
+    try:
+        with open(path, "r", errors="replace") as f:
+            return "".join(f.readlines()[-n:]).rstrip()
+    except Exception:
+        return ""
+
+
+def diagnostics():
+    """A single self-contained report a tester can save and send back when something
+    fails. It answers the questions a remote debugger always has to ask first: which
+    OS/arch, are the bundled binaries present AND runnable, what cameras/mics does this
+    machine actually expose, is the app packaged or running from source, what is the
+    current sign-in/live state, did the mesh come up, and what do the media legs' own
+    logs say. No secrets: the auth token, PIN and email are deliberately omitted.
+    """
+    import platform
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    st = load_state()
+    ff, gst = _ffmpeg(), _gst()
+    try:
+        mesh = _mesh_bin()
+    except Exception:
+        mesh = None
+    rep = {
+        "app": {
+            "version": APP_VERSION,
+            "packaged": bool(getattr(sys, "_MEIPASS", None)),   # True = the shipped binary
+            "python": platform.python_version(),
+            "base_dir": base,
+            "state_dir": str(STATE_DIR),
+            "log_dir": str(_logdir()),
+        },
+        "platform": {
+            "system": platform.system(), "release": platform.release(),
+            "machine": platform.machine(), "sys_platform": sys.platform,
+        },
+        "bundled_binaries": {
+            "ffmpeg_path": ff, "ffmpeg_present": bool(ff and _is_exe(ff)),
+            "ffmpeg_version": _bin_version([ff, "-version"]) if ff else "NOT FOUND",
+            "gstreamer_path": gst, "gstreamer_present": bool(gst and _is_exe(gst)),
+            "gstreamer_version": _bin_version([gst, "--version"], env=_gst_env()) if gst else "NOT FOUND (return audio will be silent on Windows)",
+            "mesh_path": mesh, "mesh_present": bool(mesh and _is_exe(mesh)),
+        },
+        "devices": av_devices(),
+        "session": {
+            "signed_in": bool(st.get("token")),
+            "control_url": st.get("control_url", ""),
+            "last_bridge": st.get("bridge_id"),
+            "live": SESSION.live,
+            "return_player": SESSION.return_player,
+        },
+        "logs": {},
+    }
+    ld = str(_logdir())
+    for leg in ("video", "voice", "return", "mesh"):
+        rep["logs"][leg] = _tail(os.path.join(ld, "netbridge-source-%s.log" % leg))
+    return rep
+
+
+def diagnostics_text():
+    """Human-readable rendering of diagnostics() — what the Save button downloads."""
+    d = diagnostics()
+    L = ["NetBridge Source — diagnostics report",
+         "=" * 44, ""]
+    def section(title, kv):
+        L.append("[%s]" % title)
+        for k, v in kv.items():
+            L.append("  %-18s %s" % (k, v))
+        L.append("")
+    section("app", d["app"])
+    section("platform", d["platform"])
+    section("bundled binaries", d["bundled_binaries"])
+    section("session", d["session"])
+    dev = d["devices"]
+    fmt = lambda items: ", ".join("[%s] %s" % (x.get("index"), x.get("name")) for x in items) or "<none>"
+    L.append("[devices]")
+    L.append("  cameras: %s" % fmt(dev.get("video", [])))
+    L.append("  mics   : %s" % fmt(dev.get("audio", [])))
+    if dev.get("error"):
+        L.append("  error  : %s" % dev["error"])
+    L.append("")
+    for leg, txt in d["logs"].items():
+        L.append("[log: %s leg]" % leg)
+        L.append(txt or "  (empty — this leg has not run)")
+        L.append("")
+    return "\n".join(L)
+
+
 # --------------------------------------------------------------------------- server
 from http.server import BaseHTTPRequestHandler, HTTPServer   # noqa: E402
 
@@ -560,6 +675,17 @@ class Handler(BaseHTTPRequestHandler):
             })
         if self.path == "/api/devices":
             return self._send(av_devices())
+        if self.path == "/api/diagnostics":
+            # Served as a downloadable attachment so a tester can save it and send it back.
+            body = diagnostics_text().encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Disposition",
+                             "attachment; filename=netbridge-diagnostics.txt")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Frame-Options", "DENY")
+            self.end_headers()
+            return self.wfile.write(body)
         if self.path == "/api/bridges":
             if not st.get("token"):
                 return self._send({"_error": "not signed in"}, 401)
@@ -723,7 +849,8 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
 <div class=w>
 <h1>NetBridge Source</h1><p class=sub>Sign in, unlock your bridge, go live.</p>
 <div class=who><span id=who>not signed in</span>
-  <span><button id=signout onclick=signout() style="display:none;width:auto;padding:3px 10px;font-size:11.5px;background:var(--ink);color:var(--pa)">sign out</button>
+  <span><a href="/api/diagnostics" download="netbridge-diagnostics.txt" title="Save a report to send if something fails" style="font-size:11.5px;color:var(--mut);text-decoration:none;margin-right:10px">⤓ diagnostics</a>
+  <button id=signout onclick=signout() style="display:none;width:auto;padding:3px 10px;font-size:11.5px;background:var(--ink);color:var(--pa)">sign out</button>
   <span id=livepill></span></span></div>
 
 <div class=card id=signin>
@@ -830,12 +957,47 @@ boot();
 """
 
 
+def _startup_banner():
+    """Print the facts a remote debugger asks for first, straight to the console the
+    tester is looking at — so 'it won't start' comes with the answer attached. Bundled
+    binaries are the usual culprit; show whether each was actually found on THIS machine."""
+    ff, gst, mesh = _ffmpeg(), _gst(), None
+    try:
+        mesh = _mesh_bin()
+    except Exception:
+        mesh = None
+    ok = lambda p: "OK " if (p and _is_exe(p)) else "MISSING"
+    print("=" * 52)
+    print(" NetBridge Source  v%s  (%s %s)" %
+          (APP_VERSION, sys.platform, "packaged" if getattr(sys, "_MEIPASS", None) else "source"))
+    print("   ffmpeg     : %-7s %s" % (ok(ff), ff or ""))
+    print("   gstreamer  : %-7s %s" % (ok(gst), gst or "(return audio needs this on Windows)"))
+    print("   mesh helper: %-7s %s" % (ok(mesh), mesh or ""))
+    print("   logs + diagnostics: %s" % _logdir())
+    print("=" * 52)
+
+
 def main():
+    _startup_banner()
     st = load_state()
     if not st.get("control_url") and len(sys.argv) > 1:
         st["control_url"] = sys.argv[1].rstrip("/")
         save_state(st)
-    srv = HTTPServer((HOST, PORT), Handler)
+    try:
+        srv = HTTPServer((HOST, PORT), Handler)
+    except OSError as e:
+        # The one startup failure a tester will actually hit: a second copy already
+        # holds :8765. Say so in words instead of dying on a raw traceback.
+        print("ERROR: cannot start on %s:%d (%s)." % (HOST, PORT, e))
+        print("Another NetBridge Source is probably already running — close it and retry.")
+        if IS_WIN:
+            # Keep the console up so a double-click user can read the message before the
+            # window vanishes. Guarded: a build with no real stdin must not crash here.
+            try:
+                input("Press Enter to close...")
+            except Exception:
+                time.sleep(8)
+        return
     url = "http://%s:%d/" % (HOST, PORT)
     print("NetBridge Source  ->  %s" % url)
     print("(local only; ctrl-c to quit)")
