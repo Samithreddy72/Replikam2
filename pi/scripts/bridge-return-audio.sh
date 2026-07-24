@@ -1,8 +1,16 @@
 #!/bin/bash
 export PATH=/usr/local/bin:/usr/bin:/bin
 [ -f /etc/default/bridge-return-audio ] && . /etc/default/bridge-return-audio
-DEST_IP="${RETURN_DEST_IP:-192.168.29.49}"
+# No hardcoded fallback IP. 192.168.29.49 was one developer's laptop on one LAN in one
+# month; on every other card it meant the bridge quietly streamed the client's audio to a
+# stranger's address on the local network and reported no error. If no peer is set, send
+# nowhere and say so - the /api/checks return_audio probe is what surfaces it.
+DEST_IP="${RETURN_DEST_IP:-}"
 DEST_PORT="${RETURN_DEST_PORT:-5004}"
+if [ -z "$DEST_IP" ]; then
+  echo "bridge-return-audio: no RETURN_DEST_IP set (run: bridge set-peer <ip>) - not streaming" >&2
+  exec sleep infinity
+fi
 # hw: (not plughw) = no plug-layer resampler noise. Safe to use because the gadget advertises a
 # single 48k rate (uvc-raw-setup.sh c_srate=48000), so the client always sends 48k and hw: can
 # never desync (no rate-lock cascade). audioresample quality=10 is a no-op at 48->48 but a
