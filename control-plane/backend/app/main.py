@@ -255,7 +255,16 @@ def claim_device(device_id: str, body: ClaimIn, actor=Depends(auth.require_admin
     if body.provision is not None:
         # Secret-at-claim: stage the one-time configure payload. The device's
         # next GET /v1/provision returns it once and the server forgets it.
-        dev.provision = body.provision
+        prov = dict(body.provision)
+        # Name the tailnet node too. Without this every bridge joins as "raspberrypi"
+        # and Tailscale de-duplicates with -1/-2 suffixes, so a fleet of bridges is
+        # unidentifiable on the mesh. Use the pairing code - the same identifier on the
+        # label, in the SSID and in this panel.
+        if prov.get("tailscale_auth_key") and not prov.get("tailscale_hostname"):
+            code = (dev.pairing_code or "").replace("BRIDGE-", "").strip()
+            if code:
+                prov["tailscale_hostname"] = "netbridge-%s" % code
+        dev.provision = prov
     db.commit()
     _audit(db, actor, "claim", "%s -> %s" % (dev.pairing_code or device_id, body.name))
     return _device_view(dev)
