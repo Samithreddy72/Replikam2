@@ -81,6 +81,23 @@ jobs:
       # silent when the presenter tries to hear the room — the exact defect that shipped in
       # app-v1.0.0. Fail loudly here instead so a no-GStreamer Windows bundle can never
       # reach a release again. The bundler logs "found Windows GStreamer at ..." on success.
+      # ffmpeg is the capture engine (camera + mic). If its download 503s, build.py logs a
+      # warning and continues — which once shipped a Windows bundle that could not capture
+      # anything, yet passed the smoke test (that only starts the web server). Fail here so a
+      # no-ffmpeg bundle can never reach a release again.
+      - name: Verify ffmpeg bundled (Windows)
+        if: runner.os == 'Windows'
+        working-directory: app/netbridge-source
+        shell: pwsh
+        run: |
+          if (Test-Path "_bundle\ffmpeg.exe") {
+            $mb = [math]::Round((Get-Item "_bundle\ffmpeg.exe").Length/1MB,1)
+            Write-Host "ffmpeg bundled: $mb MB"
+          } else {
+            Write-Error "ffmpeg was NOT bundled (all mirrors failed) — the app could not capture camera/mic. Failing the build."
+            exit 1
+          }
+
       - name: Verify GStreamer bundled (Windows)
         if: runner.os == 'Windows'
         working-directory: app/netbridge-source

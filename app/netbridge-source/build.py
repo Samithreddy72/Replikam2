@@ -27,11 +27,17 @@ IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
 
 # Static ffmpeg builds. Bundling means the presenter installs nothing; it also pins the
-# ffmpeg we tested against rather than whatever happens to be on their machine.
+# ffmpeg we tested against rather than whatever happens to be on their machine. Each target
+# lists MIRRORS tried in order: gyan.dev is the nice pinned "essentials" build but its CDN
+# 503s often (it silently shipped a no-ffmpeg Windows bundle once), so a GitHub-hosted BtbN
+# build — same libx264/dshow/libopus — backs it up. Both are tried with retries.
 FFMPEG_URLS = {
-    "Darwin-arm64": "https://www.osxexperts.net/ffmpeg71arm.zip",
-    "Darwin-x86_64": "https://www.osxexperts.net/ffmpeg71intel.zip",
-    "Windows-AMD64": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+    "Darwin-arm64": ["https://www.osxexperts.net/ffmpeg71arm.zip"],
+    "Darwin-x86_64": ["https://www.osxexperts.net/ffmpeg71intel.zip"],
+    "Windows-AMD64": [
+        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+    ],
 }
 
 
@@ -39,11 +45,26 @@ def log(*a):
     print("[build]", *a, flush=True)
 
 
+def _download(url, tmp, attempts=3):
+    """Fetch url -> tmp with a few retries and a short backoff. A transient 503 from a busy
+    CDN must not silently drop ffmpeg out of the bundle (it did once)."""
+    import time as _t
+    for i in range(1, attempts + 1):
+        try:
+            urllib.request.urlretrieve(url, tmp)
+            return True
+        except Exception as e:
+            log("  attempt %d/%d for %s failed: %s" % (i, attempts, url, e))
+            if i < attempts:
+                _t.sleep(3 * i)
+    return False
+
+
 def fetch_ffmpeg(dest: pathlib.Path) -> pathlib.Path | None:
     """Download a static ffmpeg next to the app. Returns the binary path, or None."""
     key = "%s-%s" % (platform.system(), platform.machine())
-    url = FFMPEG_URLS.get(key)
-    if not url:
+    urls = FFMPEG_URLS.get(key) or []
+    if not urls:
         log("no bundled ffmpeg for %s — the app will fall back to one on PATH" % key)
         return None
     dest.mkdir(parents=True, exist_ok=True)
@@ -51,32 +72,32 @@ def fetch_ffmpeg(dest: pathlib.Path) -> pathlib.Path | None:
     if out.exists():
         log("ffmpeg already fetched")
         return out
-    log("downloading ffmpeg for %s" % key)
-    tmp = dest / "ffmpeg-dl"
-    try:
-        urllib.request.urlretrieve(url, tmp)
-    except Exception as e:
-        log("ffmpeg download FAILED (%s) — continuing without a bundled binary" % e)
-        return None
-    # The archives differ in layout; find the binary wherever it landed.
-    try:
-        if zipfile.is_zipfile(tmp):
-            with zipfile.ZipFile(tmp) as z:
-                z.extractall(dest / "_ff")
-        else:
-            with tarfile.open(tmp) as t:
-                t.extractall(dest / "_ff")
-    except Exception as e:
-        log("could not unpack ffmpeg (%s)" % e)
-        return None
     want = "ffmpeg.exe" if IS_WIN else "ffmpeg"
-    for root, _dirs, files in os.walk(dest / "_ff"):
-        if want in files:
-            shutil.copy2(os.path.join(root, want), out)
-            out.chmod(0o755)
-            log("bundled ffmpeg -> %s (%.1f MB)" % (out, out.stat().st_size / 1e6))
-            return out
-    log("ffmpeg binary not found inside the archive")
+    tmp = dest / "ffmpeg-dl"
+    for url in urls:
+        log("downloading ffmpeg for %s from %s" % (key, url))
+        if not _download(url, tmp):
+            log("  mirror unavailable, trying next")
+            continue
+        try:
+            shutil.rmtree(dest / "_ff", ignore_errors=True)
+            if zipfile.is_zipfile(tmp):
+                with zipfile.ZipFile(tmp) as z:
+                    z.extractall(dest / "_ff")
+            else:
+                with tarfile.open(tmp) as t:
+                    t.extractall(dest / "_ff")
+        except Exception as e:
+            log("  could not unpack (%s), trying next mirror" % e)
+            continue
+        for root, _dirs, files in os.walk(dest / "_ff"):
+            if want in files:
+                shutil.copy2(os.path.join(root, want), out)
+                out.chmod(0o755)
+                log("bundled ffmpeg -> %s (%.1f MB)" % (out, out.stat().st_size / 1e6))
+                return out
+        log("  ffmpeg not found inside the archive, trying next mirror")
+    log("ffmpeg download FAILED from all mirrors — continuing without a bundled binary")
     return None
 
 
