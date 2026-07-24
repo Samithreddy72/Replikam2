@@ -227,7 +227,18 @@ def main():
     token = enroll(base, conf, tel)
     # heartbeat
     try:
-        http("POST", base + "/v1/telemetry", token=token, body=tel)
+        # The setup-AP passphrase is reported here, NOT inside gather(): gather() is what
+        # the device serves on its unauthenticated LAN endpoint /api/status, and the label
+        # secret must never appear there. Sent on the authenticated fleet channel only, so
+        # an admin can reprint the label after a reflash regenerates it (build-ledger E1).
+        body = dict(tel)
+        try:
+            body["setup_pass"] = subprocess.run(
+                ["/usr/local/bin/bridge-derive-pass"], capture_output=True, text=True,
+                timeout=10).stdout.strip() or None
+        except Exception:
+            body["setup_pass"] = None
+        http("POST", base + "/v1/telemetry", token=token, body=body)
     except urllib.error.URLError as e:
         raise SystemExit("telemetry failed: %s" % e)
     # apply one-time provisioning issued at claim

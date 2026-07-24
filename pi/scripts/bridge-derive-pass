@@ -1,42 +1,47 @@
 #!/bin/sh
-# The device's setup-AP passphrase — the one printed on the label (walkthrough J1 step 3).
+# The device's setup-AP passphrase — the one printed on the label (walkthrough J1 step 3,
+# build-ledger E1: "Random per-device setup Wi-Fi password (was derivable from the SSID)").
 #
-# Derived deterministically from the Pi's CPU serial, exactly like the pairing code.
-# This is the SINGLE source of truth: bridge-wifi-portal.sh, `bridge setup-pass` and
-# bridge-firstboot.sh all call this, so the AP, the label and the docs can never disagree.
+# RANDOM, not derived. An earlier version of this script derived it from the CPU serial so
+# it would survive a reflash. That was wrong: Pi serials are not random (the leading half is
+# near-constant, so ~32 bits of real entropy) and the SSID publishes sha256(serial)[:4], so a
+# known SSID narrows the passphrase to ~65,536 candidates — testable OFFLINE in seconds from
+# one captured WPA2 handshake. That is exactly the "derivable from the SSID" defect E1 exists
+# to kill, so we are back to real randomness.
 #
-# Why derived and not random-in-a-file:
-#   * /etc/bridge is a bind from /data, so a random passphrase is DESTROYED by any reflash
-#     or /data loss — silently invalidating a label that is already stuck on the box.
-#   * a derived one is stable for the life of the hardware: reflash it, wipe /data, swap
-#     the card, and the printed label still works.
-#   * it is still per-device. A fixed fleet-wide passphrase (we shipped "bridge2626" for a
-#     while during portal bring-up) means one leaked label unlocks the setup AP of EVERY
-#     bridge, and anyone nearby can watch a venue's WiFi credentials being typed in.
+# The reflash problem is solved on the other side instead: the agent reports this passphrase
+# to the control plane, and `GET /admin/devices/<id>/label` reprints it. Wipe /data and a NEW
+# random passphrase is generated and re-reported automatically — the panel is always right,
+# so the label can be reprinted rather than being a secret nobody can recover.
 #
-# It is NOT derivable from anything public: the pairing code is sha256(serial)[:4], while
-# this is sha256("netbridge-setup-ap|" + serial)[:12]. Knowing the SSID (which carries the
-# pairing code) tells you nothing about the passphrase — you cannot invert sha256 to get
-# the serial back.
-#
-# An admin can still pin a custom passphrase by writing /etc/bridge/setup-wifi-pass; that
-# file always wins, so nothing here takes away manual control.
+# Stored mode 600 under /etc/bridge, which is a bind from /data, so it is stable for the life
+# of the installation. An admin can pin a custom one by writing the file; that always wins.
 set -u
 PASS_FILE=/etc/bridge/setup-wifi-pass
 
-# 1. explicit override wins
 if [ -s "$PASS_FILE" ]; then
   cat "$PASS_FILE"
   exit 0
 fi
 
-# 2. derive from the hardware serial
-serial="$(awk -F': *' '/^Serial/{print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
-[ -n "${serial:-}" ] || serial="$(cat /etc/machine-id 2>/dev/null || true)"
-# 3. last resort: never emit an empty passphrase — wifi-connect refuses one shorter than
-#    8 chars and the setup AP then never appears at all (the 2026-07-23 flash-test defect).
-[ -n "${serial:-}" ] || serial="netbridge-unknown-serial"
+# 12 chars from an unambiguous alphabet (no O/0/I/1/l) — easy to read off a printed label
+# and type on a phone, ~61 bits of entropy.
+ALPHABET='ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+new="$(LC_ALL=C tr -dc "$ALPHABET" </dev/urandom 2>/dev/null | head -c 12)"
 
-# 12 uppercase hex chars: 48 bits, and hex contains no O/I/l so it is unambiguous to read
-# off a printed label and type on a phone.
-printf 'netbridge-setup-ap|%s' "$serial" | sha256sum | cut -c1-12 | tr 'a-f' 'A-F'
+# Never emit an empty or short passphrase: wifi-connect refuses anything under 8 characters
+# and the setup AP would then never appear at all (the 2026-07-23 flash-test defect).
+if [ "${#new}" -lt 12 ]; then
+  new="$(head -c 32 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' | cut -c1-12 | tr 'a-f' 'A-F')"
+fi
+[ "${#new}" -ge 8 ] || new="SETUPFALLBACK$$"
+
+if install -d -m 755 /etc/bridge 2>/dev/null &&
+   (umask 077; printf '%s' "$new" > "$PASS_FILE" 2>/dev/null); then
+  chmod 600 "$PASS_FILE" 2>/dev/null || true
+  cat "$PASS_FILE"
+else
+  # /etc/bridge unwritable (is /data mounted?). Emit the value so the AP still comes up;
+  # it will be regenerated — and re-reported to the fleet — once /data is available.
+  printf '%s' "$new"
+fi

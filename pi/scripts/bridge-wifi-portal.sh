@@ -61,20 +61,16 @@ ap_ssid() {
 # So: use the persisted file if it has content; else try to write the default; and no matter
 # what, echo a valid password so the AP always comes up.
 ap_pass() {
-  # Single source of truth, shared with `bridge setup-pass` and bridge-firstboot.sh, so the
-  # AP passphrase and the printed label can never disagree. Derived per device from the CPU
-  # serial: a fixed fleet-wide passphrase (we shipped "bridge2626" during portal bring-up)
-  # meant one leaked label unlocked EVERY bridge's setup AP.
+  # Single source of truth, shared with `bridge setup-pass` and reported to the fleet by
+  # bridge-agent. RANDOM per device (build-ledger E1) - never derived from the serial, since
+  # the SSID publishes sha256(serial)[:4] and Pi serials carry little entropy.
   if [ -x /usr/local/bin/bridge-derive-pass ]; then
     /usr/local/bin/bridge-derive-pass
     return
   fi
-  # bridge-derive-pass missing: derive inline rather than emit an empty passphrase, which
-  # wifi-connect rejects (<8 chars) so the setup AP would never appear at all.
-  _s="$(awk -F': *' '/^Serial/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
-  [ -n "${_s:-}" ] || _s="$(cat /etc/machine-id 2>/dev/null)"
-  [ -n "${_s:-}" ] || _s="netbridge-unknown-serial"
-  printf 'netbridge-setup-ap|%s' "$_s" | sha256sum | cut -c1-12 | tr 'a-f' 'A-F'
+  # Helper missing: emit a random one rather than an EMPTY passphrase, which wifi-connect
+  # rejects (<8 chars) so the setup AP would never appear at all.
+  LC_ALL=C tr -dc 'ABCDEFGHJKMNPQRSTUVWXYZ23456789' </dev/urandom | head -c 12
 }
 
 # Give NetworkManager time to (re)connect to a known WiFi / Ethernet on boot before deciding
