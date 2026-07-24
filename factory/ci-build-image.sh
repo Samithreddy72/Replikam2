@@ -114,7 +114,12 @@ chown -R 1000:1000 /home/pi 2>/dev/null || true
 # failed harmlessly (read-only root) but showed up as failed units; mask them outright.
 # cloud-init is not used at all here and just adds three more failures + boot delay.
 log "mask stock units that conflict with the A/B layout"
-for _u in cloud-config cloud-init-local cloud-init-network cloud-init rpi-resize systemd-growfs-root; do
+# userconfig.service is the stock "user configuration dialog". It has Restart=on-failure and
+# can NEVER succeed on a headless read-only device, so it restart-loops forever: 205 restarts
+# in a single boot on the 2026-07-24 test card, which was most of a 17MB journal and constant
+# pointless CPU on a Pi whose PSU is already marginal.
+for _u in userconfig cloud-config cloud-init-local cloud-init-network cloud-init cloud-init-main \
+          cloud-final rpi-resize systemd-growfs-root; do
   systemctl mask "$_u.service" 2>/dev/null || ln -sf /dev/null "/etc/systemd/system/$_u.service"
 done
 
