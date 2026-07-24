@@ -99,8 +99,11 @@ func main() {
 		}
 		go forward(s, ps, *bridge)
 	}
-	// return leg: bridge -> [mesh] us:ret -> 127.0.0.1:ret -> gstreamer
-	go returnLeg(s, *ret)
+	// return leg: bridge -> [mesh] us:ret -> 127.0.0.1:ret -> gstreamer.
+	// Bind on OUR tailnet IP, not a bare ":port": this tsnet build's ListenPacket
+	// rejects an empty host ("address must be a valid IP"), which silently killed the
+	// return-audio listener and left the presenter unable to hear the room over the mesh.
+	go returnLeg(s, ip4.String(), *ret)
 	// control leg: app HTTP -> 127.0.0.1:local -> [mesh] -> bridge:remote
 	var ctrlLocal string
 	if lp, rp, ok := splitPorts(*ctrl); ok {
@@ -156,8 +159,8 @@ func forward(s *tsnet.Server, port, bridge string) {
 // returnLeg receives return audio from the bridge on our MESH interface and hands it to
 // gstreamer/ffmpeg on 127.0.0.1. The bridge was told (via set-peer) to send to our
 // tailnet IP, so these packets arrive over the mesh.
-func returnLeg(s *tsnet.Server, port int) {
-	mesh, err := s.ListenPacket("udp", fmt.Sprintf(":%d", port))
+func returnLeg(s *tsnet.Server, ip string, port int) {
+	mesh, err := s.ListenPacket("udp", fmt.Sprintf("%s:%d", ip, port))
 	if err != nil {
 		log.Printf("return: mesh listen: %v", err)
 		return
