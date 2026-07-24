@@ -42,6 +42,9 @@ func main() {
 	fwd := flag.String("forward", "5000,5002", "comma-sep UDP ports proxied local->bridge")
 	ret := flag.Int("return", 5004, "UDP port proxied bridge->local (return audio)")
 	stateDir := flag.String("statedir", "", "tsnet state dir (temp if empty)")
+	// /auth/mesh-key returns a login_server; default is tailscale.com, but a self-hosted
+	// Headscale control plane needs it passed through or the node joins the WRONG network.
+	control := flag.String("login-server", "", "control URL (blank = tailscale.com)")
 	flag.Parse()
 
 	if *authKey == "" || *bridge == "" {
@@ -59,11 +62,12 @@ func main() {
 	}
 
 	s := &tsnet.Server{
-		Hostname:  *hostname,
-		AuthKey:   *authKey,
-		Dir:       dir,
-		Ephemeral: true,                     // node auto-removes on disconnect
-		Logf:      func(string, ...any) {},  // quiet: stdout is our one json handshake line
+		Hostname:     *hostname,
+		AuthKey:      *authKey,
+		Dir:          dir,
+		Ephemeral:    true,                    // node auto-removes on disconnect
+		ControlURL:   *control,                // "" => tailscale.com default
+		Logf:         func(string, ...any) {}, // quiet: stdout is our one json handshake line
 	}
 	defer s.Close()
 
@@ -98,9 +102,12 @@ func main() {
 	fmt.Println(string(out))
 	os.Stdout.Sync()
 
-	// Run until the app kills us (end session / quit).
+	// Run until the app kills us (end session / quit). os.Interrupt is the portable Ctrl+C
+	// on every OS; SIGTERM is added for Unix but is never delivered on Windows (there the
+	// app's proc.terminate() is a hard TerminateProcess and this wait is moot). The node is
+	// Ephemeral, so even a hard kill leaves the control plane to garbage-collect it.
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	<-sig
 }
 

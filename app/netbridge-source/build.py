@@ -114,12 +114,7 @@ def bundle_gstreamer(dest: pathlib.Path):
     outside the bundle is loaded - because that failure is invisible to any test run here.
     """
     if IS_WIN:
-        # Windows DLLs resolve from the exe's directory, so bundling there is simpler than
-        # macOS relocation - but it needs a GStreamer install on the build runner to copy
-        # from, which the CI image does not have. Until that is added the Windows build
-        # falls back to ffmpeg for return audio, which is audible but not jitter-buffered.
-        log("Windows GStreamer bundling not implemented — return audio uses the ffmpeg fallback")
-        return None
+        return _bundle_gstreamer_windows(dest)
     gst = shutil.which("gst-launch-1.0")
     if not gst:
         log("gst-launch-1.0 not found on this machine — cannot bundle it")
@@ -186,6 +181,52 @@ def bundle_gstreamer(dest: pathlib.Path):
     total = sum(os.path.getsize(t) for t in copied.values())
     log("bundled GStreamer: %d files, %.1f MB" % (len(copied), total / 1e6))
     return libdir / "gst-launch-1.0"
+
+
+def _bundle_gstreamer_windows(dest: pathlib.Path):
+    """Copy a Windows GStreamer runtime into the app.
+
+    Windows resolves DLLs from the executable's own directory and PATH, so there is no
+    @loader_path relocation and no re-signing - it is genuinely simpler than macOS. The
+    catch is only that the build RUNNER must have GStreamer installed to copy from; the
+    CI job installs the official runtime first (see build-app.yml). We copy the whole
+    bin/ (gst-launch + every DLL - dependency-walking DLLs by hand is fragile on Windows)
+    and only the plugin DLLs the return pipeline uses.
+    """
+    roots = [os.environ.get("GSTREAMER_1_0_ROOT_MSVC_X86_64", ""),
+             os.environ.get("GSTREAMER_1_0_ROOT_X86_64", ""),
+             r"C:\gstreamer\1.0\msvc_x86_64", r"C:\gstreamer\1.0\mingw_x86_64"]
+    root = next((r for r in roots if r and os.path.isdir(os.path.join(r, "bin"))), None)
+    if not root:
+        log("no GStreamer runtime found on this Windows runner — return audio will need "
+            "GStreamer installed on the presenter's machine")
+        return None
+    binsrc = os.path.join(root, "bin")
+    plugsrc = os.path.join(root, "lib", "gstreamer-1.0")
+
+    libdir = dest / "gst"
+    plugdir = libdir / "plugins"
+    plugdir.mkdir(parents=True, exist_ok=True)
+
+    # every DLL in bin/, plus gst-launch-1.0.exe
+    n = 0
+    for f in os.listdir(binsrc):
+        if f.lower().endswith(".dll") or f == "gst-launch-1.0.exe":
+            shutil.copy2(os.path.join(binsrc, f), libdir / f)
+            n += 1
+    # only the plugins our pipeline references
+    want = {"gstcoreelements", "gstudp", "gstrtpmanager", "gstrtp", "gstopus",
+            "gstaudioconvert", "gstaudioresample", "gstautodetect",
+            "gstaudioparsers", "gstwasapi", "gstwasapi2", "gstdirectsound"}
+    pn = 0
+    if os.path.isdir(plugsrc):
+        for f in os.listdir(plugsrc):
+            base = os.path.splitext(f)[0].replace("libgst", "gst")
+            if base in want and f.lower().endswith(".dll"):
+                shutil.copy2(os.path.join(plugsrc, f), plugdir / f)
+                pn += 1
+    log("bundled Windows GStreamer: %d dlls, %d plugins from %s" % (n, pn, root))
+    return libdir / "gst-launch-1.0.exe"
 
 
 def main():

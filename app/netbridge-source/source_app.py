@@ -83,6 +83,15 @@ IS_MAC = sys.platform == "darwin"
 AV_FMT = "dshow" if IS_WIN else "avfoundation"
 
 
+def _is_exe(path):
+    """True if path is a runnable binary. os.access(X_OK) is meaningless on Windows -
+    a perfectly good bundled .exe can test False there, which would silently drop us back
+    to a system ffmpeg that a presenter does not have. On Windows, existing is enough."""
+    if not os.path.isfile(path):
+        return False
+    return True if IS_WIN else os.access(path, os.X_OK)
+
+
 def _ffmpeg():
     """Prefer an ffmpeg shipped next to this app, fall back to one on PATH.
 
@@ -91,7 +100,7 @@ def _ffmpeg():
     """
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
     local = os.path.join(base, "ffmpeg.exe" if IS_WIN else "ffmpeg")
-    if os.path.isfile(local) and os.access(local, os.X_OK):
+    if _is_exe(local):
         return local
     return shutil.which("ffmpeg") or "ffmpeg"
 
@@ -101,7 +110,7 @@ def _gst():
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
     for cand in (os.path.join(base, "gst", "gst-launch-1.0.exe" if IS_WIN else "gst-launch-1.0"),
                  os.path.join(base, "gst-launch-1.0.exe" if IS_WIN else "gst-launch-1.0")):
-        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+        if _is_exe(cand):
             return cand
     return shutil.which("gst-launch-1.0")
 
@@ -116,12 +125,18 @@ def _gst_env():
     """
     env = dict(os.environ)
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
-    plug = os.path.join(base, "gst", "plugins")
+    gstdir = os.path.join(base, "gst")
+    plug = os.path.join(gstdir, "plugins")
     if os.path.isdir(plug):
         env["GST_PLUGIN_PATH"] = plug
         env["GST_PLUGIN_SYSTEM_PATH_1_0"] = plug
         # a stale registry from another install would shadow the bundle
         env["GST_REGISTRY"] = os.path.join(str(_logdir()), "gst-registry.bin")
+        if IS_WIN:
+            # Windows finds a DLL's dependencies via PATH (and the exe's own dir). The
+            # bundled gst-launch and its DLLs share gst/, so that dir must lead PATH or
+            # the binary starts and immediately fails to load libglib etc.
+            env["PATH"] = gstdir + os.pathsep + env.get("PATH", "")
     return env
 
 
@@ -310,8 +325,13 @@ class Session:
             except Exception:
                 pass
 
-        # ffmpeg fallback. Receiving RTP needs an SDP describing the stream; ffmpeg cannot
-        # infer Opus/48k/stereo from the packets alone.
+        # ffmpeg fallback — but ONLY where ffmpeg can actually play audio out. It has an
+        # output device on macOS (audiotoolbox) and Linux (alsa); on WINDOWS it has NONE
+        # (-f sdl is a VIDEO display, not audio), so a fallback there would open a blank
+        # window and play silence. On Windows, GStreamer is the only option, so if the
+        # bundled GStreamer is missing we say so plainly instead of faking a player.
+        if IS_WIN:
+            return "none"
         sdp = ("v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=NetBridge return\r\n"
                "c=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio %d RTP/AVP 97\r\n"
                "a=rtpmap:97 opus/48000/2\r\n" % port)
@@ -321,8 +341,7 @@ class Session:
                 f.write(sdp)
         except Exception:
             return "none"
-        out = ["-f", "audiotoolbox", "-"] if IS_MAC else (["-f", "sdl", "NetBridge return"]
-                                                          if IS_WIN else ["-f", "alsa", "default"])
+        out = ["-f", "audiotoolbox", "-"] if IS_MAC else ["-f", "alsa", "default"]
         try:
             lf = open(os.path.join(str(_logdir()), "netbridge-source-return.log"), "w")
             self.logs.append(lf)
