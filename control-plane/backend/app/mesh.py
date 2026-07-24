@@ -18,7 +18,9 @@ not configured (settings.ts_api_key empty), minting raises MeshNotConfigured and
 the endpoint answers 503 — the feature is simply off, not broken.
 """
 import json
+import time
 import re
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -54,6 +56,67 @@ def _source_tags() -> list[str]:
     return [t.strip() for t in settings.ts_source_tag.split(",") if t.strip()]
 
 
+_TOKEN_CACHE: dict = {"token": "", "exp": 0.0}
+
+
+def _access_token() -> str:
+    """Return a bearer token usable against the Tailscale API.
+
+    A plain API key (tskey-api-...) IS a bearer token and is used as-is. An OAuth client
+    SECRET (tskey-client-...) is not: it must first be exchanged for a short-lived access
+    token via the client-credentials flow. Sending the secret directly authenticates far
+    enough for Tailscale to identify an actor and then refuse with
+
+        403 "calling actor does not have enough permissions to perform this function"
+
+    which reads like a scope problem and sends you back to the console to re-tick boxes
+    that were already correct. It is not a scope problem - it is the wrong kind of token.
+
+    The access token is cached until shortly before it expires, so a fleet claiming many
+    devices does not perform an exchange per device.
+    """
+    raw = (settings.ts_api_key or "").strip()
+    if not raw:
+        raise MeshNotConfigured("TS_API_KEY not set")
+    if not raw.startswith("tskey-client-"):
+        return raw                      # plain API key
+
+    now = time.time()
+    if _TOKEN_CACHE["token"] and _TOKEN_CACHE["exp"] > now + 30:
+        return _TOKEN_CACHE["token"]
+
+    # tskey-client-<CLIENT_ID>-<secret>; Tailscale wants the id alongside the secret.
+    bits = raw.split("-")
+    client_id = bits[2] if len(bits) > 3 else ""
+    data = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": raw,
+        "grant_type": "client_credentials",
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.tailscale.com/api/v2/oauth/token", data=data, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            out = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode()[:200]
+        except Exception:
+            pass
+        raise MeshError("tailscale oauth token %s: %s" % (e.code, detail))
+    except Exception as e:
+        raise MeshError("tailscale oauth token: %s" % e)
+
+    tok = out.get("access_token") or ""
+    if not tok:
+        raise MeshError("tailscale oauth token: no access_token in response")
+    _TOKEN_CACHE["token"] = tok
+    _TOKEN_CACHE["exp"] = now + float(out.get("expires_in") or 3600)
+    return tok
+
+
 def mint_ephemeral_key(description: str, tags: list[str] | None = None) -> dict:
     """Create one scoped ephemeral auth key. Returns {"key": "tskey-auth-…",
     "expires": <iso8601|None>}. Raises MeshNotConfigured if unconfigured, MeshError
@@ -75,7 +138,7 @@ def mint_ephemeral_key(description: str, tags: list[str] | None = None) -> dict:
         url, data=json.dumps(body).encode(), method="POST",
         headers={"Content-Type": "application/json",
                  # Tailscale accepts an API key or OAuth access token as bearer.
-                 "Authorization": "Bearer " + settings.ts_api_key})
+                 "Authorization": "Bearer " + _access_token()})
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             out = json.loads(r.read().decode())
