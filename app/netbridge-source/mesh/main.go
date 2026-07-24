@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -41,6 +42,10 @@ func main() {
 	bridge := flag.String("bridge", "", "bridge tailnet IP or MagicDNS name")
 	fwd := flag.String("forward", "5000,5002", "comma-sep UDP ports proxied local->bridge")
 	ret := flag.Int("return", 5004, "UDP port proxied bridge->local (return audio)")
+	// The app also talks to the bridge's HTTP control API (unlock / checks / set-peer /
+	// status on :8080). To keep the presenter off any 100.x address entirely, that TCP
+	// channel is proxied too: app -> 127.0.0.1:<local> -> [mesh] -> bridge:<remote>.
+	ctrl := flag.String("control", "18080:8080", "TCP control proxy localPort:bridgePort")
 	stateDir := flag.String("statedir", "", "tsnet state dir (temp if empty)")
 	// /auth/mesh-key returns a login_server; default is tailscale.com, but a self-hosted
 	// Headscale control plane needs it passed through or the node joins the WRONG network.
@@ -96,9 +101,16 @@ func main() {
 	}
 	// return leg: bridge -> [mesh] us:ret -> 127.0.0.1:ret -> gstreamer
 	go returnLeg(s, *ret)
+	// control leg: app HTTP -> 127.0.0.1:local -> [mesh] -> bridge:remote
+	var ctrlLocal string
+	if lp, rp, ok := splitPorts(*ctrl); ok {
+		ctrlLocal = lp
+		go controlLeg(s, lp, rp, *bridge)
+	}
 
 	// Handshake AFTER the proxies are wired, so the app never races us.
-	out, _ := json.Marshal(map[string]any{"ready": true, "tailnet_ip": ip4.String()})
+	out, _ := json.Marshal(map[string]any{
+		"ready": true, "tailnet_ip": ip4.String(), "control_port": ctrlLocal})
 	fmt.Println(string(out))
 	os.Stdout.Sync()
 
@@ -169,6 +181,45 @@ func returnLeg(s *tsnet.Server, port int) {
 			return
 		}
 	}
+}
+
+// controlLeg accepts local TCP connections (the app's HTTP calls to the bridge) and
+// splices each to a fresh mesh connection to the bridge's control port. A new backend
+// conn per client keeps requests independent, which matters for the app's short,
+// sequential control calls.
+func controlLeg(s *tsnet.Server, localPort, remotePort, bridge string) {
+	ln, err := net.Listen("tcp", "127.0.0.1:"+localPort)
+	if err != nil {
+		log.Printf("control: local listen: %v", err)
+		return
+	}
+	defer ln.Close()
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func(client net.Conn) {
+			defer client.Close()
+			back, err := s.Dial(context.Background(), "tcp", net.JoinHostPort(bridge, remotePort))
+			if err != nil {
+				return
+			}
+			defer back.Close()
+			done := make(chan struct{}, 2)
+			go func() { io.Copy(back, client); done <- struct{}{} }()
+			go func() { io.Copy(client, back); done <- struct{}{} }()
+			<-done
+		}(c)
+	}
+}
+
+func splitPorts(s string) (local, remote string, ok bool) {
+	i := strings.IndexByte(s, ':')
+	if i <= 0 || i >= len(s)-1 {
+		return "", "", false
+	}
+	return s[:i], s[i+1:], true
 }
 
 func fatal(f string, a ...any) {

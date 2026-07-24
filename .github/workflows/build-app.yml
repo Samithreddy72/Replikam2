@@ -42,6 +42,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The embedded mesh client (J3 phase 5) is Go; build.py compiles it for this target.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
       - name: Install PyInstaller
         run: python -m pip install --upgrade pip pyinstaller
 

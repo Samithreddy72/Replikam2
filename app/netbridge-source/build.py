@@ -229,11 +229,35 @@ def _bundle_gstreamer_windows(dest: pathlib.Path):
     return libdir / "gst-launch-1.0.exe"
 
 
+def build_mesh():
+    """Compile the embedded mesh client (Go) for THIS platform and return its path.
+
+    Go cross-compiles reliably, but PyInstaller does not, so each app binary is built on
+    its own OS anyway - we just build the helper for the same target here. Requires the Go
+    toolchain on the build machine; without it the app falls back to host Tailscale.
+    """
+    if not shutil.which("go"):
+        log("Go toolchain not found — mesh client not bundled; app will need host Tailscale")
+        return None
+    src = HERE / "mesh"
+    out = src / ("netbridge-mesh.exe" if IS_WIN else "netbridge-mesh")
+    env = dict(os.environ, GOFLAGS="-mod=mod")
+    log("building embedded mesh client")
+    r = subprocess.run(["go", "build", "-o", str(out), "."], cwd=src, env=env)
+    if r.returncode != 0 or not out.exists():
+        log("mesh client build FAILED — app will need host Tailscale")
+        return None
+    log("built mesh client -> %s (%.1f MB)" % (out, out.stat().st_size / 1e6))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-ffmpeg", action="store_true", help="do not bundle ffmpeg")
     ap.add_argument("--no-gst", action="store_true",
                     help="do not bundle GStreamer (return audio then needs one on PATH)")
+    ap.add_argument("--no-mesh", action="store_true",
+                    help="do not bundle the embedded mesh client (needs host Tailscale then)")
     args = ap.parse_args()
 
     try:
@@ -244,6 +268,7 @@ def main():
 
     ff = None if args.no_ffmpeg else fetch_ffmpeg(HERE / "_bundle")
     gstdir = None if args.no_gst else bundle_gstreamer(HERE / "_bundle")
+    mesh = None if args.no_mesh else build_mesh()
 
     name = "NetBridgeSource"
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
@@ -254,6 +279,8 @@ def main():
     if ff:
         # --add-binary lands it next to the extracted app; _ffmpeg() looks there first.
         cmd += ["--add-binary", "%s%s." % (ff, sep)]
+    if mesh:
+        cmd += ["--add-binary", "%s%s." % (mesh, sep)]
     if gstdir:
         # Ship the whole gst/ tree (binary + libs + plugins). --add-data keeps the layout,
         # which matters because the dylibs reference each other via @loader_path and the

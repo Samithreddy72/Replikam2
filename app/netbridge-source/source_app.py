@@ -374,6 +374,140 @@ class Session:
 SESSION = Session()
 
 
+def _mesh_bin():
+    """The embedded mesh client, bundled next to the app or built in mesh/ during dev."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    name = "netbridge-mesh.exe" if IS_WIN else "netbridge-mesh"
+    for cand in (os.path.join(base, name), os.path.join(base, "mesh", name)):
+        if _is_exe(cand):
+            return cand
+    return None
+
+
+class MeshManager:
+    """Runs the embedded mesh client so the app reaches the bridge over the private mesh
+    (walkthrough J3: "joins the private mesh with an embedded client + scoped token from
+    sign-in", "via secure mesh"). The presenter never sees a 100.x address: everything is
+    routed through 127.0.0.1 proxies the helper owns.
+
+    route() decides per bridge. If the bridge has a tailnet address and we have the helper
+    and can mint a scoped key, it brings the mesh up and returns localhost proxy targets.
+    A bridge with no tailnet address (pre-claim / bench) is reached directly - the same
+    app, adapting, not a second code path bolted on.
+    """
+    CTRL_LOCAL = 18080
+
+    def __init__(self):
+        self.proc = None
+        self.bridge_id = None
+        self.tailnet_ip = None      # OUR mesh IP; the bridge returns audio here
+        self.control_port = None
+
+    def _mint_key(self, st):
+        r = api("POST", st["control_url"].rstrip("/") + "/auth/mesh-key",
+                token=st.get("token"), timeout=25)
+        if isinstance(r, dict) and not r.get("_error"):
+            # the endpoint returns the key as "authkey" (not "key")
+            return r.get("authkey"), r.get("login_server") or ""
+        return None, ""
+
+    def route(self, rec, st):
+        """rec: {id, tailscale_ip, ip}. Returns routing for control + media + return."""
+        tsip = (rec or {}).get("tailscale_ip")
+        mesh_bin = _mesh_bin()
+        if not (tsip and mesh_bin and st.get("token") and st.get("control_url")):
+            self.stop()
+            ip = (rec or {}).get("ip")
+            return {"via": "direct", "control_host": ip, "control_port": 8080,
+                    "media_host": ip, "return_peer": local_ip_towards(ip) if ip else ""}
+
+        # reuse a live helper for the same bridge
+        if self.proc and self.proc.poll() is None and self.bridge_id == rec.get("id"):
+            return self._mesh_route()
+
+        self.stop()
+        key, login = self._mint_key(st)
+        if not key:
+            ip = rec.get("ip")
+            return {"via": "direct", "control_host": ip, "control_port": 8080,
+                    "media_host": ip, "return_peer": local_ip_towards(ip) if ip else ""}
+
+        argv = [mesh_bin, "--authkey", key, "--bridge", tsip,
+                "--hostname", "nb-source-%s" % (rec.get("id") or "app")[-6:],
+                "--forward", "%d,%d" % (RTP_VIDEO, RTP_VOICE), "--return", "5004",
+                "--control", "%d:8080" % self.CTRL_LOCAL]
+        if login:
+            argv += ["--login-server", login]
+        lf = open(os.path.join(str(_logdir()), "netbridge-source-mesh.log"), "w")
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=lf, text=True)
+        # read the one-line handshake (helper prints it only once the proxies are wired)
+        line = ""
+        try:
+            for _ in range(60):
+                line = p.stdout.readline()
+                if line.strip():
+                    break
+        except Exception:
+            pass
+        try:
+            hs = json.loads(line or "{}")
+        except Exception:
+            hs = {}
+        if not hs.get("ready"):
+            p.terminate()
+            ip = rec.get("ip")
+            return {"via": "direct-fallback", "error": hs.get("error", "mesh did not start"),
+                    "control_host": ip, "control_port": 8080, "media_host": ip,
+                    "return_peer": local_ip_towards(ip) if ip else ""}
+        self.proc, self.bridge_id = p, rec.get("id")
+        self.tailnet_ip = hs.get("tailnet_ip")
+        self.control_port = int(hs.get("control_port") or self.CTRL_LOCAL)
+        return self._mesh_route()
+
+    def _mesh_route(self):
+        return {"via": "mesh", "control_host": "127.0.0.1", "control_port": self.control_port,
+                "media_host": "127.0.0.1", "return_peer": self.tailnet_ip}
+
+    def stop(self):
+        if self.proc:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=4)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+        self.proc = self.bridge_id = self.tailnet_ip = self.control_port = None
+
+
+MESH = MeshManager()
+_BRIDGES = {"list": [], "ts": 0.0}
+
+
+def _bridge_rec(host, st):
+    """Find the bridge record for a UI-supplied host (its tailnet or LAN IP). Falls back
+    to a bare {ip:host} so a hand-typed address still works."""
+    lst = _BRIDGES["list"]
+    if not lst and st.get("token") and st.get("control_url"):
+        r = api("GET", st["control_url"].rstrip("/") + "/admin/devices", token=st.get("token"))
+        if isinstance(r, list):
+            lst = _BRIDGES["list"] = r
+    for d in lst:
+        if host in (d.get("tailscale_ip"), (d.get("latest") or {}).get("ip"), d.get("ip")):
+            return {"id": d.get("id"), "tailscale_ip": d.get("tailscale_ip"),
+                    "ip": (d.get("latest") or {}).get("ip") or d.get("ip")}
+    return {"id": None, "tailscale_ip": None, "ip": host}
+
+
+def bridge_route(host, st):
+    """Base control URL + routing for a bridge, bringing the mesh up if appropriate."""
+    rec = _bridge_rec(host, st)
+    route = MESH.route(rec, st)
+    route["base"] = "http://%s:%d" % (route["control_host"], route["control_port"])
+    return route
+
+
 # --------------------------------------------------------------------------- server
 from http.server import BaseHTTPRequestHandler, HTTPServer   # noqa: E402
 
@@ -420,6 +554,8 @@ class Handler(BaseHTTPRequestHandler):
             if not st.get("token"):
                 return self._send({"_error": "not signed in"}, 401)
             r = api("GET", st["control_url"].rstrip("/") + "/admin/devices", token=st["token"])
+            if isinstance(r, list):
+                _BRIDGES["list"] = r     # cache for mesh routing (tailscale_ip per bridge)
             if isinstance(r, dict) and r.get("_error"):
                 return self._send(r, 502)
             # presenters see their org's bridges; never any secret
@@ -432,7 +568,8 @@ class Handler(BaseHTTPRequestHandler):
             host = self.path.split("host=", 1)[1] if "host=" in self.path else ""
             if not host:
                 return self._send({"_error": "host required"}, 400)
-            return self._send(api("GET", "http://%s:8080/api/checks" % host, timeout=8))
+            route = bridge_route(host, load_state())   # over the mesh when the bridge has one
+            return self._send(api("GET", route["base"] + "/api/checks", timeout=10))
         return self._send({"_error": "not found"}, 404)
 
     # ---------------- POST
@@ -479,6 +616,7 @@ class Handler(BaseHTTPRequestHandler):
             for k in ("token", "email"):
                 st.pop(k, None)
             save_state(st)
+            MESH.stop()
             return self._send({"ok": True})
 
         if self.path == "/api/remember":
@@ -492,8 +630,10 @@ class Handler(BaseHTTPRequestHandler):
             host, pin = b.get("host"), str(b.get("pin") or "")
             if not host or not pin:
                 return self._send({"_error": "host and pin required"}, 400)
-            # Verified ON THE DEVICE. The control plane is not asked and cannot override it.
-            r = api("POST", "http://%s:8080/api/unlock" % host, body={"pin": pin}, timeout=15)
+            # Verified ON THE DEVICE, reached over the mesh. The control plane is not asked
+            # and cannot override it.
+            route = bridge_route(host, st)
+            r = api("POST", route["base"] + "/api/unlock", body={"pin": pin}, timeout=20)
             return self._send(r)
 
         if self.path == "/api/golive":
@@ -504,18 +644,20 @@ class Handler(BaseHTTPRequestHandler):
             vidx, vname, _ = resolve_by_name(devs.get("video", []), b.get("camera_name"))
             aidx, aname, _ = resolve_by_name(devs.get("audio", []), b.get("mic_name"), "0")
             port = int(b.get("return_port") or 5004)
-            # Tell the bridge where to send the room back. Registered through the control
-            # plane in production; the device endpoint is the same contract.
-            me = local_ip_towards(host)
-            peer = api("POST", "http://%s:8080/api/set-peer" % host,
+            # Route over the mesh when the bridge has a tailnet address. Media then targets
+            # 127.0.0.1 (the helper's local proxies) and the bridge is told to return audio
+            # to OUR mesh IP - so no 100.x address is ever handled by the app itself.
+            route = bridge_route(host, st)
+            me = route["return_peer"]
+            peer = api("POST", route["base"] + "/api/set-peer",
                        body={"ip": me, "port": port}, timeout=15) if me else {"_error": "no route"}
-            SESSION.start(host, vidx, aidx, return_port=port)
+            SESSION.start(route["media_host"], vidx, aidx, return_port=port)
             st.update({"bridge_host": host, "camera_name": vname, "mic_name": aname})
             save_state(st)
             player = SESSION.return_player
             return self._send({"ok": True, "camera": vname, "mic": aname,
                                "return_peer": me, "return_port": port, "peer_result": peer,
-                               "return_player": player,
+                               "via": route.get("via"), "return_player": player,
                                "return_note": {
                                    "gstreamer": "room audio: GStreamer (best — jitter-buffered)",
                                    "ffmpeg": "room audio: ffmpeg fallback — install GStreamer for smoother playback",
@@ -524,6 +666,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/api/stop":
             SESSION.stop()
+            MESH.stop()
             return self._send({"ok": True})
 
         return self._send({"_error": "not found"}, 404)
@@ -652,7 +795,8 @@ async function golive(){
     body:JSON.stringify({host:h,camera_name:$('cam').value,mic_name:$('mic').value})});
   if(r._error){$('m2').textContent=r._error;return}
   const warn = r.return_player!=='gstreamer';
-  $('m2').innerHTML=`live · ${r.camera} · ${r.mic}<br>`+
+  const via = r.via==='mesh' ? 'via secure mesh' : (r.via||'direct');
+  $('m2').innerHTML=`live · ${r.camera} · ${r.mic} · <b>${via}</b><br>`+
     `<span style="color:${warn?'var(--red)':'var(--ok)'}">${r.return_note||''}</span>`;
   setLive(true); poll()}
 async function poll(){
@@ -682,6 +826,7 @@ def main():
         pass
     finally:
         SESSION.stop()          # never leave ffmpeg holding the camera
+        MESH.stop()             # remove the ephemeral mesh node
         print("\nstopped.")
 
 
