@@ -193,14 +193,24 @@ def _bundle_gstreamer_windows(dest: pathlib.Path):
     bin/ (gst-launch + every DLL - dependency-walking DLLs by hand is fragile on Windows)
     and only the plugin DLLs the return pipeline uses.
     """
+    # The env vars are set by the installer at MACHINE scope, which a later CI step's
+    # os.environ does not always see — and choco's MSI lands under "C:\Program Files\..",
+    # NOT the "C:\gstreamer\.." that the manual installer uses. Search BOTH prefixes for
+    # both toolchains, plus PROGRAMFILES, so the runtime is found however it was installed.
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
     roots = [os.environ.get("GSTREAMER_1_0_ROOT_MSVC_X86_64", ""),
              os.environ.get("GSTREAMER_1_0_ROOT_X86_64", ""),
+             os.path.join(pf, "gstreamer", "1.0", "msvc_x86_64"),
+             os.path.join(pf, "gstreamer", "1.0", "mingw_x86_64"),
+             r"C:\Program Files\gstreamer\1.0\msvc_x86_64",
+             r"C:\Program Files\gstreamer\1.0\mingw_x86_64",
              r"C:\gstreamer\1.0\msvc_x86_64", r"C:\gstreamer\1.0\mingw_x86_64"]
     root = next((r for r in roots if r and os.path.isdir(os.path.join(r, "bin"))), None)
     if not root:
         log("no GStreamer runtime found on this Windows runner — return audio will need "
             "GStreamer installed on the presenter's machine")
         return None
+    log("found Windows GStreamer at %s" % root)
     binsrc = os.path.join(root, "bin")
     plugsrc = os.path.join(root, "lib", "gstreamer-1.0")
 

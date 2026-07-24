@@ -55,7 +55,19 @@ jobs:
       # macOS copies from the runner's own Homebrew GStreamer, installed here too.
       - name: Install GStreamer (Windows)
         if: runner.os == 'Windows'
-        run: choco install gstreamer --no-progress -y
+        shell: pwsh
+        run: |
+          choco install gstreamer --no-progress -y
+          # The MSI sets the root var at MACHINE scope, which this job's later steps do
+          # not reliably inherit. Pin the known install location into the job env so
+          # build.py's bundler finds it deterministically (it lands under Program Files).
+          $root = "C:\Program Files\gstreamer\1.0\msvc_x86_64"
+          if (Test-Path "$root\bin") {
+            "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "pinned GSTREAMER_1_0_ROOT_MSVC_X86_64=$root"
+          } else {
+            Write-Host "WARNING: expected GStreamer at $root but it is not there"
+          }
       - name: Install GStreamer (macOS)
         if: runner.os == 'macOS'
         run: brew install gstreamer || true
@@ -63,6 +75,25 @@ jobs:
       - name: Build
         working-directory: app/netbridge-source
         run: python build.py ${{ (github.event.inputs.bundle_ffmpeg == 'false') && '--no-ffmpeg' || '' }}
+
+      # On Windows, GStreamer is the ONLY return-audio player (ffmpeg has no audio output
+      # device there). A build that quietly omits it produces an app that looks fine but is
+      # silent when the presenter tries to hear the room — the exact defect that shipped in
+      # app-v1.0.0. Fail loudly here instead so a no-GStreamer Windows bundle can never
+      # reach a release again. The bundler logs "found Windows GStreamer at ..." on success.
+      - name: Verify GStreamer bundled (Windows)
+        if: runner.os == 'Windows'
+        working-directory: app/netbridge-source
+        shell: pwsh
+        run: |
+          if (Test-Path "_bundle\gst\gst-launch-1.0.exe") {
+            $dlls = (Get-ChildItem "_bundle\gst\*.dll" | Measure-Object).Count
+            $plugs = (Get-ChildItem "_bundle\gst\plugins\*.dll" -ErrorAction SilentlyContinue | Measure-Object).Count
+            Write-Host "GStreamer bundled: $dlls dlls, $plugs plugins"
+          } else {
+            Write-Error "GStreamer was NOT bundled — Windows return audio would be silent. Failing the build."
+            exit 1
+          }
 
       # Prove the binary at least starts and serves before publishing it. A build that
       # produces a file which crashes on launch is worse than a failed build: it looks
