@@ -22,7 +22,7 @@ control plane refuses fleet mutations even if the UI asked for them.
 import json, os, pathlib, re, shutil, socket, subprocess, sys, threading, time
 import urllib.request, urllib.error
 
-APP_VERSION = "1.0.1"          # stamped into the diagnostics report; bump with each release
+APP_VERSION = "1.0.2"          # stamped into the diagnostics report; bump with each release
 
 STATE_DIR = pathlib.Path(os.path.expanduser("~/.netbridge-source"))
 STATE_FILE = STATE_DIR / "state.json"
@@ -254,28 +254,41 @@ def local_ip_towards(host):
 class Session:
     """Owns the live ffmpeg legs + the return listener."""
 
+    # Supervisor tunables.
+    RESTART_LIMIT = 4          # restarts per leg within the window before giving up
+    RESTART_WINDOW = 60.0      # seconds
+    STALL_SECS = 8.0           # alive but no NEW frames this long => stalled (hung camera etc.)
+    TICK = 1.5                 # supervisor poll cadence
+
     def __init__(self):
-        self.procs = []
+        self.procs = []            # return-audio player + any aux procs
         self.logs = []
         self.bridge = None
         self.return_port = 5004
         self.return_player = "none"
-        self.voice_proc = None
+        self.legs = {}             # name -> leg dict; the supervised forward legs (video, voice)
+        self._active = False       # intent: are we supposed to be streaming right now?
+        self._sup = None           # supervisor thread
 
     @property
     def live(self):
-        return any(p.poll() is None for p in self.procs)
+        return self._active
 
     def voice_sending(self):
         """True if the mic->bridge leg is alive. A sender-side signal used only as a
         fallback when the bridge firmware predates the device-side voice_arriving check."""
-        return bool(self.voice_proc and self.voice_proc.poll() is None)
+        leg = self.legs.get("voice")
+        p = leg and leg.get("proc")
+        return bool(p and p.poll() is None)
 
     def start(self, pi_host, video_idx, audio_idx, fps=20, mic_gain=8, return_port=5004):
         self.stop()
         self.bridge, self.return_port = pi_host, return_port
         ff = _ffmpeg()
-        common = [ff, "-hide_banner", "-loglevel", "warning"]
+        # -progress pipe:1 makes ffmpeg emit machine-readable frame progress on stdout; the
+        # supervisor reads it to tell a STALLED leg (camera hung → no new frames) from a
+        # healthy-but-quiet one. -nostats keeps the stderr log to warnings/errors only.
+        common = [ff, "-hide_banner", "-loglevel", "warning", "-nostats", "-progress", "pipe:1"]
         # The macOS arguments are mac/mac-stream.sh's PROVEN ones and must not be
         # "simplified": asking the camera for 320x180 or 640x360 fails outright
         # ("Selected video size is not supported by the device") and the video leg dies
@@ -307,19 +320,118 @@ class Session:
             "-application", "lowdelay", "-payload_type", "97",
             "-f", "rtp", "rtp://%s:%d" % (pi_host, RTP_VOICE)]
 
-        # Keep each leg's stderr so a dead leg can be explained instead of guessed at.
+        # Register the two forward legs, then launch each UNDER SUPERVISION. A leg that
+        # crashes OR stalls is auto-restarted (bounded); once it exhausts its retries it is
+        # marked failed WITH the real reason, instead of leaving a silent red check.
         self.logs = []
-        self.voice_proc = None
-        logdir = _logdir()
+        self.legs = {}
         for name, argv in (("video", v), ("voice", a)):
-            lf = open(os.path.join(str(logdir), "netbridge-source-%s.log" % name), "w")
-            self.logs.append(lf)
-            proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=lf, **_win_kw())
-            self.procs.append(proc)
-            if name == "voice":
-                self.voice_proc = proc          # so the app can report the voice leg is alive
+            self.legs[name] = {
+                "argv": argv, "proc": None, "log": None,
+                "logpath": os.path.join(str(_logdir()), "netbridge-source-%s.log" % name),
+                "restarts": [], "state": "starting", "error": None,
+                "failed": False, "last_progress": 0.0}
+        for name, leg in self.legs.items():
+            self._spawn(name, leg)
 
         self.return_player = self._start_return(return_port)
+        self._active = True
+        self._sup = threading.Thread(target=self._supervise, daemon=True)
+        self._sup.start()
+
+    def _spawn(self, name, leg):
+        """(Re)launch one forward leg and attach a progress reader. The log handle is opened
+        once per session and appended across restarts so the crash history is preserved."""
+        if leg["log"] is None:
+            leg["log"] = open(leg["logpath"], "w")
+            self.logs.append(leg["log"])
+        else:
+            try:
+                leg["log"].write("\n--- restart ---\n"); leg["log"].flush()
+            except Exception:
+                pass
+        leg["last_progress"] = time.time()          # give the camera time to warm up
+        p = subprocess.Popen(leg["argv"], stdout=subprocess.PIPE, stderr=leg["log"],
+                             text=True, bufsize=1, **_win_kw())
+        leg["proc"] = p
+        leg["state"] = "running"
+        threading.Thread(target=self._progress_reader, args=(leg, p.stdout),
+                         daemon=True).start()
+
+    def _progress_reader(self, leg, pipe):
+        """Bump leg['last_progress'] each time ffmpeg reports a NEW frame/time. Bound to this
+        specific pipe so a later restart's reader never touches an older one."""
+        last = -1
+        try:
+            for line in iter(pipe.readline, ""):
+                line = line.strip()
+                if line.startswith("out_time_ms=") or line.startswith("frame="):
+                    try:
+                        val = int(line.split("=", 1)[1])
+                    except (ValueError, IndexError):
+                        continue
+                    if val > last:
+                        last, leg["last_progress"] = val, time.time()
+        except Exception:
+            pass
+
+    def _leg_error(self, name, leg, stalled):
+        """A human reason for a permanently-failed leg: the last real log line if ffmpeg
+        said anything, else an inference from HOW it failed."""
+        try:
+            with open(leg["logpath"], "r", errors="replace") as f:
+                lines = [l.strip() for l in f if l.strip() and "--- restart ---" not in l]
+            if lines:
+                return lines[-1][:160]
+        except Exception:
+            pass
+        dev = "camera" if name == "video" else "microphone"
+        if stalled:
+            return ("%s produced no frames — the %s may be in use by another app or blocked "
+                    "by a privacy/permission setting" % (name, dev))
+        return "%s leg kept exiting immediately (check the %s is connected)" % (name, dev)
+
+    def _supervise(self):
+        """Watch each forward leg; restart a dead/stalled one up to RESTART_LIMIT times in
+        RESTART_WINDOW, then give up and record why. Runs until stop() clears _active."""
+        while self._active:
+            time.sleep(self.TICK)
+            if not self._active:
+                break
+            now = time.time()
+            for name, leg in list(self.legs.items()):
+                if leg["failed"]:
+                    continue
+                p = leg["proc"]
+                dead = (p is None) or (p.poll() is not None)
+                stalled = (not dead) and (now - leg["last_progress"] > self.STALL_SECS)
+                if not (dead or stalled):
+                    continue
+                leg["restarts"] = [t for t in leg["restarts"] if now - t < self.RESTART_WINDOW]
+                if len(leg["restarts"]) >= self.RESTART_LIMIT:
+                    leg["failed"], leg["state"] = True, "failed"
+                    leg["error"] = self._leg_error(name, leg, stalled)
+                    continue
+                if stalled and p:                      # a hung proc won't exit on its own
+                    try:
+                        p.terminate(); p.wait(timeout=2)
+                    except Exception:
+                        try: p.kill()
+                        except Exception: pass
+                leg["restarts"].append(now)
+                leg["state"] = "restarting"
+                self._spawn(name, leg)
+
+    def legs_health(self):
+        """Per-leg status for the UI + diagnostics: running / restarting / failed(+reason)."""
+        out = {}
+        for name, leg in self.legs.items():
+            p = leg.get("proc")
+            out[name] = {"state": leg.get("state"),
+                         "alive": bool(p and p.poll() is None),
+                         "restarts": len(leg.get("restarts", [])),
+                         "error": leg.get("error")}
+        return out
 
     def _start_return(self, port):
         """Play the meeting room's audio back. Returns a label for what is playing it.
@@ -377,13 +489,19 @@ class Session:
             return "none"
 
     def stop(self):
-        for p in self.procs:
+        self._active = False        # tells the supervisor to stand down (no more restarts)
+        procs = [leg.get("proc") for leg in self.legs.values()] + self.procs
+        for p in procs:
+            if not p:
+                continue
             try:
                 p.terminate()
             except Exception:
                 pass
         deadline = time.time() + 4
-        for p in self.procs:
+        for p in procs:
+            if not p:
+                continue
             try:
                 p.wait(timeout=max(0.1, deadline - time.time()))
             except Exception:
@@ -391,7 +509,13 @@ class Session:
                     p.kill()
                 except Exception:
                     pass
+        for leg in self.legs.values():
+            lg = leg.get("log")
+            if lg:
+                try: lg.close()
+                except Exception: pass
         self.procs = []
+        self.legs = {}
 
 
 SESSION = Session()
@@ -596,6 +720,7 @@ def diagnostics():
             "live": SESSION.live,
             "return_player": SESSION.return_player,
         },
+        "legs": SESSION.legs_health(),
         "logs": {},
     }
     ld = str(_logdir())
@@ -618,6 +743,13 @@ def diagnostics_text():
     section("platform", d["platform"])
     section("bundled binaries", d["bundled_binaries"])
     section("session", d["session"])
+    if d.get("legs"):
+        L.append("[legs (supervised)]")
+        for name, h in d["legs"].items():
+            L.append("  %-7s state=%-11s alive=%-5s restarts=%s%s"
+                     % (name, h.get("state"), h.get("alive"), h.get("restarts"),
+                        ("  error=%s" % h["error"]) if h.get("error") else ""))
+        L.append("")
     dev = d["devices"]
     fmt = lambda items: ", ".join("[%s] %s" % (x.get("index"), x.get("name")) for x in items) or "<none>"
     L.append("[devices]")
@@ -672,7 +804,10 @@ class Handler(BaseHTTPRequestHandler):
                 "last_camera": st.get("camera_name"),
                 "last_mic": st.get("mic_name"),
                 "live": SESSION.live,
+                "legs": SESSION.legs_health(),
             })
+        if self.path == "/api/legs":
+            return self._send(SESSION.legs_health())
         if self.path == "/api/devices":
             return self._send(av_devices())
         if self.path == "/api/diagnostics":
@@ -951,7 +1086,14 @@ async function poll(){
   const map=[['c1','l1','online'],['c2','l2','video_arriving'],['c5','l5','voice_arriving'],
              ['c3','l3','client_sees_camera'],['c4','l4','return_audio']];
   for(const [ci,li,k] of map){const v=c[k]||{};
-    $(ci).className=v.ok?'ok':'bad'; $(li).textContent=(v.detail||'').slice(0,42)}}
+    $(ci).className=v.ok?'ok':'bad'; $(li).textContent=(v.detail||'').slice(0,42)}
+  // surface the local supervisor: a leg reconnecting or permanently failed, in plain words
+  try{const s=await j('/api/state'); const legs=s.legs||{}; const notes=[];
+    for(const n of ['video','voice']){const L=legs[n]; if(!L)continue;
+      if(L.state==='failed')notes.push('⚠ '+n+' failed: '+(L.error||'').slice(0,60));
+      else if(L.state==='restarting'||L.restarts>0)notes.push('↻ '+n+' reconnecting…');}
+    $('m2').textContent=notes.join('   ');
+  }catch(e){}}
 boot();
 </script>
 """
@@ -977,7 +1119,25 @@ def _startup_banner():
     print("=" * 52)
 
 
+def _kill_stale_mesh():
+    """On a clean start, no mesh helper should be running. If a previous run was killed
+    abruptly (crash, force-quit), its EPHEMERAL helper can survive and keep holding the
+    local UDP ports 5000/5002/5004 — which silently breaks the next session's media. Sweep
+    any leftover before we start. Single-instance (the :8765 bind) means we won't kill a
+    sibling app's helper."""
+    name = "netbridge-mesh.exe" if IS_WIN else "netbridge-mesh"
+    try:
+        if IS_WIN:
+            subprocess.run(["taskkill", "/F", "/IM", name],
+                          capture_output=True, **_win_kw())
+        else:
+            subprocess.run(["pkill", "-f", "netbridge-mesh"], capture_output=True)
+    except Exception:
+        pass
+
+
 def main():
+    _kill_stale_mesh()
     _startup_banner()
     st = load_state()
     if not st.get("control_url") and len(sys.argv) > 1:
