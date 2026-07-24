@@ -24,6 +24,9 @@ from .schemas import (EnrollIn, EnrollOut, CommandOut, CommandResultIn,
                       ClaimIn, IssueCommandIn, RolloutCreateIn)
 
 ALLOWED_COMMANDS = {"restart", "reset-clock", "profile", "set-peer", "update", "reboot", "start", "stop", "diagnose", "set-pin", "unlock", "lock"}
+# Commands whose args contain a secret. Their args are scrubbed once the device confirms
+# execution, so a PIN never lives in the fleet database beyond its delivery window.
+PIN_BEARING_COMMANDS = {"set-pin", "unlock"}
 
 app = FastAPI(title="NetBridge Control Plane", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -137,6 +140,12 @@ def command_result(cmd_id: int, body: CommandResultIn,
     c.status = body.status
     c.output = body.output
     c.completed_at = utcnow()
+    # set-pin / unlock carry the PIN in args. The audit log already omits args, but the
+    # Command row kept them in PLAINTEXT FOREVER - so the fleet DB accumulated every PIN
+    # ever issued, contradicting "PINs travel offline; the panel never displays one".
+    # The device has executed it by now, so the value has no further use here: scrub it.
+    if c.type in PIN_BEARING_COMMANDS:
+        c.args = {"_scrubbed": True}
     db.commit()
     return {"ok": True}
 
@@ -240,6 +249,31 @@ def claim_device(device_id: str, body: ClaimIn, actor=Depends(auth.require_admin
     db.commit()
     _audit(db, actor, "claim", "%s -> %s" % (dev.pairing_code or device_id, body.name))
     return _device_view(dev)
+
+
+@app.post("/admin/devices/{device_id}/pin")
+def set_device_pin(device_id: str, body: dict | None = None,
+                   actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
+    """Set or rotate a bridge PIN (walkthrough J4: "Bridge PINs set and rotated here,
+    delivered by you"). Generates a 6-digit PIN unless one is supplied, queues the
+    set-pin command, and returns the PIN EXACTLY ONCE in this response. It is never
+    emailed, never rendered in a device view, and its args are scrubbed from the command
+    row as soon as the device confirms execution."""
+    dev = _scoped_device(db, device_id, actor)
+    pin = str((body or {}).get("pin") or "").strip()
+    if pin:
+        if not (pin.isdigit() and 4 <= len(pin) <= 12):
+            raise HTTPException(400, "pin must be 4-12 digits")
+    else:
+        import secrets as _s
+        pin = "".join(_s.choice("0123456789") for _ in range(6))
+    c = Command(device_id=device_id, type="set-pin", args={"pin": pin})
+    db.add(c)
+    db.commit()
+    # never audit the value itself - only that a rotation happened, and by whom
+    _audit(db, actor, "pin:rotate", dev.name or device_id)
+    return {"command_id": c.id, "pin": pin,
+            "note": "shown once - deliver it to the presenter offline"}
 
 
 @app.post("/admin/devices/{device_id}/commands")

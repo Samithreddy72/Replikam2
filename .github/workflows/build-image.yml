@@ -43,6 +43,8 @@ jobs:
           optimize_image: 'yes'
           commands: |
             IMAGE_VERSION="${{ steps.ver.outputs.version }}" REPLIKAM_REPO=/opt/replikam2 \
+              FLEET_CONTROL_URL="${{ vars.FLEET_CONTROL_URL }}" \
+              FLEET_BOOTSTRAP_TOKEN="${{ secrets.FLEET_BOOTSTRAP_TOKEN }}" \
               bash /opt/replikam2/factory/ci-build-image.sh
 
       # From the arm-runner's single-partition image, derive BOTH fleet artifacts and

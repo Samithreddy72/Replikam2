@@ -203,7 +203,26 @@ log "generalize -> secret-free"
 rm -f  /etc/bridge/agent.token /etc/bridge/setup-wifi-pass /etc/bridge/version
 rm -f  /etc/bridge/bridge-provision.conf /boot/firmware/bridge-provision.conf
 rm -rf /var/lib/tailscale/*                       # no tailnet identity on the card
-rm -f  /etc/default/bridge-agent                  # CONTROL_URL + bootstrap token arrive at flash / first boot
+# Fleet enrolment config. The walkthrough makes two promises that only hold together if
+# this is baked in at BUILD time: J1 "all identical, no per-device config file, no keys to
+# inject" and J4 "the moment a shipped bridge gets internet, it shows up as unclaimed".
+# CONTROL_URL and the bootstrap token are FLEET-wide, not per-device, so writing them here
+# keeps J1 true while making J4 possible. Previously this file was deleted outright, so a
+# shipped card could never enrol on its own and J4 step 1 simply did not happen.
+# Passed in by the workflow: FLEET_CONTROL_URL / FLEET_BOOTSTRAP_TOKEN.
+if [ -n "${FLEET_CONTROL_URL:-}" ]; then
+  log "baking fleet CONTROL_URL into the image ($FLEET_CONTROL_URL)"
+  {
+    printf 'CONTROL_URL=%s\n' "$FLEET_CONTROL_URL"
+    [ -n "${FLEET_BOOTSTRAP_TOKEN:-}" ] && printf 'BOOTSTRAP_TOKEN=%s\n' "$FLEET_BOOTSTRAP_TOKEN"
+  } > /etc/default/bridge-agent
+  chmod 0644 /etc/default/bridge-agent
+else
+  # No fleet configured for this build: ship an EMPTY file, not a missing one. The agent
+  # exits 0 when unprovisioned, and /etc/default/bridge-agent is a /data bind target -
+  # a file bind fails to mount if the target does not exist.
+  printf '# no fleet configured at build time; set CONTROL_URL to enrol\n' > /etc/default/bridge-agent
+fi
 rm -f  /etc/NetworkManager/system-connections/*   # no Wi-Fi PSKs baked in (onboard via setup portal)
 rm -f  /etc/ssh/ssh_host_*                         # regenerated per-device by bridge-regen-hostkeys on first boot
 # fleet-brain is NOT part of the bridge image (it is the separate control plane) — nothing to strip here.
