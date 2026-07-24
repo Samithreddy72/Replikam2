@@ -28,7 +28,13 @@ apt-get install -y --no-install-recommends \
   gcc-12 cpp-12 gcc-12-base libgcc-12-dev \
   network-manager dnsmasq-base rsync ca-certificates curl \
   cloud-guest-utils parted e2fsprogs \
-  rfkill iw
+  rfkill iw \
+  fonts-dejavu-core
+# fonts-dejavu-core: render-idle-frame.py loads DejaVuSans.ttf by absolute path. Raspberry Pi
+# OS Lite ships NO truetype fonts, so the renderer raised FileNotFoundError on every run and
+# the in-camera status card was never re-rendered on the device - the meeting laptop showed
+# the frame baked in at BUILD time (CI has no wifi and no USB host => all three ticks red)
+# while the bridge was actually online and enumerated. Found 2026-07-24 on the client laptop.
 
 # ---------------- Stage 3: pinned kernel 6.12.93 (dwc2 freeze fix) ----------------
 log "pinned kernel $KVER"

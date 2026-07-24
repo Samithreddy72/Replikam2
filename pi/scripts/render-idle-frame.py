@@ -59,6 +59,18 @@ if os.path.exists(OUT):
 
 from PIL import Image, ImageDraw, ImageFont
 
+def _font(path, size):
+    """Never let a missing font stop the card from rendering. This script is the bridge's
+    only voice at the meeting laptop; crashing here froze the card on its build-time frame
+    (three red ticks) while the device was healthy and online."""
+    try:
+        return ImageFont.truetype(path, size)
+    except Exception:
+        try:
+            return ImageFont.load_default(size=size)
+        except TypeError:
+            return ImageFont.load_default()
+
 # Headline must not contradict the ticks. "Bridge X is online" under three red
 # crosses is worse than useless to the person standing at the meeting laptop —
 # it is the bridge's only voice, so it should say what is actually wrong and what
@@ -71,23 +83,23 @@ elif wifi_ok and not net_ok:
     subline = "On Wi-Fi, but it can't reach the internet"
 else:
     headline = "Bridge %s needs Wi-Fi" % code
-    subline = "Join “BridgeSetup-BRIDGE-%s” from your phone to set it up" % code
+    subline = "Join “BridgeSetup-%s” from your phone to set it up" % code
 
 img = Image.new("RGB", (W, H), (17, 24, 21))          # --screen #111815
 d = ImageDraw.Draw(img)
-brand   = ImageFont.truetype(FONT, 18)
-title   = ImageFont.truetype(FONTB, 32)
-msg     = ImageFont.truetype(FONT, 22)
-checks  = ImageFont.truetype(FONT, 22)
+brand   = _font(FONT, 18)
+title   = _font(FONTB, 32)
+msg     = _font(FONT, 22)
+checks  = _font(FONT, 22)
 
 def fit(path, size, text, max_w=W - 32):
     """Shrink until the line actually fits the frame. Without this, any message
     longer than the original ones runs off both edges — which is exactly what the
     'needs Wi-Fi' line did, and it is unreadable precisely when it matters most."""
-    f = ImageFont.truetype(path, size)
+    f = _font(path, size)
     while size > 11 and d.textlength(text, font=f) > max_w:
         size -= 1
-        f = ImageFont.truetype(path, size)
+        f = _font(path, size)
     return f
 
 def center(y, text, font, fill):
