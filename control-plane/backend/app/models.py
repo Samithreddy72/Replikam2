@@ -24,6 +24,11 @@ class Device(Base):
     version: Mapped[str | None] = mapped_column(String, nullable=True)
     tailscale_ip: Mapped[str | None] = mapped_column(String, nullable=True)
     token_hash: Mapped[str | None] = mapped_column(String, nullable=True)  # sha256 of device token
+    # Setup-AP passphrase, reported by the agent on the authenticated channel. Kept in its
+    # OWN column and stripped from the telemetry blob, so it is never part of `latest` (which
+    # every device view returns) nor of the retained Telemetry history. This is what makes a
+    # label reprintable after a reflash regenerates it (build-ledger E1).
+    setup_pass: Mapped[str | None] = mapped_column(String, nullable=True)
     last_seen: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     latest: Mapped[dict | None] = mapped_column(JSON, nullable=True)        # most recent telemetry blob
     # One-time provisioning payload (secret-at-claim flow, docs/PROVISIONING-V2.md):

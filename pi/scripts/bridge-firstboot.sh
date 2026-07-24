@@ -66,6 +66,29 @@ EOF
 chmod 600 /etc/default/bridge-agent
 echo "${BRIDGE_VERSION:-dev}" >/etc/bridge/version
 
+# 2a. Per-device hostname. Every card ships as "raspberrypi", so putting two bridges on
+# one venue LAN collides on mDNS (both claim raspberrypi.local), makes the router's client
+# list useless, and gives arbitrary numeric suffixes on the tailnet - MAIN already shows up
+# as "bridge-001-1" for exactly this reason. Name it after the pairing code, which is the
+# same identifier printed on the label and shown in the fleet panel, so the device is
+# recognisable everywhere by one name: netbridge-2626.local, netbridge-2626 on the tailnet.
+PC="$(cat /etc/bridge/pairing-code 2>/dev/null || true)"
+if [ -z "${PC:-}" ]; then
+  SER="$(awk -F': *' '/^Serial/{print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
+  [ -n "${SER:-}" ] && PC="$(printf '%s' "$SER" | sha256sum | cut -c1-4 | tr 'a-f' 'A-F')"
+fi
+if [ -n "${PC:-}" ]; then
+  NEWHOST="netbridge-${PC}"
+  if [ "$(hostname)" != "$NEWHOST" ]; then
+    hostnamectl set-hostname "$NEWHOST" 2>/dev/null \
+      || { echo "$NEWHOST" >/etc/hostname 2>/dev/null; hostname "$NEWHOST" 2>/dev/null; }
+    # keep /etc/hosts consistent or sudo warns "unable to resolve host" on every call
+    sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$NEWHOST/" /etc/hosts 2>/dev/null \
+      || printf '127.0.1.1\t%s\n' "$NEWHOST" >>/etc/hosts 2>/dev/null || true
+    log "hostname -> $NEWHOST"
+  fi
+fi
+
 # 2b. setup-AP passphrase. NOT written here any more: it is derived per device from the
 # CPU serial by bridge-derive-pass, which every consumer calls. Writing a value here was
 # how "bridge2626" became a FLEET-WIDE shared passphrase - one leaked label would have

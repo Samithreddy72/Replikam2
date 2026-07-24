@@ -51,6 +51,10 @@ def _migrate():
             conn.execute(_text("ALTER TABLE users ADD COLUMN org_id VARCHAR DEFAULT 'default'"))
         if "audit_log" in insp.get_table_names() and "org_id" not in cols("audit_log"):
             conn.execute(_text("ALTER TABLE audit_log ADD COLUMN org_id VARCHAR DEFAULT 'default'"))
+        # Setup-AP passphrase column (build-ledger E1) on existing fleet databases.
+        if "devices" in insp.get_table_names():
+            if "setup_pass" not in cols("devices"):
+                conn.execute(_text("ALTER TABLE devices ADD COLUMN setup_pass VARCHAR"))
         # M6 magic-link sign-in: one-time login code on the user row.
         if "users" in insp.get_table_names():
             ucols = cols("users")
@@ -103,6 +107,12 @@ def enroll(body: EnrollIn, db: Session = Depends(get_db)):
 def telemetry(body: dict, dev: Device = Depends(auth.require_device),
               db: Session = Depends(get_db)):
     now = utcnow()
+    # Strip the label secret out of the blob FIRST: `latest` is returned by every device
+    # view and the blob is also written to the retained Telemetry table. It belongs in its
+    # own column, read back only through /admin/devices/{id}/label.
+    sp = body.pop("setup_pass", None)
+    if sp:
+        dev.setup_pass = sp
     dev.last_seen = now
     dev.latest = body
     if body.get("version"):
@@ -245,10 +255,43 @@ def claim_device(device_id: str, body: ClaimIn, actor=Depends(auth.require_admin
     if body.provision is not None:
         # Secret-at-claim: stage the one-time configure payload. The device's
         # next GET /v1/provision returns it once and the server forgets it.
-        dev.provision = body.provision
+        prov = dict(body.provision)
+        # Name the tailnet node too. Without this every bridge joins as "raspberrypi"
+        # and Tailscale de-duplicates with -1/-2 suffixes, so a fleet of bridges is
+        # unidentifiable on the mesh. Use the pairing code - the same identifier on the
+        # label, in the SSID and in this panel.
+        if prov.get("tailscale_auth_key") and not prov.get("tailscale_hostname"):
+            code = (dev.pairing_code or "").replace("BRIDGE-", "").strip()
+            if code:
+                prov["tailscale_hostname"] = "netbridge-%s" % code
+        dev.provision = prov
     db.commit()
     _audit(db, actor, "claim", "%s -> %s" % (dev.pairing_code or device_id, body.name))
     return _device_view(dev)
+
+
+@app.get("/admin/devices/{device_id}/label")
+def device_label(device_id: str, actor=Depends(auth.require_admin),
+                 db: Session = Depends(get_db)):
+    """Everything needed to print (or REPRINT) a device's setup label — walkthrough J1
+    step 3, build-ledger E1.
+
+    The passphrase is random per device and lives on the device; a reflash wipes /data and
+    the device generates+reports a NEW one. Without this endpoint that would silently
+    invalidate a label already stuck on the box, with no way to recover it. Admin-only, and
+    deliberately a separate call from the device views so the secret is never returned by a
+    routine fleet listing."""
+    dev = _scoped_device(db, device_id, actor)
+    _audit(db, actor, "label:read", dev.name or dev.pairing_code or device_id)
+    return {
+        "device_id": dev.id,
+        "pairing_code": dev.pairing_code,
+        "name": dev.name,
+        "ssid": "BridgeSetup-%s" % (dev.pairing_code or "").replace("BRIDGE-", ""),
+        "password": dev.setup_pass,
+        "note": ("device has not reported its passphrase yet"
+                 if not dev.setup_pass else "reprintable - reflashing regenerates it"),
+    }
 
 
 @app.post("/admin/devices/{device_id}/pin")
