@@ -1,0 +1,105 @@
+name: build presenter app
+
+# Builds NetBridge Source for macOS and Windows and attaches both to a release.
+#
+# PyInstaller cannot cross-compile, so each binary must be produced on its own OS. Running
+# this on GitHub's macos and windows runners is what makes a Windows build possible without
+# owning a Windows machine.
+#
+# The artifacts are NOT code-signed — that needs a paid Apple account and an EV certificate.
+# Recipients get one OS prompt on first run; see the README next to the app.
+
+on:
+  push:
+    tags: ["app-v*"]
+  workflow_dispatch:
+    inputs:
+      bundle_ffmpeg:
+        description: "bundle ffmpeg into the binary (bigger, but the user installs nothing)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false          # a Windows failure must not hide a good macOS build
+      matrix:
+        include:
+          - os: macos-latest
+            asset: NetBridgeSource-macos-arm64
+            bin: NetBridgeSource
+          - os: windows-latest
+            asset: NetBridgeSource-windows-x64
+            bin: NetBridgeSource.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Build
+        working-directory: app/netbridge-source
+        run: python build.py ${{ (github.event.inputs.bundle_ffmpeg == 'false') && '--no-ffmpeg' || '' }}
+
+      # Prove the binary at least starts and serves before publishing it. A build that
+      # produces a file which crashes on launch is worse than a failed build: it looks
+      # shippable. This does not need a camera — only the local HTTP server.
+      - name: Smoke test (macOS)
+        if: runner.os == 'macOS'
+        working-directory: app/netbridge-source
+        run: |
+          ./dist/NetBridgeSource &
+          for i in $(seq 1 20); do
+            curl -sf -m 2 http://127.0.0.1:8765/api/state >/dev/null && { echo "app responds"; exit 0; }
+            sleep 1
+          done
+          echo "app did not answer on :8765"; exit 1
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        working-directory: app/netbridge-source
+        shell: pwsh
+        run: |
+          Start-Process -FilePath ".\dist\NetBridgeSource.exe"
+          for ($i=0; $i -lt 20; $i++) {
+            try {
+              Invoke-WebRequest -Uri http://127.0.0.1:8765/api/state -TimeoutSec 2 -UseBasicParsing | Out-Null
+              Write-Host "app responds"; exit 0
+            } catch { Start-Sleep -Seconds 1 }
+          }
+          Write-Error "app did not answer on :8765"; exit 1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: app/netbridge-source/dist/${{ matrix.bin }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/app-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {path: artifacts}
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd artifacts
+          # One zip per platform: a bare .exe/binary download is often blocked by browsers
+          # and mail filters, and zipping preserves the executable bit on macOS.
+          for d in */; do (cd "$d" && zip -r "../${d%/}.zip" .); done
+          gh release create "${GITHUB_REF_NAME}" ./*.zip \
+            --repo "${{ github.repository }}" \
+            --title "NetBridge Source ${GITHUB_REF_NAME}" \
+            --notes "Unsigned builds — see app/netbridge-source/README.md for the one-time OS prompt on each platform."
