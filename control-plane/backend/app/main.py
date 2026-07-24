@@ -252,10 +252,27 @@ def claim_device(device_id: str, body: ClaimIn, actor=Depends(auth.require_admin
     dev.name = body.name
     if dev.claimed_at is None:
         dev.claimed_at = utcnow()
-    if body.provision is not None:
-        # Secret-at-claim: stage the one-time configure payload. The device's
-        # next GET /v1/provision returns it once and the server forgets it.
-        prov = dict(body.provision)
+    prov = dict(body.provision) if body.provision is not None else {}
+    # "Claiming binds it to your org, names it, AND ISSUES ITS MESH-NETWORK KEY. That's the
+    # whole enrollment ceremony." (walkthrough J4 step 2). Until now claim only passed
+    # through whatever an admin hand-made, so every bridge needed a key minted by hand -
+    # the ceremony was three steps, not one. Mint it here when the fleet has mesh
+    # configured and the caller did not supply one.
+    if not prov.get("tailscale_auth_key"):
+        from . import mesh
+        try:
+            minted = mesh.mint_ephemeral_key(
+                "netbridge bridge %s" % (dev.pairing_code or device_id),
+                tags=[t.strip() for t in settings.ts_bridge_tag.split(",") if t.strip()])
+            if minted.get("key"):
+                prov["tailscale_auth_key"] = minted["key"]
+        except mesh.MeshNotConfigured:
+            pass          # no TS credential on this fleet: claim still works, just no mesh
+        except Exception as e:
+            # Never fail a claim because the tailnet is unreachable - the device is claimed
+            # either way and can be given a key later.
+            _audit(db, actor, "claim:mesh-mint-failed", str(e)[:120])
+    if prov:
         # Name the tailnet node too. Without this every bridge joins as "raspberrypi"
         # and Tailscale de-duplicates with -1/-2 suffixes, so a fleet of bridges is
         # unidentifiable on the mesh. Use the pairing code - the same identifier on the

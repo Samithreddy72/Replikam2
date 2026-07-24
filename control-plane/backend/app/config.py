@@ -39,6 +39,10 @@ class Settings:
     ts_api_key = os.getenv("TS_API_KEY", "")                # Tailscale API key / OAuth access token
     ts_tailnet = os.getenv("TS_TAILNET", "")                # e.g. taile564ff.ts.net; "" -> the key's default tailnet
     ts_source_tag = os.getenv("TS_SOURCE_TAG", "tag:nb-source")  # tag applied to app nodes; the tailnet ACL scopes it to bridges only
+    # Tag applied to BRIDGES when claim mints their mesh key. Distinct from the source
+    # tag on purpose: the tailnet ACL grants tag:source -> tag:bridge on the media and
+    # control ports only, so a leaked presenter key can never impersonate a bridge.
+    ts_bridge_tag = os.getenv("TS_BRIDGE_TAG", "tag:bridge")
     ts_key_ttl_s = int(os.getenv("TS_KEY_TTL_S", "600"))    # how long the minted KEY is valid to join (seconds)
     ts_login_server = os.getenv("TS_LOGIN_SERVER", "https://login.tailscale.com")  # control server (Headscale-friendly)
 
