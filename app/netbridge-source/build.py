@@ -80,9 +80,119 @@ def fetch_ffmpeg(dest: pathlib.Path) -> pathlib.Path | None:
     return None
 
 
+# The exact elements our return-audio pipeline uses. Bundling only the plugins that
+# back these keeps the payload ~20MB instead of shipping all of GStreamer.
+GST_ELEMENTS = ["udpsrc", "rtpjitterbuffer", "rtpopusdepay", "opusdec",
+                "audioconvert", "audioresample", "autoaudiosink"] + (
+                ["osxaudiosink"] if IS_MAC else ["wasapisink", "directsoundsink"])
+
+
+def _macho_deps(path):
+    try:
+        out = subprocess.run(["otool", "-L", path], capture_output=True,
+                             text=True, timeout=15).stdout
+    except Exception:
+        return []
+    deps = []
+    for line in out.splitlines()[1:]:
+        lib = line.strip().split(" (")[0]
+        if lib.startswith(("/opt/", "/usr/local/")):    # never system libs from /usr/lib
+            deps.append(lib)
+    return deps
+
+
+def bundle_gstreamer(dest: pathlib.Path):
+    """Copy gst-launch-1.0, the plugins we use, and their whole dylib closure.
+
+    The walkthrough promises the presenter installs nothing ("the app brings
+    everything"), and return audio needs GStreamer - so it has to travel with the app.
+
+    The subtle part is dylib RELOCATION. Homebrew libraries reference each other by
+    ABSOLUTE path, so simply copying them produces a bundle that works on this machine
+    (where /opt/homebrew exists) and fails on a clean one. Every install name is rewritten
+    to @loader_path, and build.py then verifies with DYLD_PRINT_LIBRARIES that nothing
+    outside the bundle is loaded - because that failure is invisible to any test run here.
+    """
+    if IS_WIN:
+        # Windows DLLs resolve from the exe's directory, so bundling there is simpler than
+        # macOS relocation - but it needs a GStreamer install on the build runner to copy
+        # from, which the CI image does not have. Until that is added the Windows build
+        # falls back to ffmpeg for return audio, which is audible but not jitter-buffered.
+        log("Windows GStreamer bundling not implemented — return audio uses the ffmpeg fallback")
+        return None
+    gst = shutil.which("gst-launch-1.0")
+    if not gst:
+        log("gst-launch-1.0 not found on this machine — cannot bundle it")
+        return None
+
+    libdir = dest / "gst"
+    plugdir = libdir / "plugins"
+    plugdir.mkdir(parents=True, exist_ok=True)
+
+    # locate the plugin .dylib backing each element
+    plugins = set()
+    for el in GST_ELEMENTS:
+        try:
+            out = subprocess.run(["gst-inspect-1.0", el], capture_output=True,
+                                 text=True, timeout=15).stdout
+        except Exception:
+            continue
+        for line in out.splitlines():
+            if "Filename" in line:
+                plugins.add(line.split()[-1]); break
+    if not plugins:
+        log("could not resolve any GStreamer plugins — skipping")
+        return None
+
+    # walk the closure
+    seen, queue = {}, [gst] + sorted(plugins)
+    while queue:
+        src = queue.pop()
+        if not src or src in seen or not os.path.exists(src):
+            continue
+        seen[src] = True
+        queue.extend(_macho_deps(src))
+
+    copied = {}
+    for src in seen:
+        tgt = (plugdir if src in plugins else libdir) / os.path.basename(src)
+        if src == gst:
+            tgt = libdir / "gst-launch-1.0"
+        if not tgt.exists():
+            shutil.copy2(src, tgt)
+            tgt.chmod(0o755)
+        copied[src] = tgt
+
+    # rewrite every absolute reference to @loader_path so the bundle is self-contained
+    for src, tgt in copied.items():
+        subprocess.run(["install_name_tool", "-id", "@loader_path/" + tgt.name, str(tgt)],
+                       capture_output=True)
+        for dep in _macho_deps(src):
+            if dep in copied:
+                rel = ("@loader_path/../" + copied[dep].name
+                       if tgt.parent == plugdir else "@loader_path/" + copied[dep].name)
+                subprocess.run(["install_name_tool", "-change", dep, rel, str(tgt)],
+                               capture_output=True)
+    # RE-SIGN. install_name_tool invalidates the existing signature, and Apple Silicon
+    # kills any binary whose signature does not match - the process dies with SIGKILL
+    # (exit 137) and prints NOTHING, so it looks like a silent no-op rather than a
+    # signing problem. Ad-hoc (-s -) is enough to make the loader accept it.
+    if IS_MAC:
+        for tgt in copied.values():
+            subprocess.run(["codesign", "--force", "--sign", "-", str(tgt)],
+                           capture_output=True)
+        log("re-signed %d binaries (ad-hoc) after relocation" % len(copied))
+
+    total = sum(os.path.getsize(t) for t in copied.values())
+    log("bundled GStreamer: %d files, %.1f MB" % (len(copied), total / 1e6))
+    return libdir / "gst-launch-1.0"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-ffmpeg", action="store_true", help="do not bundle ffmpeg")
+    ap.add_argument("--no-gst", action="store_true",
+                    help="do not bundle GStreamer (return audio then needs one on PATH)")
     args = ap.parse_args()
 
     try:
@@ -92,16 +202,22 @@ def main():
         return 1
 
     ff = None if args.no_ffmpeg else fetch_ffmpeg(HERE / "_bundle")
+    gstdir = None if args.no_gst else bundle_gstreamer(HERE / "_bundle")
 
     name = "NetBridgeSource"
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
            "--onefile", "--name", name,
            "--distpath", str(DIST), "--workpath", str(WORK),
            "--specpath", str(WORK)]
+    sep = ";" if IS_WIN else ":"
     if ff:
         # --add-binary lands it next to the extracted app; _ffmpeg() looks there first.
-        sep = ";" if IS_WIN else ":"
         cmd += ["--add-binary", "%s%s." % (ff, sep)]
+    if gstdir:
+        # Ship the whole gst/ tree (binary + libs + plugins). --add-data keeps the layout,
+        # which matters because the dylibs reference each other via @loader_path and the
+        # plugins sit one level down in plugins/.
+        cmd += ["--add-data", "%s%sgst" % (gstdir.parent, sep)]
     if IS_MAC:
         # A .app bundle is what macOS users expect to double-click. The onefile binary
         # still works from a terminal, and is what CI zips.

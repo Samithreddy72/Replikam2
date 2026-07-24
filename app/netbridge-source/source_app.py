@@ -97,11 +97,32 @@ def _ffmpeg():
 
 
 def _gst():
+    """Path to gst-launch-1.0 — the bundled copy if we shipped one, else the system's."""
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
-    local = os.path.join(base, "gst-launch-1.0.exe" if IS_WIN else "gst-launch-1.0")
-    if os.path.isfile(local) and os.access(local, os.X_OK):
-        return local
+    for cand in (os.path.join(base, "gst", "gst-launch-1.0.exe" if IS_WIN else "gst-launch-1.0"),
+                 os.path.join(base, "gst-launch-1.0.exe" if IS_WIN else "gst-launch-1.0")):
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
     return shutil.which("gst-launch-1.0")
+
+
+def _gst_env():
+    """Environment for the bundled GStreamer.
+
+    A relocated GStreamer cannot find its own plugins: the registry paths are baked in at
+    ITS build time and point at wherever it was compiled. Without these two variables the
+    binary starts fine and then fails with "no element udpsrc", which reads like a broken
+    install rather than a missing search path.
+    """
+    env = dict(os.environ)
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    plug = os.path.join(base, "gst", "plugins")
+    if os.path.isdir(plug):
+        env["GST_PLUGIN_PATH"] = plug
+        env["GST_PLUGIN_SYSTEM_PATH_1_0"] = plug
+        # a stale registry from another install would shadow the bundle
+        env["GST_REGISTRY"] = os.path.join(str(_logdir()), "gst-registry.bin")
+    return env
 
 
 def _logdir():
@@ -207,8 +228,10 @@ class Session:
 
     def __init__(self):
         self.procs = []
+        self.logs = []
         self.bridge = None
         self.return_port = 5004
+        self.return_player = "none"
 
     @property
     def live(self):
@@ -258,16 +281,58 @@ class Session:
             self.logs.append(lf)
             self.procs.append(subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=lf))
 
+        self.return_player = self._start_return(return_port)
+
+    def _start_return(self, port):
+        """Play the meeting room's audio back. Returns a label for what is playing it.
+
+        GStreamer first: rtpjitterbuffer holds ~250ms and releases at a steady rate, which
+        is what makes WiFi-jittered return audio listenable. ffmpeg is the fallback so a
+        presenter who only has the bundled binary still HEARS the room instead of silence
+        - it has no equivalent jitter buffer, so expect it to be rougher.
+
+        Returning a label matters: previously a missing GStreamer meant this block was
+        skipped entirely, with no error and no sound. Silence that looks like success is
+        the worst outcome here, because the presenter cannot tell it from a quiet room.
+        """
+        caps = ("application/x-rtp,media=audio,encoding-name=OPUS,"
+                "payload=97,clock-rate=48000")
         gst = _gst()
         if gst:
-            caps = ("application/x-rtp,media=audio,encoding-name=OPUS,"
-                    "payload=97,clock-rate=48000")
+            try:
+                self.procs.append(subprocess.Popen(
+                    [gst, "-q", "udpsrc", "port=%d" % port, "caps=" + caps, "!",
+                     "rtpjitterbuffer", "latency=250", "do-lost=true", "!",
+                     "rtpopusdepay", "!", "opusdec", "plc=true", "use-inband-fec=true", "!",
+                     "audioconvert", "!", "audioresample", "!", "autoaudiosink", "sync=false"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_gst_env()))
+                return "gstreamer"
+            except Exception:
+                pass
+
+        # ffmpeg fallback. Receiving RTP needs an SDP describing the stream; ffmpeg cannot
+        # infer Opus/48k/stereo from the packets alone.
+        sdp = ("v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=NetBridge return\r\n"
+               "c=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio %d RTP/AVP 97\r\n"
+               "a=rtpmap:97 opus/48000/2\r\n" % port)
+        sdp_path = os.path.join(str(_logdir()), "return.sdp")
+        try:
+            with open(sdp_path, "w") as f:
+                f.write(sdp)
+        except Exception:
+            return "none"
+        out = ["-f", "audiotoolbox", "-"] if IS_MAC else (["-f", "sdl", "NetBridge return"]
+                                                          if IS_WIN else ["-f", "alsa", "default"])
+        try:
+            lf = open(os.path.join(str(_logdir()), "netbridge-source-return.log"), "w")
+            self.logs.append(lf)
             self.procs.append(subprocess.Popen(
-                [gst, "-q", "udpsrc", "port=%d" % return_port, "caps=" + caps, "!",
-                 "rtpjitterbuffer", "latency=250", "do-lost=true", "!",
-                 "rtpopusdepay", "!", "opusdec", "plc=true", "use-inband-fec=true", "!",
-                 "audioconvert", "!", "audioresample", "!", "autoaudiosink", "sync=false"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+                [_ffmpeg(), "-hide_banner", "-loglevel", "warning",
+                 "-protocol_whitelist", "file,udp,rtp", "-i", sdp_path] + out,
+                stdout=subprocess.DEVNULL, stderr=lf))
+            return "ffmpeg"
+        except Exception:
+            return "none"
 
     def stop(self):
         for p in self.procs:
@@ -428,8 +493,15 @@ class Handler(BaseHTTPRequestHandler):
             SESSION.start(host, vidx, aidx, return_port=port)
             st.update({"bridge_host": host, "camera_name": vname, "mic_name": aname})
             save_state(st)
+            player = SESSION.return_player
             return self._send({"ok": True, "camera": vname, "mic": aname,
-                               "return_peer": me, "return_port": port, "peer_result": peer})
+                               "return_peer": me, "return_port": port, "peer_result": peer,
+                               "return_player": player,
+                               "return_note": {
+                                   "gstreamer": "room audio: GStreamer (best — jitter-buffered)",
+                                   "ffmpeg": "room audio: ffmpeg fallback — install GStreamer for smoother playback",
+                                   "none": "NO ROOM AUDIO — neither GStreamer nor ffmpeg could start a player",
+                               }.get(player, player)})
 
         if self.path == "/api/stop":
             SESSION.stop()
@@ -560,7 +632,9 @@ async function golive(){
   const r=await j('/api/golive',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({host:h,camera_name:$('cam').value,mic_name:$('mic').value})});
   if(r._error){$('m2').textContent=r._error;return}
-  $('m2').textContent=`live · ${r.camera} · ${r.mic} · room returns to ${r.return_peer}:${r.return_port}`;
+  const warn = r.return_player!=='gstreamer';
+  $('m2').innerHTML=`live · ${r.camera} · ${r.mic}<br>`+
+    `<span style="color:${warn?'var(--red)':'var(--ok)'}">${r.return_note||''}</span>`;
   setLive(true); poll()}
 async function poll(){
   const h=host(); if(!h)return; const c=await j('/api/checks?host='+h); if(c._error)return;
