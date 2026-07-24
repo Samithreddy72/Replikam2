@@ -54,3 +54,29 @@ done
 
 if [ "$FAIL" = 0 ]; then echo "== preflight: PASS =="; else
   echo "== preflight: FAILED — refusing to publish an image missing its own runtime deps =="; exit 1; fi
+
+# ---- read-only-root config trap -------------------------------------------------
+# Four separate bugs this week were the same shape: a script writes a config file to a
+# path on the READ-ONLY root, the write fails silently, and the feature is simply dead
+# (set-peer, fleet claiming, dnsmasq leases, resolv.conf). Fail the build if a shipped
+# script writes to a config path that is not backed by /data.
+echo "== preflight: read-only config writes =="
+_writable="/data /etc/bridge /var/lib/tailscale /etc/NetworkManager/system-connections
+/var/log/journal /home/pi/diagnostics /tmp /run /var/tmp /var/lib/misc /var/cache
+/var/spool /var/lib/systemd /var/lib/dhcp /etc/default/bridge-agent
+/etc/default/bridge-net /etc/default/bridge-return-audio"
+_bad=0
+for _f in "$ROOT"/usr/local/bin/*; do
+  [ -f "$_f" ] || continue
+  grep -ohE '(>>?|tee -?a?)[[:space:]]*"?(/etc|/var|/usr|/home|/boot)[a-zA-Z0-9._/-]*' "$_f" 2>/dev/null \
+   | sed -E 's/^(>>?|tee -?a?)[[:space:]]*//; s/^"//' | sort -u | while read -r _p; do
+      _ok=0
+      for _w in $_writable; do case "$_p" in "$_w"*) _ok=1;; esac; done
+      [ "$_ok" = 0 ] && echo "  READ-ONLY WRITE: $(basename "$_f") -> $_p"
+    done
+done | tee /tmp/_ro_writes.txt
+if [ -s /tmp/_ro_writes.txt ]; then
+  echo "FATAL: script(s) write config to the read-only root; bind the path to /data first"
+  exit 1
+fi
+echo "  no read-only config writes"

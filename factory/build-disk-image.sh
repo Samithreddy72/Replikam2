@@ -192,6 +192,11 @@ tmpfs  /var/spool               tmpfs  defaults,noatime,nosuid,nodev,size=8M   0
 # COULD NEVER WORK on any read-only image. Bind the single file onto /data. Found 2026-07-24
 # during the first end-to-end video test (set-peer returned ok=false, peer stayed "?").
 /data/config/bridge-return-audio  /etc/default/bridge-return-audio  none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
+# Same read-only trap, swept systematically. bridge-agent is the PROVISIONING file:
+# claiming a device writes CONTROL_URL + BOOTSTRAP_TOKEN here, so on a read-only card the
+# entire fleet-claim flow failed exactly the way set-peer did - silently.
+/data/config/bridge-agent  /etc/default/bridge-agent  none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
+/data/config/bridge-net    /etc/default/bridge-net    none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
 FSTAB
   # read-only overlay root (safe: /data holds writes) + remount-fs masked (fails under overlay)
   install -d "$mp/etc"
@@ -200,6 +205,11 @@ FSTAB
   [ -f "$mp/etc/default/bridge-return-audio" ] || \
     printf '# speaker-return destination (the remote peer)\nRETURN_DEST_IP=\nRETURN_DEST_PORT=5004\n' \
       > "$mp/etc/default/bridge-return-audio"
+  for _d in bridge-agent bridge-net; do
+    [ -f "$mp/etc/default/$_d" ] || printf '# managed on /data (read-only root)\n' > "$mp/etc/default/$_d"
+  done
+  # the soak log also lived on the read-only root, next to flight.txt
+  ln -sf /data/soak.log "$mp/home/pi/soak.log"
   echo 'overlayroot="tmpfs:recurse=0"' > "$mp/etc/overlayroot.conf"
   # DNS on a read-only root. /etc/resolv.conf MUST be a real readable file at boot: dnsmasq
   # reads it when the setup AP starts, and a missing/dangling one makes wifi-connect abort so
@@ -250,6 +260,10 @@ install -d "$MNT/p4"/log-journal
 touch "$MNT/p4"/flight.txt
 printf '# speaker-return destination (the remote peer)\nRETURN_DEST_IP=\nRETURN_DEST_PORT=5004\n' \
   > "$MNT/p4"/config/bridge-return-audio
+for _d in bridge-agent bridge-net; do
+  printf '# managed on /data (read-only root)\n' > "$MNT/p4/config/$_d"
+done
+touch "$MNT/p4"/soak.log
 install -d "$MNT/p4"/config "$MNT/p4"/config/nm-connections "$MNT/p4"/etc-bridge \
            "$MNT/p4"/diagnostics "$MNT/p4"/tailscale
 install -d -o 1000 -g 1000 "$MNT/p4"/fleet-brain 2>/dev/null || install -d "$MNT/p4"/fleet-brain

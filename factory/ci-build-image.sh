@@ -140,6 +140,15 @@ for _g in video gpio i2c spi input render; do
 done
 id pi 2>/dev/null || true
 
+# Passwordless sudo for pi. Raspberry Pi OS ships /etc/sudoers.d/010_pi-nopasswd; this CI
+# image did not, so every privileged action bridge-web performs as User=pi died on `sudo -n`
+# - including /api/set-peer, i.e. the app's GO LIVE button, and bridge-pin. The failure was
+# invisible: the endpoint returned ok=false with changed=true and the UI read it as success.
+log "passwordless sudo for pi (raspios default; bridge-web depends on it)"
+printf 'pi ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/010_pi-nopasswd
+chmod 0440 /etc/sudoers.d/010_pi-nopasswd
+visudo -c -f /etc/sudoers.d/010_pi-nopasswd || { echo "FATAL: bad sudoers file"; exit 1; }
+
 # ---------------- Stage 5b: WiFi setup portal binary (balena wifi-connect) ----------
 # bridge-wifi-portal.service needs NetworkManager + dnsmasq-base + this binary. Without
 # it the portal loops on "wifi-connect: not found" and the setup AP NEVER appears, so a
