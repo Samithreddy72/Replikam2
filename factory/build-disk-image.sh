@@ -230,7 +230,13 @@ RESOLV
   echo "$VERSION" > "$mp/etc/netbridge-image-version"
   # GENERALIZE (defence in depth; rootfs should already be secret-free)
   rm -f "$mp"/etc/ssh/ssh_host_* 2>/dev/null || true          # per-device, regen on first boot
-  rm -f "$mp/etc/default/bridge-agent" 2>/dev/null || true    # provision writes it
+  # Preserve the fleet config ci-build-image.sh baked in BEFORE removing it from the
+  # read-only root. It must be re-seeded into /data/config/bridge-agent (the bind SOURCE)
+  # below, or a flashed card boots with an EMPTY /etc/default/bridge-agent and never enrols
+  # — the exact defect where a fresh card stayed "raspberrypi" and unclaimed forever.
+  mkdir -p "${TMPDIR:-/tmp}/nb-seed"
+  cp "$mp/etc/default/bridge-agent" "${TMPDIR:-/tmp}/nb-seed/bridge-agent" 2>/dev/null || true
+  rm -f "$mp/etc/default/bridge-agent" 2>/dev/null || true    # provision (below) re-seeds it on /data
   # bind mountpoints must exist + be empty (their content lives on /data)
   install -d "$mp/etc/bridge" "$mp/var/lib/tailscale" \
              "$mp/etc/NetworkManager/system-connections" "$mp/home/pi/diagnostics" \
@@ -265,9 +271,16 @@ install -d "$MNT/p4"/config "$MNT/p4"/config/nm-connections "$MNT/p4"/etc-bridge
 touch "$MNT/p4"/flight.txt
 printf '# speaker-return destination (the remote peer)\nRETURN_DEST_IP=\nRETURN_DEST_PORT=5004\n' \
   > "$MNT/p4"/config/bridge-return-audio
-for _d in bridge-agent bridge-net; do
-  printf '# managed on /data (read-only root)\n' > "$MNT/p4/config/$_d"
-done
+# Seed the /data bind SOURCE for bridge-agent with the fleet config baked at build time
+# (captured just before it was stripped from the root). This is what lets a freshly-flashed
+# card enrol on its own — J4 step 1. Fall back to the plain comment for an unprovisioned build.
+if [ -s "${TMPDIR:-/tmp}/nb-seed/bridge-agent" ]; then
+  cp "${TMPDIR:-/tmp}/nb-seed/bridge-agent" "$MNT/p4/config/bridge-agent"
+  log "data: seeded bridge-agent config from the baked fleet CONTROL_URL"
+else
+  printf '# managed on /data (read-only root)\n' > "$MNT/p4/config/bridge-agent"
+fi
+printf '# managed on /data (read-only root)\n' > "$MNT/p4/config/bridge-net"
 touch "$MNT/p4"/soak.log
 install -d -o 1000 -g 1000 "$MNT/p4"/fleet-brain 2>/dev/null || install -d "$MNT/p4"/fleet-brain
 # secret-free fleet-brain env template (real secrets arrive at claim; DB lives on /data)
