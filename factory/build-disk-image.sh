@@ -236,7 +236,11 @@ RESOLV
   # — the exact defect where a fresh card stayed "raspberrypi" and unclaimed forever.
   mkdir -p "${TMPDIR:-/tmp}/nb-seed"
   cp "$mp/etc/default/bridge-agent" "${TMPDIR:-/tmp}/nb-seed/bridge-agent" 2>/dev/null || true
-  rm -f "$mp/etc/default/bridge-agent" 2>/dev/null || true    # provision (below) re-seeds it on /data
+  # KEEP the file as an EMPTY bind-mount TARGET — do NOT delete it. /data/config/bridge-agent
+  # is bound onto it, and a FILE bind-mount SILENTLY FAILS (nofail) when its target is missing,
+  # which left the agent with no CONTROL_URL so NO flashed card ever self-enrolled. Truncating
+  # (not removing) keeps a valid mountpoint whose content the /data source supplies at boot.
+  : > "$mp/etc/default/bridge-agent"
   # bind mountpoints must exist + be empty (their content lives on /data)
   install -d "$mp/etc/bridge" "$mp/var/lib/tailscale" \
              "$mp/etc/NetworkManager/system-connections" "$mp/home/pi/diagnostics" \
