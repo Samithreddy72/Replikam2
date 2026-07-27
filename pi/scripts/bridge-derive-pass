@@ -1,47 +1,33 @@
 #!/bin/sh
-# The device's setup-AP passphrase — the one printed on the label (walkthrough J1 step 3,
-# build-ledger E1: "Random per-device setup Wi-Fi password (was derivable from the SSID)").
+# The device's setup-AP passphrase — the one printed on the label (walkthrough J1 step 3).
 #
-# RANDOM, not derived. An earlier version of this script derived it from the CPU serial so
-# it would survive a reflash. That was wrong: Pi serials are not random (the leading half is
-# near-constant, so ~32 bits of real entropy) and the SSID publishes sha256(serial)[:4], so a
-# known SSID narrows the passphrase to ~65,536 candidates — testable OFFLINE in seconds from
-# one captured WPA2 handshake. That is exactly the "derivable from the SSID" defect E1 exists
-# to kill, so we are back to real randomness.
+# POLICY (Samith, 2026-07-25): a FIXED "bridge2626" for EVERY bridge, until he changes it
+# deliberately. This deliberately overrides build-ledger E1's random-per-device key for
+# testing convenience — one password that works on any card without a lookup. To restore
+# per-device randomness later, revert this file to the random generator (git history).
 #
-# The reflash problem is solved on the other side instead: the agent reports this passphrase
-# to the control plane, and `GET /admin/devices/<id>/label` reprints it. Wipe /data and a NEW
-# random passphrase is generated and re-reported automatically — the panel is always right,
-# so the label can be reprinted rather than being a secret nobody can recover.
+# Trade-off he has accepted: a shared, known setup password means someone in radio range
+# during the brief setup window could join the AP and capture the venue Wi-Fi as it is
+# typed. Fine for test/dev; reconsider before production.
 #
-# Stored mode 600 under /etc/bridge, which is a bind from /data, so it is stable for the life
-# of the installation. An admin can pin a custom one by writing the file; that always wins.
+# Enforcing (not just create-if-absent): if the persisted file holds anything other than
+# the fixed value — empty, or a stale random key from a card provisioned before this policy —
+# it is rewritten to the fixed value, so a wiped /data or an old card self-heals to bridge2626.
+# Stored mode 600 under /etc/bridge, a bind from /data, so it is stable for the installation.
 set -u
 PASS_FILE=/etc/bridge/setup-wifi-pass
+FIXED=bridge2626
 
-if [ -s "$PASS_FILE" ]; then
+if [ -s "$PASS_FILE" ] && [ "$(cat "$PASS_FILE")" = "$FIXED" ]; then
   cat "$PASS_FILE"
   exit 0
 fi
 
-# 12 chars from an unambiguous alphabet (no O/0/I/1/l) — easy to read off a printed label
-# and type on a phone, ~61 bits of entropy.
-ALPHABET='ABCDEFGHJKMNPQRSTUVWXYZ23456789'
-new="$(LC_ALL=C tr -dc "$ALPHABET" </dev/urandom 2>/dev/null | head -c 12)"
-
-# Never emit an empty or short passphrase: wifi-connect refuses anything under 8 characters
-# and the setup AP would then never appear at all (the 2026-07-23 flash-test defect).
-if [ "${#new}" -lt 12 ]; then
-  new="$(head -c 32 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' | cut -c1-12 | tr 'a-f' 'A-F')"
-fi
-[ "${#new}" -ge 8 ] || new="SETUPFALLBACK$$"
-
 if install -d -m 755 /etc/bridge 2>/dev/null &&
-   (umask 077; printf '%s' "$new" > "$PASS_FILE" 2>/dev/null); then
+   (umask 077; printf '%s' "$FIXED" > "$PASS_FILE" 2>/dev/null); then
   chmod 600 "$PASS_FILE" 2>/dev/null || true
   cat "$PASS_FILE"
 else
-  # /etc/bridge unwritable (is /data mounted?). Emit the value so the AP still comes up;
-  # it will be regenerated — and re-reported to the fleet — once /data is available.
-  printf '%s' "$new"
+  # /etc/bridge unwritable (is /data mounted?). Emit the value so the AP still comes up.
+  printf '%s' "$FIXED"
 fi
