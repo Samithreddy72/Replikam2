@@ -257,6 +257,11 @@ fi
 mount "${LOOP}p4" "$MNT/p4"
 log "data: writing /data skeleton"
 install -d "$MNT/p4"/log-journal
+# Create the /data directory tree FIRST. The config files written just below live under
+# config/, and writing them before that directory existed failed the whole build with
+# "No such file or directory" (config/ used to be created further down).
+install -d "$MNT/p4"/config "$MNT/p4"/config/nm-connections "$MNT/p4"/etc-bridge \
+           "$MNT/p4"/diagnostics "$MNT/p4"/tailscale
 touch "$MNT/p4"/flight.txt
 printf '# speaker-return destination (the remote peer)\nRETURN_DEST_IP=\nRETURN_DEST_PORT=5004\n' \
   > "$MNT/p4"/config/bridge-return-audio
@@ -264,8 +269,6 @@ for _d in bridge-agent bridge-net; do
   printf '# managed on /data (read-only root)\n' > "$MNT/p4/config/$_d"
 done
 touch "$MNT/p4"/soak.log
-install -d "$MNT/p4"/config "$MNT/p4"/config/nm-connections "$MNT/p4"/etc-bridge \
-           "$MNT/p4"/diagnostics "$MNT/p4"/tailscale
 install -d -o 1000 -g 1000 "$MNT/p4"/fleet-brain 2>/dev/null || install -d "$MNT/p4"/fleet-brain
 # secret-free fleet-brain env template (real secrets arrive at claim; DB lives on /data)
 cat > "$MNT/p4/config/fleet-brain" <<'ENVF'
