@@ -1,0 +1,36 @@
+# NetBridge fleet control plane on Fly.io.
+# `app` must be globally unique — `fly launch` will let you pick/confirm it.
+app = "netbridge-fleet"
+primary_region = "bom"          # Mumbai — closest to you; change if you like
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Non-secret config. Secrets (TS key, bootstrap token, SMTP password, etc.) are set
+# separately with `fly secrets set` so they never live in this file / git.
+[env]
+  DATABASE_URL      = "sqlite:////data/fleet.db"   # 4 slashes = absolute path on the volume
+  OFFLINE_AFTER_S   = "60"
+  TS_SOURCE_TAG     = "tag:source"
+  TS_BRIDGE_TAG     = "tag:bridge"
+  SMTP_HOST         = "smtp.gmail.com"
+  SMTP_PORT         = "587"
+  SMTP_STARTTLS     = "1"
+
+# Persistent disk for the SQLite DB — this is what makes accounts + claimed bridges
+# survive restarts and redeploys.
+[mounts]
+  source      = "fleet_data"
+  destination = "/data"
+
+[http_service]
+  internal_port       = 8000
+  force_https         = true
+  # Keep it ALWAYS ON — bridges phone home continuously, so it must never sleep.
+  auto_stop_machines  = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size   = "shared-cpu-1x"
+  memory = "512mb"
