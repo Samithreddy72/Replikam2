@@ -237,6 +237,21 @@ def local_ip_towards(host):
         return ""
 
 
+def bridge_reachable(host, port=8080, timeout=1.0):
+    """Is this bridge answering directly right now (i.e. on our own LAN)? A fast TCP
+    probe so the app can prefer the direct path over the mesh whenever the bridge is
+    reachable — instead of always trying the mesh first and hanging on its handshake
+    when the tailnet is blocked. Walkthrough J3: the app picks the reachable path itself."""
+    if not host:
+        return False
+    try:
+        s = socket.create_connection((host, int(port)), timeout=timeout)
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
 # --------------------------------------------------------------------------- session
 class Session:
     """Owns the live ffmpeg legs + the return listener."""
@@ -248,6 +263,8 @@ class Session:
         self.return_port = 5004
         self.return_player = "none"
         self.voice_proc = None
+        self.return_proc = None     # the return-audio player, tracked so it can be toggled
+        self.return_on = True       # "Play meeting audio here" — on by default
 
     @property
     def live(self):
@@ -306,7 +323,26 @@ class Session:
             if name == "voice":
                 self.voice_proc = proc          # so the app can report the voice leg is alive
 
-        self.return_player = self._start_return(return_port)
+        self.return_player = self._start_return(return_port) if self.return_on else "off"
+
+    def set_return(self, on):
+        """Toggle 'Play meeting audio here' live, without disturbing the video/voice legs.
+        Off stops just the local return player (the bridge keeps sending; you simply don't
+        play it here — e.g. when you're listening on the meeting device itself)."""
+        self.return_on = bool(on)
+        running = self.return_proc and self.return_proc.poll() is None
+        if self.return_on and not running:
+            self.return_player = self._start_return(self.return_port)
+        elif not self.return_on and running:
+            try:
+                self.return_proc.terminate()
+            except Exception:
+                pass
+            if self.return_proc in self.procs:
+                self.procs.remove(self.return_proc)
+            self.return_proc = None
+            self.return_player = "off"
+        return self.return_on
 
     def _start_return(self, port):
         """Play the meeting room's audio back. Returns a label for what is playing it.
@@ -325,12 +361,18 @@ class Session:
         gst = _gst()
         if gst:
             try:
-                self.procs.append(subprocess.Popen(
+                # latency=400 (was 250): a deeper jitter buffer absorbs the burstier delay
+                # variation of Wi-Fi return audio — the difference between "clear" and the
+                # crackle/gaps that show up once the link gets busy. ~150ms more delay is an
+                # easy trade for meeting audio. do-lost + PLC + inband-FEC conceal the rest.
+                p = subprocess.Popen(
                     [gst, "-q", "udpsrc", "port=%d" % port, "caps=" + caps, "!",
-                     "rtpjitterbuffer", "latency=250", "do-lost=true", "!",
+                     "rtpjitterbuffer", "latency=400", "do-lost=true", "!",
                      "rtpopusdepay", "!", "opusdec", "plc=true", "use-inband-fec=true", "!",
                      "audioconvert", "!", "audioresample", "!", "autoaudiosink", "sync=false"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_gst_env()))
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_gst_env())
+                self.procs.append(p)
+                self.return_proc = p
                 return "gstreamer"
             except Exception:
                 pass
@@ -355,10 +397,12 @@ class Session:
         try:
             lf = open(os.path.join(str(_logdir()), "netbridge-source-return.log"), "w")
             self.logs.append(lf)
-            self.procs.append(subprocess.Popen(
+            p = subprocess.Popen(
                 [_ffmpeg(), "-hide_banner", "-loglevel", "warning",
                  "-protocol_whitelist", "file,udp,rtp", "-i", sdp_path] + out,
-                stdout=subprocess.DEVNULL, stderr=lf))
+                stdout=subprocess.DEVNULL, stderr=lf)
+            self.procs.append(p)
+            self.return_proc = p
             return "ffmpeg"
         except Exception:
             return "none"
@@ -379,9 +423,32 @@ class Session:
                 except Exception:
                     pass
         self.procs = []
+        self.return_proc = None
 
 
 SESSION = Session()
+
+
+def _kill_orphan_media():
+    """Startup-only reaper for OUR leftover ffmpeg/GStreamer from a hard-killed prior run.
+    Normal exits are handled by the signal cleanup in main(); a SIGKILL/crash can't run any
+    handler, so a fresh launch sweeps up its own zombies here. Matched by unmistakable arg
+    signatures unique to us (our RTP video flag, our voice payload, our return udpsrc port),
+    so no unrelated ffmpeg/gst on the machine is ever touched. Safe only at startup, before
+    this instance has a live session of its own."""
+    if IS_WIN:
+        return  # rely on the signal cleanup; a broad image kill would be unsafe on Windows
+    import signal as _sig
+    for pat in ("dump_extra=freq=keyframe", "payload_type 97", "udpsrc port=5004"):
+        try:
+            out = subprocess.run(["pgrep", "-f", pat], capture_output=True, text=True)
+            for tok in out.stdout.split():
+                try:
+                    os.kill(int(tok), _sig.SIGKILL)
+                except (ValueError, ProcessLookupError, PermissionError):
+                    pass
+        except Exception:
+            pass
 
 
 def _mesh_bin():
@@ -392,6 +459,39 @@ def _mesh_bin():
         if _is_exe(cand):
             return cand
     return None
+
+
+def _kill_orphan_mesh(exclude_pid=None):
+    """Reap leftover netbridge-mesh helpers from a previous/crashed session.
+
+    An orphaned helper keeps holding the media + control ports (5000/5002/5004/18080).
+    The next go-live's helper then can't bind them and the session half-fails — the
+    classic 'unlock timed out' with the video/voice checks stuck red. We own at most one
+    helper (self.proc) which callers stop() first, so killing every other netbridge-mesh
+    here is safe. Best-effort: never let cleanup raise into the go-live path."""
+    import signal as _sig
+    name = "netbridge-mesh.exe" if IS_WIN else "netbridge-mesh"
+    try:
+        if IS_WIN:
+            subprocess.run(["taskkill", "/F", "/IM", name],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            out = subprocess.run(["pgrep", "-f", "netbridge-mesh"],
+                                 capture_output=True, text=True)
+            for tok in out.stdout.split():
+                try:
+                    pid = int(tok)
+                except ValueError:
+                    continue
+                if exclude_pid and pid == exclude_pid:
+                    continue
+                for s in (_sig.SIGTERM, _sig.SIGKILL):
+                    try:
+                        os.kill(pid, s)
+                    except (ProcessLookupError, PermissionError):
+                        break
+    except Exception:
+        pass
 
 
 class MeshManager:
@@ -412,6 +512,7 @@ class MeshManager:
         self.bridge_id = None
         self.tailnet_ip = None      # OUR mesh IP; the bridge returns audio here
         self.control_port = None
+        self.bridge_lan_ip = None   # the bridge's LAN IP, if it's on our network
 
     def _mint_key(self, st):
         r = api("POST", st["control_url"].rstrip("/") + "/auth/mesh-key",
@@ -425,6 +526,11 @@ class MeshManager:
         """rec: {id, tailscale_ip, ip}. Returns routing for control + media + return."""
         tsip = (rec or {}).get("tailscale_ip")
         mesh_bin = _mesh_bin()
+        # Per the walkthrough (J3), a claimed bridge is reached OVER THE SECURE MESH — the
+        # embedded helper joins the tailnet and proxies media/control. On the same LAN the
+        # tailnet transparently uses the direct LAN path anyway (fast), so this is not slow;
+        # it just keeps the presenter off any 100.x address. If the bridge has no tailnet
+        # address, or we lack the helper/key, we fall through to a direct connection below.
         if not (tsip and mesh_bin and st.get("token") and st.get("control_url")):
             self.stop()
             ip = (rec or {}).get("ip")
@@ -436,6 +542,10 @@ class MeshManager:
             return self._mesh_route()
 
         self.stop()
+        # Reap any orphan helper from a prior/crashed session BEFORE launching, so the new
+        # helper can bind its ports cleanly (orphans holding 5000/5002/5004/18080 were the
+        # root of the recurring 'unlock timed out').
+        _kill_orphan_mesh()
         key, login = self._mint_key(st)
         if not key:
             ip = rec.get("ip")
@@ -471,12 +581,24 @@ class MeshManager:
                     "return_peer": local_ip_towards(ip) if ip else ""}
         self.proc, self.bridge_id = p, rec.get("id")
         self.tailnet_ip = hs.get("tailnet_ip")
+        self.bridge_lan_ip = (rec or {}).get("ip")
         self.control_port = int(hs.get("control_port") or self.CTRL_LOCAL)
         return self._mesh_route()
 
     def _mesh_route(self):
+        # Media + control flow over the secure mesh (127.0.0.1 proxies). For the RETURN
+        # audio PEER, though, prefer the bridge's DIRECT LAN path when it's on our network:
+        # the bridge->tag:source return flow over the tailnet needs an ACL grant that may not
+        # exist (forward works, return silently drops — the "5 green but no sound" case),
+        # whereas a same-LAN return is unconditional and lower latency. Only a truly remote
+        # bridge (not reachable on the LAN) falls back to our tailnet IP for return audio.
+        return_peer = self.tailnet_ip
+        if self.bridge_lan_ip and bridge_reachable(self.bridge_lan_ip):
+            lan = local_ip_towards(self.bridge_lan_ip)
+            if lan:
+                return_peer = lan
         return {"via": "mesh", "control_host": "127.0.0.1", "control_port": self.control_port,
-                "media_host": "127.0.0.1", "return_peer": self.tailnet_ip}
+                "media_host": "127.0.0.1", "return_peer": return_peer}
 
     def stop(self):
         if self.proc:
@@ -489,6 +611,7 @@ class MeshManager:
                 except Exception:
                     pass
         self.proc = self.bridge_id = self.tailnet_ip = self.control_port = None
+        self.bridge_lan_ip = None
 
 
 MESH = MeshManager()
@@ -557,6 +680,7 @@ class Handler(BaseHTTPRequestHandler):
                 "last_camera": st.get("camera_name"),
                 "last_mic": st.get("mic_name"),
                 "live": SESSION.live,
+                "return_on": SESSION.return_on,
             })
         if self.path == "/api/devices":
             return self._send(av_devices())
@@ -688,6 +812,12 @@ class Handler(BaseHTTPRequestHandler):
             MESH.stop()
             return self._send({"ok": True})
 
+        if self.path == "/api/return":
+            # "Play meeting audio here" toggle — starts/stops the local return player only.
+            body = self._body()
+            on = SESSION.set_return(bool(body.get("on", True)))
+            return self._send({"ok": True, "return_on": on, "return_player": SESSION.return_player})
+
         return self._send({"_error": "not found"}, 404)
 
 
@@ -719,6 +849,15 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
  .pill.on{background:var(--okb);color:var(--ok)} .pill.off{background:var(--redb);color:var(--red)}
  .msg{font-size:12.5px;color:var(--mut);margin-top:9px;min-height:17px}
  .who{display:flex;justify-content:space-between;font-size:12px;color:var(--mut);margin-bottom:12px}
+ .trow{display:flex;justify-content:space-between;align-items:center;font-size:13.5px;
+   padding:9px 0 2px;margin-top:6px;border-top:1px solid var(--ln)}
+ .sw{position:relative;display:inline-block;width:38px;height:22px;flex:0 0 auto}
+ .sw input{opacity:0;width:0;height:0;position:absolute}
+ .sw .sl{position:absolute;inset:0;background:var(--ln);border-radius:999px;transition:.15s;cursor:pointer}
+ .sw .sl:before{content:"";position:absolute;height:16px;width:16px;left:3px;top:3px;
+   background:#fff;border-radius:50%;transition:.15s}
+ .sw input:checked + .sl{background:var(--ok)}
+ .sw input:checked + .sl:before{transform:translateX(16px)}
 </style>
 <div class=w>
 <h1>NetBridge Source</h1><p class=sub>Sign in, unlock your bridge, go live.</p>
@@ -753,6 +892,8 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
   <div class=row><span id=c5>Your voice arriving at bridge</span><span class=lat id=l5></span></div>
   <div class=row><span id=c3>Meeting laptop sees the camera</span><span class=lat id=l3></span></div>
   <div class=row><span id=c4>Meeting audio flowing back</span><span class=lat id=l4></span></div>
+  <div class=trow><span>Play meeting audio here</span>
+    <label class=sw><input type=checkbox id=playhere checked onchange=togglePlay()><span class=sl></span></label></div>
 </div>
 </div>
 <script>
@@ -762,6 +903,7 @@ function host(){const b=BR.find(x=>x.id===$('bridge').value);return b?(b.tailsca
 async function boot(){
   const s=await j('/api/state');
   if(s.control_url)$('curl').value=s.control_url;
+  if(typeof s.return_on==='boolean')$('playhere').checked=s.return_on;
   if(s.signed_in){$('who').textContent='Signed in as '+(s.email||'');$('signout').style.display='';
     $('signin').style.display='none';$('main').style.display='';await load(s)}
   setLive(s.live)
@@ -769,6 +911,10 @@ async function boot(){
 function setLive(v){$('livepill').innerHTML=v?'<span class="pill on">● LIVE</span>':'';
   $('go').textContent=v?'End session':'Go live';$('health').style.display=v?'':'none';
   if(v&&!timer)timer=setInterval(poll,4000); if(!v&&timer){clearInterval(timer);timer=null}}
+async function togglePlay(){const on=$('playhere').checked;
+  const r=await j('/api/return',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({on})});
+  if(r&&typeof r.return_on==='boolean')$('playhere').checked=r.return_on}
 async function signout(){await j('/api/signout',{method:'POST'});location.reload()}
 async function req(){const r=await j('/api/signin-request',{method:'POST',
   headers:{'Content-Type':'application/json'},
@@ -831,6 +977,11 @@ boot();
 
 
 def main():
+    # Reap anything orphaned by a previous crash/hard-quit before we start — a leftover mesh
+    # helper holding the media ports would make the first go-live time out, and a leftover
+    # ffmpeg/gst would keep the camera on / keep playing the room.
+    _kill_orphan_mesh()
+    _kill_orphan_media()
     st = load_state()
     if not st.get("control_url") and len(sys.argv) > 1:
         st["control_url"] = sys.argv[1].rstrip("/")
@@ -839,14 +990,40 @@ def main():
     url = "http://%s:%d/" % (HOST, PORT)
     print("NetBridge Source  ->  %s" % url)
     print("(local only; ctrl-c to quit)")
+
+    # ALWAYS release the camera/mic + stop the return player + remove the mesh node on ANY
+    # teardown — Ctrl-C (SIGINT), a kill (SIGTERM), or the Terminal window closing (SIGHUP).
+    # Before, only the SIGINT/finally path cleaned up, so closing the terminal or killing the
+    # app left ffmpeg holding the camera (light stays on) and GStreamer still playing the room.
+    import signal as _signal
+    _cleaned = {"done": False}
+    def _cleanup(signum=None, frame=None):
+        if _cleaned["done"]:
+            return
+        _cleaned["done"] = True
+        try:
+            SESSION.stop()      # kill the video/voice ffmpeg legs + the return player
+        finally:
+            try:
+                MESH.stop()     # remove the ephemeral mesh node
+            finally:
+                if signum is not None:
+                    os._exit(0)
+    _sigs = [getattr(_signal, s) for s in ("SIGTERM", "SIGHUP", "SIGQUIT")
+             if hasattr(_signal, s)]
+    for _s in _sigs:
+        try:
+            _signal.signal(_s, _cleanup)
+        except Exception:
+            pass
+
     _open_browser(url)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        SESSION.stop()          # never leave ffmpeg holding the camera
-        MESH.stop()             # remove the ephemeral mesh node
+        _cleanup()
         print("\nstopped.")
 
 
