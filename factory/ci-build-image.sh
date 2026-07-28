@@ -231,11 +231,17 @@ echo "$IMAGE_VERSION" > /etc/bridge/version        # bridge-firstboot re-stamps 
 
 # ---------------- Verify no obvious secrets survived ----------------
 log "secret sweep"
-LEAK=0
-grep -rIlE 'tskey-|BEGIN OPENSSH PRIVATE KEY|psk=.+|ADMIN_API_KEY=.+' \
-   /etc/NetworkManager /etc/default /var/lib/tailscale /etc/ssh /etc/bridge 2>/dev/null | while read -r f; do
-   echo "  LEAK: $f"; LEAK=1
-done
+# Capture matches into a variable, NOT `grep | while read` — a pipeline runs the loop in a
+# subshell, so a LEAK=1 set inside it was lost and the build shipped secrets anyway (the old
+# no-op gate). Read the results here, then FAIL LOUD if anything survived generalization.
+LEAKS="$(grep -rIlE 'tskey-|BEGIN OPENSSH PRIVATE KEY|psk=.+|ADMIN_API_KEY=.+' \
+   /etc/NetworkManager /etc/default /var/lib/tailscale /etc/ssh /etc/bridge 2>/dev/null || true)"
+if [ -n "$LEAKS" ]; then
+   echo "  SECRET SWEEP FAILED — per-device secrets survived generalization:" >&2
+   while IFS= read -r f; do echo "  LEAK: $f" >&2; done <<< "$LEAKS"
+   exit 1
+fi
+log "secret sweep clean"
 # ---------------- PREFLIGHT: image contains everything its own code calls ----------
 log "preflight dependency check"
 bash "$REPO/factory/preflight-check.sh"
