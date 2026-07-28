@@ -361,16 +361,42 @@ class Session:
         gst = _gst()
         if gst:
             try:
-                # latency=400 (was 250): a deeper jitter buffer absorbs the burstier delay
-                # variation of Wi-Fi return audio — the difference between "clear" and the
-                # crackle/gaps that show up once the link gets busy. ~150ms more delay is an
-                # easy trade for meeting audio. do-lost + PLC + inband-FEC conceal the rest.
-                p = subprocess.Popen(
-                    [gst, "-q", "udpsrc", "port=%d" % port, "caps=" + caps, "!",
-                     "rtpjitterbuffer", "latency=400", "do-lost=true", "!",
-                     "rtpopusdepay", "!", "opusdec", "plc=true", "use-inband-fec=true", "!",
-                     "audioconvert", "!", "audioresample", "!", "autoaudiosink", "sync=false"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_gst_env())
+                # Return-audio pipeline ported from the FIELD-PROVEN mac-return-listen.sh
+                # (docs/AUDIO-TUNING.md, "0 late / 0 lost / 0 dropouts"). The app had drifted
+                # from that recipe, and every deviation added the warble Samith heard:
+                #   • opusdec plc=true + inband-fec + do-lost SYNTHESIZE audio to conceal loss —
+                #     "tested cleaner" WITHOUT it (PLC's guesses are the artifacts). Use plain opusdec.
+                #   • audioresample quality=10 = SoX-grade, transparent to the 48k output.
+                #   • gentle soft-knee voice compressor + brick-wall hard-knee limiter (voices
+                #     clear & boosted, loud media capped, never clips).
+                #   • a decoupling queue so the sink never back-pressures the decoder.
+                #   • osxaudiosink sync=false buffer-time/latency-time = THE anti-click sink: its
+                #     DEFAULT drift-correction skips samples ~100x/s (audible clicking); sync=false
+                #     plays the jitterbuffer's already-paced stream untouched.
+                # This only works now because return audio is LAN-DIRECT — the nb-mesh relay that
+                # previously masked the fix is out of the return path. Knobs via env for tuning
+                # without a rebuild: NB_RETURN_JITTER_MS (buffer depth), NB_RETURN_GAIN (loudness).
+                lat = os.environ.get("NB_RETURN_JITTER_MS", "250")   # 180 on strong Wi-Fi; 250 here (~-53dBm)
+                gain = os.environ.get("NB_RETURN_GAIN", "2.0")
+                chain = [gst, "-q",
+                    "udpsrc", "port=%d" % port, "caps=" + caps, "!",
+                    "rtpjitterbuffer", "latency=" + lat, "!",
+                    "rtpopusdepay", "!", "opusdec", "!",
+                    "audioconvert", "!", "audioresample", "quality=10", "!",
+                    "audiodynamic", "mode=compressor", "characteristics=soft-knee",
+                        "ratio=0.1", "threshold=0.12", "!",
+                    "volume", "volume=" + gain, "!",
+                    "audiodynamic", "mode=compressor", "characteristics=hard-knee",
+                        "ratio=0.08", "threshold=0.97", "!",
+                    "audioconvert", "!",
+                    "queue", "max-size-time=400000000", "!"]
+                if IS_MAC:
+                    chain += ["osxaudiosink", "sync=false",
+                              "buffer-time=200000", "latency-time=20000"]
+                else:
+                    chain += ["autoaudiosink", "sync=false"]
+                p = subprocess.Popen(chain, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, env=_gst_env())
                 self.procs.append(p)
                 self.return_proc = p
                 return "gstreamer"
