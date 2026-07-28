@@ -8,6 +8,7 @@ Single-org for now (admin API key). The backend itself runs as a node on the tai
 can reach the Pis; only the admin panel is publicly exposed (behind the API key / future SSO).
 """
 import datetime as dt
+import os
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +28,15 @@ ALLOWED_COMMANDS = {"restart", "reset-clock", "profile", "set-peer", "update", "
 # Commands whose args contain a secret. Their args are scrubbed once the device confirms
 # execution, so a PIN never lives in the fleet database beyond its delivery window.
 PIN_BEARING_COMMANDS = {"set-pin", "unlock"}
+
+# LAN-only mode: when the tailnet/Funnel is unreachable on the deployment's network
+# (e.g. an ISP that drops the Tailscale handshake), a bridge's advertised mesh IP is a
+# dead address. If the app is handed that IP it tries the mesh first and hangs ~45s
+# ("unlock timed out") before falling back to direct LAN. With NB_LAN_ONLY=1 the fleet
+# simply never stores/advertises a mesh IP, so the app always takes the reachable
+# direct-LAN route (it reads the bridge's LAN IP from telemetry `latest.ip`). Reversible:
+# unset the env var and let the next telemetry re-populate the mesh IP once mesh works.
+LAN_ONLY = os.getenv("NB_LAN_ONLY", "").strip().lower() not in ("", "0", "false", "no", "off")
 
 app = FastAPI(title="NetBridge Control Plane", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -97,7 +107,7 @@ def enroll(body: EnrollIn, db: Session = Depends(get_db)):
         db.add(dev)
     dev.pairing_code = body.pairing_code
     dev.version = body.version
-    dev.tailscale_ip = body.tailscale_ip
+    dev.tailscale_ip = None if LAN_ONLY else body.tailscale_ip
     dev.hostname = body.hostname
     dev.token_hash = token_hash  # re-enroll rotates the token
     db.commit()
@@ -146,8 +156,10 @@ def telemetry(body: dict, dev: Device = Depends(auth.require_device),
     dev.latest = body
     if body.get("version"):
         dev.version = body["version"]
-    if body.get("tailscale_ip"):
+    if body.get("tailscale_ip") and not LAN_ONLY:
         dev.tailscale_ip = body["tailscale_ip"]
+    elif LAN_ONLY and dev.tailscale_ip:
+        dev.tailscale_ip = None  # keep the dead mesh IP from creeping back in
     db.add(Telemetry(device_id=dev.id, ts=now, metrics=body))
     # Retention is NOT done here any more — see retention.py. Pruning on the
     # write path meant a device that stopped reporting never got cleaned up.
