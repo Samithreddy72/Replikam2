@@ -54,6 +54,11 @@
   .alert .aact{font-size:11.5px;font-weight:700;color:var(--tally);cursor:pointer;background:none;border:0;text-align:left;padding:0}
   .rollout{padding:12px 14px;font-size:12.5px;color:var(--faint)}
   .rollout .rname{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--muted)}
+  .rollout .rmeta{color:var(--muted);font-size:12px}
+  .rollout .rfoot{font-size:11.5px;color:var(--faint)}
+  .rollout .progress{height:8px;border-radius:99px;background:var(--chip);overflow:hidden}
+  .rollout .progress i{display:block;height:100%;background:var(--ok);border-radius:99px;transition:width .4s}
+  .rollout .rbtn{font-size:11.5px;font-weight:700;color:var(--tally);cursor:pointer;background:none;border:0;padding:0;text-align:left}
 
   #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--ink);color:#fff;
     font-size:12.5px;border-radius:9px;padding:9px 18px;opacity:0;transition:opacity .25s;pointer-events:none;max-width:80vw}
@@ -431,10 +436,90 @@ function render(){
       }
     }).catch(()=>{});
   }
+  // Rollouts · A/B image updates — wired live to /admin/rollouts: staged waves
+  // (10 → 25 → 50 → 100%), automatic per-device rollback, and the "0 rollbacks" halt.
   const ro = document.createElement("div"); ro.className = "pcard rollout";
   ro.innerHTML = `<div class="rname">Rollouts · A/B image updates</div>
-    <div style="margin-top:4px">Staged fleet-wide updates with automatic rollback arrive in phase 4.</div>`;
+    <div class="rbody" id="rolloutbody" style="margin-top:6px;color:var(--muted)">loading…</div>`;
   side.appendChild(ro);
+  api("/admin/rollouts").then(list=>{
+    const b = $("rolloutbody"); if(!b) return;
+    const latest = list.find(r=>r.status==="active"||r.status==="paused") || list[0];
+    if (!latest){
+      b.innerHTML = `<div>No rollouts yet. Ship a version fleet-wide in staged waves — 10 → 25 → 50 → 100% — with automatic per-device rollback.</div>`;
+      if (isAdmin()){ const btn=document.createElement("button"); btn.className="rbtn"; btn.style.marginTop="8px";
+        btn.textContent="Start a rollout →"; btn.onclick=startRollout; b.appendChild(btn); }
+      return;
+    }
+    const pct = latest.total ? Math.round(100*latest.updated/latest.total) : 0;
+    const cls = latest.status==="active" ? "live" : latest.status==="completed" ? "ok"
+              : latest.status==="aborted" ? "warn" : "idle";
+    b.innerHTML =
+      `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+         <span class="rname">netbridge-os ${latest.version}</span><span class="pill ${cls}">${latest.status}</span></div>
+       <div class="rmeta" style="margin-top:4px">Staged wave ${latest.stage_pct}%${latest.next_stage!=null?` · next ${latest.next_stage}%`:` · final wave`}</div>
+       <div class="progress" style="margin-top:8px"><i style="width:${pct}%"></i></div>
+       <div class="rfoot" style="margin-top:6px">${latest.summary}${latest.in_flight?` · ${latest.in_flight} updating`:""}</div>`;
+    if (latest.rollbacks){
+      const w=document.createElement("div"); w.className="rfoot"; w.style.color="var(--tally)"; w.style.marginTop="4px";
+      w.textContent = `⚠ ${latest.rollbacks} device(s) rolled back — widening halted (the “0 rollbacks” guard).`;
+      b.appendChild(w);
+    }
+    if (!isAdmin()) return;                       // presenters see status, no controls
+    const row=document.createElement("div"); row.style.cssText="display:flex;flex-wrap:wrap;gap:14px;margin-top:8px";
+    const mk=(label,action)=>{ const x=document.createElement("button"); x.className="rbtn"; x.textContent=label;
+      x.onclick=()=>rolloutAction(latest.id, action, latest.version); return x; };
+    if (latest.status==="active"){
+      if (latest.next_stage!=null) row.appendChild(mk(`Widen to ${latest.next_stage}% →`,"advance"));
+      else if (latest.queued || latest.in_flight) row.appendChild(mk("Finish →","advance"));
+      if (latest.queued_offline && latest.queued_offline.length) row.appendChild(mk("Catch up offline →","dispatch"));
+      row.appendChild(mk("Pause","pause")); row.appendChild(mk("Abort","abort"));
+    } else if (latest.status==="paused"){
+      row.appendChild(mk("Resume","resume")); row.appendChild(mk("Abort","abort"));
+    } else {
+      const btn=document.createElement("button"); btn.className="rbtn"; btn.textContent="Start a new rollout →";
+      btn.onclick=startRollout; row.appendChild(btn);
+    }
+    b.appendChild(row);
+  }).catch(()=>{ const b=$("rolloutbody"); if(b) b.textContent="rollouts unavailable"; });
+}
+
+// Launch a staged rollout. Uses prompt() (like set-pin/claim) so a 5s panel refresh
+// can't wipe a half-typed form.
+async function startRollout(){
+  const version = (prompt("Target image version to roll out fleet-wide? (e.g. 1.4.2)")||"").trim();
+  if (!version) return;
+  const source = (prompt("Image source — base URL/dir holding manifest.txt + the image:",
+                         "https://releases.netbridge.app/"+version)||"").trim();
+  if (!source) return;
+  try {
+    const r = await api("/admin/rollouts", {method:"POST",
+      body:JSON.stringify({version, source, stage_pct:10})});
+    toast(`rollout ${r.version} started — wave ${r.stage_pct}% · ${r.dispatched_now} dispatched`);
+    refresh();
+  } catch(e){ if(e.message!=="auth") toast("rollout failed: "+e.message); }
+}
+
+// advance widens to the next wave; the backend returns 409 if a device rolled back or is
+// still updating — we surface that and offer the deliberate force override.
+async function rolloutAction(id, action, ver){
+  if (action==="abort" && !confirm(`Abort rollout of ${ver}?\n\nFurther waves stop. Devices already updated stay updated (a new rollout is how you'd change them).`)) return;
+  try {
+    const r = await api(`/admin/rollouts/${id}/${action}`, {method:"POST"});
+    toast(`${action}: ${r.summary || "done"}`);
+    refresh();
+  } catch(e){
+    if (e.message==="auth") return;
+    if (action==="advance" && /\b409\b/.test(e.message)){
+      if (confirm("Widening is blocked — a device rolled back or is still updating. Force the next wave anyway?")){
+        try { const r = await api(`/admin/rollouts/${id}/advance?force=true`, {method:"POST"});
+          toast(`forced advance: ${r.summary}`); refresh(); }
+        catch(e2){ if(e2.message!=="auth") toast("force failed: "+e2.message); }
+      }
+      return;
+    }
+    toast(`${action} failed: `+e.message);
+  }
 }
 
 async function addUser(){
