@@ -281,7 +281,12 @@ def main():
         # --add-binary lands it next to the extracted app; _ffmpeg() looks there first.
         cmd += ["--add-binary", "%s%s." % (ff, sep)]
     if mesh:
-        cmd += ["--add-binary", "%s%s." % (mesh, sep)]
+        # NOTE: PyInstaller strips/re-signs ANY Mach-O it bundles (both --add-binary AND
+        # --add-data on macOS), which CORRUPTS the Go helper — the stripped copy silently
+        # drops inbound UDP over tsnet (return audio dead). So the AUTHORITATIVE helper is
+        # shipped as a SIDECAR next to the app binary (see below + _mesh_bin, which prefers
+        # it). We still bundle a copy as a last-resort fallback for non-frozen/dev runs.
+        cmd += ["--add-data", "%s%s." % (mesh, sep)]
     if gstdir:
         # Ship the whole gst/ tree (binary + libs + plugins). --add-data keeps the layout,
         # which matters because the dylibs reference each other via @loader_path and the
@@ -304,6 +309,21 @@ def main():
     else:
         log("expected output missing: %s" % built)
         return 1
+
+    # Ship the mesh helper as a VERBATIM SIDECAR next to the app binary. This is the copy
+    # the app actually runs (_mesh_bin prefers a sidecar); it is byte-for-byte the Go build,
+    # never touched by PyInstaller, so tsnet's inbound UDP (return audio) works. Whoever
+    # zips/distributes dist/ must keep this file beside the app binary.
+    if mesh:
+        side = DIST / ("netbridge-mesh.exe" if IS_WIN else "netbridge-mesh")
+        shutil.copy2(mesh, side)
+        if not IS_WIN:
+            os.chmod(side, 0o755)
+            # Ad-hoc sign so Gatekeeper/Apple-Silicon runs it (Go binaries are unsigned).
+            subprocess.run(["codesign", "--force", "--sign", "-", str(side)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log("SIDECAR %s (%.1f MB) — verbatim helper, ships beside the app" %
+            (side, side.stat().st_size / 1e6))
     return 0
 
 

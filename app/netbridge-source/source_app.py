@@ -478,11 +478,24 @@ def _kill_orphan_media():
 
 
 def _mesh_bin():
-    """The embedded mesh client, bundled next to the app or built in mesh/ during dev."""
-    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    """The embedded mesh client. PREFER a SIDECAR next to the app binary: PyInstaller
+    strips/re-signs any Mach-O it bundles, which corrupts this Go binary and silently kills
+    inbound UDP over tsnet (return audio dead). The sidecar is copied verbatim, so tsnet's
+    UDP receive works. Falls back to the bundled/dev copy if no sidecar is present."""
     name = "netbridge-mesh.exe" if IS_WIN else "netbridge-mesh"
-    for cand in (os.path.join(base, name), os.path.join(base, "mesh", name)):
-        if _is_exe(cand):
+    cands = []
+    if getattr(sys, "frozen", False):                 # packaged app: sidecar next to the exe
+        cands.append(os.path.join(os.path.dirname(os.path.abspath(sys.executable)), name))
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    cands.append(os.path.join(base, name))            # bundled (processed — last resort)
+    cands.append(os.path.join(base, "mesh", name))    # dev tree
+    for cand in cands:
+        if os.path.exists(cand):
+            if not IS_WIN:
+                try:
+                    os.chmod(cand, 0o755)
+                except Exception:
+                    pass
             return cand
     return None
 
@@ -612,19 +625,14 @@ class MeshManager:
         return self._mesh_route()
 
     def _mesh_route(self):
-        # Media + control flow over the secure mesh (127.0.0.1 proxies). For the RETURN
-        # audio PEER, though, prefer the bridge's DIRECT LAN path when it's on our network:
-        # the bridge->tag:source return flow over the tailnet needs an ACL grant that may not
-        # exist (forward works, return silently drops — the "5 green but no sound" case),
-        # whereas a same-LAN return is unconditional and lower latency. Only a truly remote
-        # bridge (not reachable on the LAN) falls back to our tailnet IP for return audio.
-        return_peer = self.tailnet_ip
-        if self.bridge_lan_ip and bridge_reachable(self.bridge_lan_ip):
-            lan = local_ip_towards(self.bridge_lan_ip)
-            if lan:
-                return_peer = lan
+        # EVERYTHING rides the secure mesh — control, forward media, AND return audio — per
+        # the walkthrough (J3: "Bridge online · via secure mesh"). The bridge sends the return
+        # stream to OUR tailnet IP; the embedded helper's returnLeg receives it over the mesh
+        # and hands it to the local player. This requires the tailnet ACL grant
+        # `bridge -> tag:source udp:5004`, which is configured. No LAN shortcut — the HTML
+        # never mentions one, and Samith explicitly banned it.
         return {"via": "mesh", "control_host": "127.0.0.1", "control_port": self.control_port,
-                "media_host": "127.0.0.1", "return_peer": return_peer}
+                "media_host": "127.0.0.1", "return_peer": self.tailnet_ip}
 
     def stop(self):
         if self.proc:
