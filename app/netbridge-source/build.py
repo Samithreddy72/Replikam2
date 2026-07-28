@@ -83,7 +83,8 @@ def fetch_ffmpeg(dest: pathlib.Path) -> pathlib.Path | None:
 # The exact elements our return-audio pipeline uses. Bundling only the plugins that
 # back these keeps the payload ~20MB instead of shipping all of GStreamer.
 GST_ELEMENTS = ["udpsrc", "rtpjitterbuffer", "rtpopusdepay", "opusdec",
-                "audioconvert", "audioresample", "autoaudiosink"] + (
+                "audioconvert", "audioresample", "queue", "audiodynamic",
+                "volume", "autoaudiosink"] + (
                 ["osxaudiosink"] if IS_MAC else ["wasapisink", "directsoundsink"])
 
 
