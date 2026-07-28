@@ -35,6 +35,23 @@ import (
 	"tailscale.com/tsnet"
 )
 
+// meshLogf routes tsnet's internal logs to stderr only when NB_MESH_DEBUG=1 (the app pipes
+// our stderr to netbridge-source-mesh.log). Default stays quiet so stdout is our one
+// handshake line and the log isn't spammed in normal use.
+var meshDebug = os.Getenv("NB_MESH_DEBUG") == "1"
+
+func meshLogf(f string, a ...any) {
+	if meshDebug {
+		fmt.Fprintf(os.Stderr, "[tsnet] "+f+"\n", a...)
+	}
+}
+
+func dbg(f string, a ...any) {
+	if meshDebug {
+		fmt.Fprintf(os.Stderr, "[mesh] "+f+"\n", a...)
+	}
+}
+
 func main() {
 	authKey := flag.String("authkey", "", "scoped ephemeral tailnet key from /auth/mesh-key")
 	hostname := flag.String("hostname", "netbridge-source", "tailnet node name")
@@ -71,7 +88,7 @@ func main() {
 		Dir:          dir,
 		Ephemeral:    true,                    // node auto-removes on disconnect
 		ControlURL:   *control,                // "" => tailscale.com default
-		Logf:         func(string, ...any) {}, // quiet: stdout is our one json handshake line
+		Logf:         meshLogf,                // NB_MESH_DEBUG=1 -> stderr; else quiet
 	}
 	defer s.Close()
 
@@ -172,26 +189,53 @@ func forward(s *tsnet.Server, port, bridge string) error {
 // is rejected with "address must be a valid IP", which silently killed all return audio
 // over the mesh. Bind on our own tailnet IP (tsip) explicitly.
 func returnLeg(s *tsnet.Server, tsip string, port int) error {
+	// Receive the return stream over the mesh on our tailnet IP and hand it to the local
+	// player. REQUIRES tsnet >= v1.98 — older versions' netstack silently dropped inbound
+	// UDP to a userspace ListenPacket, which made return audio dead over the embedded mesh
+	// (verified: v1.80.3 drops, v1.98.9 receives the bridge's stream cross-machine).
 	mesh, err := s.ListenPacket("udp", fmt.Sprintf("%s:%d", tsip, port))
 	if err != nil {
 		return fmt.Errorf("mesh listen: %w", err)
 	}
-	local, err := net.Dial("udp", fmt.Sprintf("127.0.0.1:%d", port))
+	dbg("returnLeg listening on mesh %s:%d -> 127.0.0.1:%d", tsip, port, port)
+	// Deliver to the local player with an UNCONNECTED socket (WriteTo), NOT net.Dial.
+	// A *connected* UDP socket surfaces the player's ICMP port-unreachable as a write
+	// error the instant the player isn't listening (go-live startup race, or the app
+	// restarting the gst player) — and the read loop below used to `return` on that,
+	// killing the leg for good and silently dropping ALL return audio (gst then sat at
+	// 0% cpu). An unconnected send never fails that way, so the leg rides through every
+	// player blip. This was THE embedded-mesh return-audio bug (fixed 2026-07-29).
+	local, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		mesh.Close()
-		return fmt.Errorf("local dial: %w", err)
+		return fmt.Errorf("local socket: %w", err)
+	}
+	dst, err := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		mesh.Close()
+		local.Close()
+		return fmt.Errorf("local addr: %w", err)
 	}
 	go func() {
 		defer mesh.Close()
 		defer local.Close()
 		buf := make([]byte, 1500)
+		var count uint64
 		for {
-			n, _, err := mesh.ReadFrom(buf)
+			n, from, err := mesh.ReadFrom(buf)
 			if err != nil {
+				dbg("returnLeg mesh.ReadFrom closed after %d pkts: %v", count, err)
 				return
 			}
-			if _, err := local.Write(buf[:n]); err != nil {
-				return
+			count++
+			if count == 1 || count%200 == 0 {
+				dbg("returnLeg RX #%d %d bytes from %v", count, n, from)
+			}
+			if _, err := local.WriteTo(buf[:n], dst); err != nil {
+				// Never surrender the leg on a transient local send error; the player
+				// may be mid-restart. Keep reading the mesh and delivering.
+				dbg("returnLeg local.WriteTo error after %d pkts: %v (continuing)", count, err)
+				continue
 			}
 		}
 	}()
