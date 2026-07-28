@@ -25,7 +25,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"os"
 	"os/signal"
@@ -91,21 +90,32 @@ func main() {
 		}
 	}
 
+	// Bind every local port SYNCHRONOUSLY here, before the handshake. If a port is busy
+	// (classically: a stale mesh helper from a previous session still holding it), fail
+	// fast with a clear error instead of printing ready and then silently dropping the
+	// media — that half-working state is what surfaced to the presenter as "unlock timed
+	// out" with the video/voice checks stuck red.
 	// forward legs: ffmpeg -> 127.0.0.1:port -> [mesh] -> bridge:port
 	for _, ps := range strings.Split(*fwd, ",") {
 		ps = strings.TrimSpace(ps)
 		if ps == "" {
 			continue
 		}
-		go forward(s, ps, *bridge)
+		if err := forward(s, ps, *bridge); err != nil {
+			fatal("forward %s: %v", ps, err)
+		}
 	}
 	// return leg: bridge -> [mesh] us:ret -> 127.0.0.1:ret -> gstreamer
-	go returnLeg(s, *ret)
+	if err := returnLeg(s, ip4.String(), *ret); err != nil {
+		fatal("return audio: %v", err)
+	}
 	// control leg: app HTTP -> 127.0.0.1:local -> [mesh] -> bridge:remote
 	var ctrlLocal string
 	if lp, rp, ok := splitPorts(*ctrl); ok {
 		ctrlLocal = lp
-		go controlLeg(s, lp, rp, *bridge)
+		if err := controlLeg(s, lp, rp, *bridge); err != nil {
+			fatal("control: %v", err)
+		}
 	}
 
 	// Handshake AFTER the proxies are wired, so the app never races us.
@@ -124,94 +134,101 @@ func main() {
 }
 
 // forward binds a LOCAL udp socket ffmpeg sends to, and relays every datagram over the
-// mesh to the bridge. One-directional: RTP out is a pure sender.
-func forward(s *tsnet.Server, port, bridge string) {
+// mesh to the bridge. One-directional: RTP out is a pure sender. The local bind happens
+// synchronously so a busy port is reported to the caller (fail-fast) rather than swallowed.
+func forward(s *tsnet.Server, port, bridge string) error {
 	local, err := net.ListenPacket("udp", "127.0.0.1:"+port)
 	if err != nil {
-		log.Printf("forward %s: local listen: %v", port, err)
-		return
+		return fmt.Errorf("local listen: %w", err)
 	}
-	defer local.Close()
-
 	// Dial the bridge over the mesh once; a UDP "conn" here is just an addressed sender.
 	mesh, err := s.Dial(context.Background(), "udp", net.JoinHostPort(bridge, port))
 	if err != nil {
-		log.Printf("forward %s: mesh dial: %v", port, err)
-		return
+		local.Close()
+		return fmt.Errorf("mesh dial: %w", err)
 	}
-	defer mesh.Close()
-
-	buf := make([]byte, 1500)
-	for {
-		n, _, err := local.ReadFrom(buf)
-		if err != nil {
-			return
+	go func() {
+		defer local.Close()
+		defer mesh.Close()
+		buf := make([]byte, 1500)
+		for {
+			n, _, err := local.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if _, err := mesh.Write(buf[:n]); err != nil {
+				return
+			}
 		}
-		if _, err := mesh.Write(buf[:n]); err != nil {
-			return
-		}
-	}
+	}()
+	return nil
 }
 
 // returnLeg receives return audio from the bridge on our MESH interface and hands it to
 // gstreamer/ffmpeg on 127.0.0.1. The bridge was told (via set-peer) to send to our
 // tailnet IP, so these packets arrive over the mesh.
-func returnLeg(s *tsnet.Server, port int) {
-	mesh, err := s.ListenPacket("udp", fmt.Sprintf(":%d", port))
+//
+// tsnet's ListenPacket requires a CONCRETE tailnet IP in the address — a bare ":5004"
+// is rejected with "address must be a valid IP", which silently killed all return audio
+// over the mesh. Bind on our own tailnet IP (tsip) explicitly.
+func returnLeg(s *tsnet.Server, tsip string, port int) error {
+	mesh, err := s.ListenPacket("udp", fmt.Sprintf("%s:%d", tsip, port))
 	if err != nil {
-		log.Printf("return: mesh listen: %v", err)
-		return
+		return fmt.Errorf("mesh listen: %w", err)
 	}
-	defer mesh.Close()
-
 	local, err := net.Dial("udp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
-		log.Printf("return: local dial: %v", err)
-		return
+		mesh.Close()
+		return fmt.Errorf("local dial: %w", err)
 	}
-	defer local.Close()
-
-	buf := make([]byte, 1500)
-	for {
-		n, _, err := mesh.ReadFrom(buf)
-		if err != nil {
-			return
+	go func() {
+		defer mesh.Close()
+		defer local.Close()
+		buf := make([]byte, 1500)
+		for {
+			n, _, err := mesh.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if _, err := local.Write(buf[:n]); err != nil {
+				return
+			}
 		}
-		if _, err := local.Write(buf[:n]); err != nil {
-			return
-		}
-	}
+	}()
+	return nil
 }
 
 // controlLeg accepts local TCP connections (the app's HTTP calls to the bridge) and
 // splices each to a fresh mesh connection to the bridge's control port. A new backend
 // conn per client keeps requests independent, which matters for the app's short,
 // sequential control calls.
-func controlLeg(s *tsnet.Server, localPort, remotePort, bridge string) {
+func controlLeg(s *tsnet.Server, localPort, remotePort, bridge string) error {
 	ln, err := net.Listen("tcp", "127.0.0.1:"+localPort)
 	if err != nil {
-		log.Printf("control: local listen: %v", err)
-		return
+		return fmt.Errorf("local listen: %w", err)
 	}
-	defer ln.Close()
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go func(client net.Conn) {
-			defer client.Close()
-			back, err := s.Dial(context.Background(), "tcp", net.JoinHostPort(bridge, remotePort))
+	go func() {
+		defer ln.Close()
+		for {
+			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			defer back.Close()
-			done := make(chan struct{}, 2)
-			go func() { io.Copy(back, client); done <- struct{}{} }()
-			go func() { io.Copy(client, back); done <- struct{}{} }()
-			<-done
-		}(c)
-	}
+			go func(client net.Conn) {
+				defer client.Close()
+				back, err := s.Dial(context.Background(), "tcp", net.JoinHostPort(bridge, remotePort))
+				if err != nil {
+					return
+				}
+				defer back.Close()
+				done := make(chan struct{}, 2)
+				go func() { io.Copy(back, client); done <- struct{}{} }()
+				go func() { io.Copy(client, back); done <- struct{}{} }()
+				<-done
+			}(c)
+		}
+	}()
+	return nil
 }
 
 func splitPorts(s string) (local, remote string, ok bool) {
