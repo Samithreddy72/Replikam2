@@ -198,44 +198,82 @@ func returnLeg(s *tsnet.Server, tsip string, port int) error {
 		return fmt.Errorf("mesh listen: %w", err)
 	}
 	dbg("returnLeg listening on mesh %s:%d -> 127.0.0.1:%d", tsip, port, port)
-	// Deliver to the local player with an UNCONNECTED socket (WriteTo), NOT net.Dial.
-	// A *connected* UDP socket surfaces the player's ICMP port-unreachable as a write
-	// error the instant the player isn't listening (go-live startup race, or the app
-	// restarting the gst player) — and the read loop below used to `return` on that,
-	// killing the leg for good and silently dropping ALL return audio (gst then sat at
-	// 0% cpu). An unconnected send never fails that way, so the leg rides through every
-	// player blip. This was THE embedded-mesh return-audio bug (fixed 2026-07-29).
-	local, err := net.ListenPacket("udp", "127.0.0.1:0")
+	// Deliver to the local player over a CONNECTED socket: an unconnected WriteTo repeats a
+	// route lookup for every single packet, and this leg carries ~50 packets/second of
+	// real-time audio where per-packet work turns straight into audible jitter.
+	//
+	// A connected socket is what the ORIGINAL code used, and it caused the worst bug in this
+	// file: the player's ICMP port-unreachable (arriving whenever gst was mid-restart) came
+	// back as a write error, and the read loop did `return` on it — killing return audio for
+	// the rest of the session. The fix is not to avoid connected sockets, it is to NEVER EXIT
+	// on a write error. That is preserved below; the socket type is just the fast one now.
+	dst, err := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		mesh.Close()
+		return fmt.Errorf("local addr: %w", err)
+	}
+	local, err := net.DialUDP("udp", nil, dst)
 	if err != nil {
 		mesh.Close()
 		return fmt.Errorf("local socket: %w", err)
 	}
-	dst, err := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		mesh.Close()
-		local.Close()
-		return fmt.Errorf("local addr: %w", err)
+	// Absorb bursts instead of dropping them. tsnet hands packets up from a userspace
+	// netstack whose scheduling is not real-time; without headroom a momentary stall loses
+	// audio outright.
+	if uc, ok := mesh.(interface{ SetReadBuffer(int) error }); ok {
+		_ = uc.SetReadBuffer(1 << 20)
 	}
+	_ = local.SetWriteBuffer(1 << 20)
+
+	// DECOUPLE read from write. Previously this was one synchronous loop: no read was
+	// pending while a write was in flight, so any hiccup in the local write let packets bunch
+	// up in the netstack and then arrive in a burst — which is exactly what jitter sounds
+	// like. A reader goroutine now only reads, a writer goroutine only writes, and a small
+	// buffered channel joins them.
+	type pkt struct {
+		b []byte
+		n int
+	}
+	ch := make(chan pkt, 64) // ~1.3 s of Opus at 50 pkt/s: enough to ride out a stall, small
+	//                          enough that we can never add meaningful latency
+	go func() {
+		defer local.Close()
+		var count uint64
+		for p := range ch {
+			count++
+			if _, err := local.Write(p.b[:p.n]); err != nil {
+				// Never surrender the leg on a transient local send error; the player may
+				// be mid-restart (this is the 2026-07-29 bug — do not turn it into a return).
+				if count%200 == 0 {
+					dbg("returnLeg local write error after %d pkts: %v (continuing)", count, err)
+				}
+			}
+		}
+	}()
 	go func() {
 		defer mesh.Close()
-		defer local.Close()
-		buf := make([]byte, 1500)
-		var count uint64
+		defer close(ch)
+		var count, dropped uint64
 		for {
+			buf := make([]byte, 1500)
 			n, from, err := mesh.ReadFrom(buf)
 			if err != nil {
-				dbg("returnLeg mesh.ReadFrom closed after %d pkts: %v", count, err)
+				dbg("returnLeg mesh.ReadFrom closed after %d pkts (%d dropped): %v",
+					count, dropped, err)
 				return
 			}
 			count++
 			if count == 1 || count%200 == 0 {
-				dbg("returnLeg RX #%d %d bytes from %v", count, n, from)
+				dbg("returnLeg RX #%d %d bytes from %v (dropped %d)", count, n, from, dropped)
 			}
-			if _, err := local.WriteTo(buf[:n], dst); err != nil {
-				// Never surrender the leg on a transient local send error; the player
-				// may be mid-restart. Keep reading the mesh and delivering.
-				dbg("returnLeg local.WriteTo error after %d pkts: %v (continuing)", count, err)
-				continue
+			select {
+			case ch <- pkt{buf, n}:
+			default:
+				// Writer is wedged. DROP rather than block: stalling the reader would back
+				// pressure into the netstack and convert a brief hiccup into a long burst.
+				// For real-time audio a dropped packet is strictly better than a late one —
+				// the jitterbuffer conceals a loss, it cannot undo added latency.
+				dropped++
 			}
 		}
 	}()
