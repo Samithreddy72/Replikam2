@@ -1,5 +1,7 @@
 #!/bin/bash
-export PATH=/usr/local/bin:/usr/bin:/bin
+# /usr/sbin is REQUIRED: alsactl lives there on Debian/RPi OS, and without it the
+# rate follower dies silently at startup (monitor pipe closes, loop never runs).
+export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 [ -f /etc/default/bridge-return-audio ] && . /etc/default/bridge-return-audio
 # No hardcoded fallback IP. 192.168.29.49 was one developer's laptop on one LAN in one
 # month; on every other card it meant the bridge quietly streamed the client's audio to a
