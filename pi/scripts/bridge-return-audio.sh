@@ -46,12 +46,29 @@ mkdir -p "$RUNDIR" 2>/dev/null || RUNDIR=/tmp
 # The failed attempt parsed /proc/asound/.../hw_params. That reflects the rate OUR OWN
 # capture opened the device at - self-referential, silent about the host, and "closed"
 # mid-restart. Polling it produced phantom changes and a restart cascade. Do not go back.
-have_ctl() { "$AMIXER" -c "$CARD" cget name="Capture Rate" >/dev/null 2>&1; }
+# The kernel registers the rate controls on iface=PCM (u_audio.c:
+# SNDRV_CTL_ELEM_IFACE_PCM), while `amixer cget name=...` searches iface=MIXER by
+# default — so the plain-name lookup reports "no such control" for a control that exists.
+# That is exactly what happened on the first hardware boot: the journal said
+# "no 'Capture Rate' control" on a 6.12 kernel that certainly ships it, and the script
+# fail-safed. Query iface=PCM first; keep the plain form as a fallback for any older
+# kernel that registered it differently.
+_ctl_get() {
+  "$AMIXER" -c "$CARD" cget "iface=PCM,name='Capture Rate'" 2>/dev/null \
+    || "$AMIXER" -c "$CARD" cget name="Capture Rate" 2>/dev/null
+}
+have_ctl() {
+  if _ctl_get >/dev/null 2>&1; then return 0; fi
+  # Make the NEXT diagnostics bundle decisive instead of another guess: list what rate
+  # controls this card actually has, right in the journal.
+  echo "bridge-return-audio: rate controls visible on $CARD:" >&2
+  "$AMIXER" -c "$CARD" controls 2>/dev/null | grep -i rate >&2 || echo "  (none)" >&2
+  return 1
+}
 host_rate() {
   # POSIX basic-regex only: \+ is a GNU extension and silently matches nothing under BSD
   # sed, which made host_rate() return empty and the follower a no-op on the test machine.
-  "$AMIXER" -c "$CARD" cget name="Capture Rate" 2>/dev/null \
-    | sed -n 's/.*values=\([0-9][0-9]*\).*/\1/p' | head -1
+  _ctl_get | sed -n 's/.*values=\([0-9][0-9]*\).*/\1/p' | head -1
 }
 rate_ok() { case " $ALLOWED_RATES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
