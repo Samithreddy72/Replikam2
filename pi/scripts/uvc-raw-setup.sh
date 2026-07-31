@@ -169,14 +169,22 @@ case "$1" in
 	# Deeper URB queue (default 2) rides out dwc2 scheduling latency.
 	echo 8 > functions/uac2.usb0/req_number || true
 	echo 1 > functions/uac2.usb0/c_chmask
-	# Single 48k rate for the return path (the "Speakers/Source" the client plays into). Advertising
-	# only 48k makes the CLIENT OS do any 44.1->48 resample with its high-quality SRC (like a fixed-
-	# rate USB DAC), so the Pi receives native 48k and never resamples — that 44.1->48 plughw resample
-	# was the return-audio noise. (Was 48000,44100.) Keep c_chmask=1 (mono).
-	echo 48000 > functions/uac2.usb0/c_srate
+	# Return path (the "Speakers/Source" the client plays into) advertises 48/44.1/32 kHz —
+	# walkthrough J3 step 6, "at whatever rate the meeting laptop happens to play".
+	#
+	# This WAS pinned to a single 48k rate, and that was the right call at the time: the
+	# return audio was noisy, and the noise came from resampling 44.1->48 through ALSA's
+	# plug layer. Pinning to 48k forced the CLIENT to resample with its own good SRC and the
+	# noise went away. The pin fixed the symptom, though — the cause was plughw. So we can
+	# advertise the real rates again ONLY because bridge-return-audio.sh now opens hw: at the
+	# negotiated rate and does the one conversion in GStreamer's audioresample quality=10.
+	# If you ever revert that script to a fixed-rate pipeline, put this back to 48000 alone —
+	# a multi-rate gadget with a fixed-rate capture is exactly the desync that caused the
+	# original crackle. Keep c_chmask=1 (mono).
+	echo 48000,44100,32000 > functions/uac2.usb0/c_srate
 	echo 2 > functions/uac2.usb0/c_ssize
 	echo 3 > functions/uac2.usb0/p_chmask
-	echo 48000 > functions/uac2.usb0/p_srate
+	echo 48000,44100,32000 > functions/uac2.usb0/p_srate
 	echo 2 > functions/uac2.usb0/p_ssize
 	ln -s functions/uac2.usb0 configs/c.1/
 	echo "OK"
