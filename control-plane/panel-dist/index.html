@@ -129,6 +129,7 @@ const ACTIONS = [
   ["", "Actions…"],
   ["diagnose", "Collect diagnostics"],
   ["set-pin", "Set / rotate PIN…"],
+  ["mesh-key", "Re-issue mesh key (rejoin the mesh)"],
   ["profile:lan", "Jitter profile → LAN (low latency)"],
   ["profile:wan", "Jitter profile → WAN (rough network)"],
   ["restart", "Restart media services"],
@@ -241,6 +242,16 @@ async function doAction(devId, devName, value, isLive){
   if (!value) return;
   let [type, mode] = value.split(":");
   let args = mode ? {mode} : {};
+  if (type === "mesh-key"){
+    // Not a device command — a control-plane action. Mints a fresh tailnet key the bridge
+    // picks up on its next check-in. Needed when its ephemeral node was garbage-collected
+    // while it was offline, which otherwise leaves it unable to rejoin the mesh at all.
+    try {
+      const r = await api(`/admin/devices/${devId}/mesh-key`, {method:"POST"});
+      toast(`mesh key re-issued for ${devName} — ${r.note}`);
+    } catch(e){ if(e.message!=="auth") toast("mesh key failed: "+e.message); }
+    return;
+  }
   if (type === "set-pin"){
     // Set here, deliver offline (call/text/sticky note) — the panel never shows it again.
     const pin = prompt(`New 6-digit PIN for ${devName}?\n\nSetting a PIN does not interrupt anything — it just arms the gate. Hand it to your presenter offline.`);

@@ -156,10 +156,17 @@ def telemetry(body: dict, dev: Device = Depends(auth.require_device),
     dev.latest = body
     if body.get("version"):
         dev.version = body["version"]
-    if body.get("tailscale_ip") and not LAN_ONLY:
-        dev.tailscale_ip = body["tailscale_ip"]
-    elif LAN_ONLY and dev.tailscale_ip:
-        dev.tailscale_ip = None  # keep the dead mesh IP from creeping back in
+    if LAN_ONLY:
+        dev.tailscale_ip = None      # keep the dead mesh IP from creeping back in
+    else:
+        # The DEVICE is authoritative about its own mesh identity, including its ABSENCE.
+        # This used to only write a truthy value, so a bridge that lost its tailnet node
+        # (ephemeral nodes are garbage-collected after an outage) kept advertising its old
+        # 100.x address forever: the panel showed it "on the mesh", the presenter app was
+        # handed a dead IP, and nothing could tell the difference between a healthy bridge
+        # and one that had silently fallen off. Clearing it makes the state honest — and is
+        # what lets /v1/provision notice the device needs a fresh key and self-heal.
+        dev.tailscale_ip = body.get("tailscale_ip") or None
     db.add(Telemetry(device_id=dev.id, ts=now, metrics=body))
     # Retention is NOT done here any more — see retention.py. Pruning on the
     # write path meant a device that stopped reporting never got cleaned up.
@@ -214,7 +221,35 @@ def pull_provision(dev: Device = Depends(auth.require_device), db: Session = Dep
     if payload is not None:
         dev.provision = None
         db.commit()
-    return {"provision": payload}
+        return {"provision": payload}
+
+    # SELF-HEAL: a claimed bridge that is talking to us but has NO mesh identity has lost
+    # its tailnet node — bridge nodes are ephemeral, so any outage long enough for the
+    # control plane to garbage-collect the node leaves the device with no key and no way
+    # to rejoin. It used to take a manual re-key (or SD-card surgery) every single time,
+    # which is absurd for a device that is plainly online and authenticated right here.
+    # Mint one for it automatically; it applies the key on this same poll cycle (~15 s).
+    if dev.claimed_at and not dev.tailscale_ip:
+        from . import mesh
+        try:
+            minted = mesh.mint_ephemeral_key(
+                "netbridge bridge %s" % (dev.pairing_code or dev.id),
+                tags=[t.strip() for t in settings.ts_bridge_tag.split(",") if t.strip()])
+        except mesh.MeshNotConfigured:
+            return {"provision": None}          # fleet has no tailnet: nothing to hand out
+        except Exception:
+            return {"provision": None}          # tailnet unreachable: retry on the next poll
+        if minted.get("key"):
+            prov = {"tailscale_auth_key": minted["key"]}
+            code = (dev.pairing_code or "").replace("BRIDGE-", "").strip()
+            if code:
+                prov["tailscale_hostname"] = "netbridge-%s" % code
+            # Audited as the system, not a person — nobody clicked anything.
+            _audit(db, auth.Actor("system", dev.org_id, "admin"),
+                   "mesh-key:auto-reissue", dev.name or dev.pairing_code or dev.id)
+            db.commit()
+            return {"provision": prov}
+    return {"provision": None}
 
 
 @app.post("/v1/diagnostics")
@@ -326,6 +361,46 @@ def claim_device(device_id: str, body: ClaimIn, actor=Depends(auth.require_admin
     db.commit()
     _audit(db, actor, "claim", "%s -> %s" % (dev.pairing_code or device_id, body.name))
     return _device_view(dev)
+
+
+@app.post("/admin/devices/{device_id}/mesh-key")
+def reissue_mesh_key(device_id: str, actor=Depends(auth.require_admin),
+                     db: Session = Depends(get_db)):
+    """Mint a FRESH mesh key for an already-claimed device.
+
+    Claim issues the key once (walkthrough J4 step 2) and the device consumes it from
+    /v1/provision exactly once. But a bridge's tailnet node is EPHEMERAL: if it stays
+    offline long enough the control plane garbage-collects the node, and the device comes
+    back with no mesh identity and no key waiting for it. Before this endpoint the only
+    ways out were re-claiming it or editing the SD card by hand — so a bridge that merely
+    went offline over a weekend needed physical surgery to rejoin the mesh.
+
+    Re-keying is safe to repeat: keys are ephemeral, preauthorized and short-TTL, and the
+    device simply picks up whichever one is waiting on its next poll (~15 s).
+    """
+    dev = _scoped_device(db, device_id, actor)
+    from . import mesh
+    try:
+        minted = mesh.mint_ephemeral_key(
+            "netbridge bridge %s" % (dev.pairing_code or device_id),
+            tags=[t.strip() for t in settings.ts_bridge_tag.split(",") if t.strip()])
+    except mesh.MeshNotConfigured:
+        raise HTTPException(409, "this fleet has no tailnet credential configured")
+    except Exception as e:
+        raise HTTPException(502, "could not mint a mesh key: %s" % str(e)[:160])
+    if not minted.get("key"):
+        raise HTTPException(502, "tailnet returned no key")
+    prov = dict(dev.provision or {})
+    prov["tailscale_auth_key"] = minted["key"]
+    code = (dev.pairing_code or "").replace("BRIDGE-", "").strip()
+    if code:
+        prov["tailscale_hostname"] = "netbridge-%s" % code
+    dev.provision = prov
+    db.commit()
+    # Never log the key itself — only that one was issued, and to whom.
+    _audit(db, actor, "mesh-key:reissue", dev.name or dev.pairing_code or device_id)
+    return {"ok": True, "device": dev.name or device_id,
+            "note": "key waiting — the bridge picks it up on its next check-in (~15 s)"}
 
 
 @app.get("/admin/devices/{device_id}/label")
