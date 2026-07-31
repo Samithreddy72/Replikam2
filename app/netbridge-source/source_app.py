@@ -32,43 +32,13 @@ RTP_VIDEO, RTP_VOICE = 5000, 5002
 # Build stamp. build.py rewrites this line, and it is what the updater compares against
 # the signed manifest — so a build that forgets to bump it simply never updates, rather
 # than update-looping.
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.0.9"
 
 
 # --------------------------------------------------------------------------- state
 def load_state():
     try:
         return json.loads(STATE_FILE.read_text())
-    except Exception:
-        return _adopt_seed()
-
-
-def _adopt_seed():
-    """First-run sign-in seed: a pre-authorised build.
-
-    A presenter handed this app should be able to open it and go live — the sign-in
-    ceremony is the org's problem, not theirs, and on a demo machine it is pure friction.
-    So if `netbridge-signin.json` sits NEXT TO the app, its {control_url, token} become
-    this machine's starting state and the sign-in screen never appears.
-
-    Deliberately a SEPARATE FILE, not baked into the binary: the credential stays visible
-    and removable (delete the file and the app is a normal sign-in build), and a binary
-    shared without it carries no credential at all.
-    """
-    try:
-        base = (os.path.dirname(os.path.abspath(sys.executable))
-                if getattr(sys, "frozen", False)
-                else os.path.dirname(os.path.abspath(__file__)))
-        seed = pathlib.Path(base) / "netbridge-signin.json"
-        if not seed.exists():
-            return {}
-        d = json.loads(seed.read_text())
-        if not (d.get("token") and d.get("control_url")):
-            return {}
-        st = {"token": d["token"], "control_url": d["control_url"].rstrip("/"),
-              "email": d.get("email", "")}
-        save_state(st)
-        return st
     except Exception:
         return {}
 

@@ -17,7 +17,7 @@ NOT code-signed. On first run the recipient has to get past their OS:
 Signing removes those prompts and needs a paid Apple account / EV certificate; it is
 deliberately out of scope here.
 """
-import argparse, json, os, platform, shutil, subprocess, sys, urllib.request, zipfile, tarfile
+import argparse, os, platform, shutil, subprocess, sys, urllib.request, zipfile, tarfile
 import pathlib
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -260,13 +260,6 @@ def main():
     ap.add_argument("--no-mesh", action="store_true",
                     help="do not bundle the embedded mesh client (needs host Tailscale then)")
     ap.add_argument("--version", help="stamp APP_VERSION (also the version the updater compares)")
-    ap.add_argument("--seed-control-url",
-                    help="control-plane URL to put in the sign-in seed (default: this "
-                         "machine's, which is local-only and will not work elsewhere)")
-    ap.add_argument("--seed-signin", action="store_true",
-                    help="emit netbridge-signin.json next to the app so it starts ALREADY "
-                         "SIGNED IN (no sign-in screen). Copies the control URL + token from "
-                         "this machine's ~/.netbridge-source/state.json.")
     ap.add_argument("--signing-key",
                     help="EC private key (PEM) to sign the update manifest with. Without it "
                          "the build still works, it just publishes no update manifest.")
@@ -350,37 +343,6 @@ def main():
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         log("SIDECAR %s (%.1f MB) — verbatim helper, ships beside the app" %
             (side, side.stat().st_size / 1e6))
-
-    # ---- pre-authorised build: no sign-in screen ------------------------------------
-    if args.seed_signin:
-        try:
-            st = json.loads((pathlib.Path(os.path.expanduser("~/.netbridge-source"))
-                             / "state.json").read_text())
-        except Exception:
-            st = {}
-        if st.get("token") and st.get("control_url"):
-            # A seeded URL of 127.0.0.1 only resolves on THIS machine — the whole point of
-            # a pre-authorised build is that it works on someone else's, so prefer an
-            # explicit/public control URL and say so loudly when we can only offer local.
-            url = (args.seed_control_url or os.environ.get("PUBLIC_BASE_URL")
-                   or st["control_url"])
-            seed = DIST / "netbridge-signin.json"
-            seed.write_text(json.dumps({"control_url": url.rstrip("/"),
-                                        "token": st["token"],
-                                        "email": st.get("email", "")}, indent=2))
-            os.chmod(seed, 0o600)
-            log("SIGN-IN SEED %s — the app starts already signed in as %s" %
-                (seed, st.get("email") or "?"))
-            log("  control URL: %s" % url)
-            if "127.0.0.1" in url or "localhost" in url:
-                log("  WARNING: that URL is LOCAL-ONLY. This build works on this machine "
-                    "but not on anyone else's. Rebuild with --seed-control-url "
-                    "https://<your-tailnet-host> for a shareable one.")
-            log("  NOTE: this file IS a credential. Keep it beside the app for your own "
-                "use; delete it before sharing the build with anyone else.")
-        else:
-            log("--seed-signin: no signed-in state on this machine — sign in once, then "
-                "rebuild. (Built normally; the app will show its sign-in screen.)")
 
     # ---- update manifest (walkthrough J3: "kept current by auto-update") -------------
     # Same trust model as the image OTA: an EC-signed manifest naming a sha256. The app

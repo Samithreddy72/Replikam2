@@ -14,6 +14,3 @@ __pycache__/
 
 # app update-signing PRIVATE key never belongs in the repo (lives in ~/.netbridge/keys/)
 *signing-key*.pem
-
-# pre-authorised sign-in seed IS a credential — never commit one
-netbridge-signin.json
