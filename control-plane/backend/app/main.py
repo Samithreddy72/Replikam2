@@ -866,6 +866,26 @@ import os as _os
 from fastapi.staticfiles import StaticFiles
 
 
+def _mount_app_updates():
+    """Publish presenter-app updates (walkthrough J3 "kept current by auto-update").
+
+    Serves <APP_RELEASE_DIR>/<platform>/{manifest.txt,manifest.txt.sig,<binary>}. Static
+    and unauthenticated ON PURPOSE: the payload is protected by the EC signature the app
+    verifies against a pinned key, not by who can fetch it — and an app too old to hold a
+    valid token still has to be able to update itself. Must be mounted BEFORE the "/"
+    panel mount for the same route-shadowing reason described above.
+    """
+    d = _os.environ.get("APP_RELEASE_DIR") or _os.path.join(
+        _os.path.dirname(__file__), "..", "..", "..", "app", "netbridge-source", "dist", "release")
+    if _os.path.isdir(d):
+        d = _os.path.abspath(d)
+        print("[app-update] serving presenter-app updates from %s" % d)
+        app.mount("/app", StaticFiles(directory=d), name="app-updates")
+    else:
+        print("[app-update] no release dir (%s) — auto-update is inert until a build "
+              "publishes one" % d)
+
+
 def _mount_panel():
     # The built panel has lived at control-plane/panel-dist, but an earlier version only
     # looked for backend/static — and os.path.isdir() failing just SKIPS the mount, so "/"
@@ -1125,5 +1145,7 @@ def control_rollout(rollout_id: int, action: str, actor=Depends(auth.require_adm
 
 # Mount the static panel LAST — after every @app route above — so its catch-all "/"
 # never shadows an API route (see _mount_panel's note). This must remain the final
-# statement that touches `app`.
+# statement that touches `app`. /app (updates) goes first: it is a narrow prefix, but it
+# still has to beat the "/" catch-all.
+_mount_app_updates()
 _mount_panel()

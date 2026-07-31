@@ -259,6 +259,10 @@ def main():
                     help="do not bundle GStreamer (return audio then needs one on PATH)")
     ap.add_argument("--no-mesh", action="store_true",
                     help="do not bundle the embedded mesh client (needs host Tailscale then)")
+    ap.add_argument("--version", help="stamp APP_VERSION (also the version the updater compares)")
+    ap.add_argument("--signing-key",
+                    help="EC private key (PEM) to sign the update manifest with. Without it "
+                         "the build still works, it just publishes no update manifest.")
     args = ap.parse_args()
 
     try:
@@ -266,6 +270,16 @@ def main():
     except ImportError:
         log("PyInstaller missing — install it with:  pip install pyinstaller")
         return 1
+
+    # Stamp the version INTO the source before packaging, so the running app and the
+    # update manifest can never disagree about which build this is.
+    if args.version:
+        import re as _re
+        src = HERE / "source_app.py"
+        src.write_text(_re.sub(r'^APP_VERSION\s*=\s*"[^"]+"',
+                               'APP_VERSION = "%s"' % args.version,
+                               src.read_text(), count=1, flags=_re.M))
+        log("stamped APP_VERSION = %s" % args.version)
 
     ff = None if args.no_ffmpeg else fetch_ffmpeg(HERE / "_bundle")
     gstdir = None if args.no_gst else bundle_gstreamer(HERE / "_bundle")
@@ -292,6 +306,11 @@ def main():
         # which matters because the dylibs reference each other via @loader_path and the
         # plugins sit one level down in plugins/.
         cmd += ["--add-data", "%s%sgst" % (gstdir.parent, sep)]
+    # Pin the update-channel public key INSIDE the app. Without it the updater is inert
+    # (fail closed), which is the correct behaviour for an unsigned dev build.
+    pub = HERE / "app-pubkey.pem"
+    if pub.exists():
+        cmd += ["--add-data", "%s%s." % (pub, sep)]
     if IS_MAC:
         # A .app bundle is what macOS users expect to double-click. The onefile binary
         # still works from a terminal, and is what CI zips.
@@ -324,7 +343,56 @@ def main():
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         log("SIDECAR %s (%.1f MB) — verbatim helper, ships beside the app" %
             (side, side.stat().st_size / 1e6))
+
+    # ---- update manifest (walkthrough J3: "kept current by auto-update") -------------
+    # Same trust model as the image OTA: an EC-signed manifest naming a sha256. The app
+    # ships the matching PUBLIC key and refuses anything it cannot verify, so the update
+    # channel is authenticated even though the app itself is not Apple-signed.
+    ver = args.version or _stamped_version()
+    rel = DIST / "release" / _plat_tag()
+    rel.mkdir(parents=True, exist_ok=True)
+    fname = "%s-%s-%s%s" % (name, ver, _plat_tag(), ".exe" if IS_WIN else "")
+    shutil.copy2(built, rel / fname)
+    man = rel / "manifest.txt"
+    man.write_text("version=%s\nsha256=%s\nfile=%s\n" % (ver, _sha256(built), fname))
+    if args.signing_key:
+        subprocess.run(["openssl", "dgst", "-sha256", "-sign", args.signing_key,
+                        "-out", str(man) + ".sig", str(man)], check=True)
+        # The app pins this pubkey; publish it next to the build so it can be bundled.
+        subprocess.run(["openssl", "pkey", "-in", args.signing_key, "-pubout",
+                        "-out", str(DIST / "app-pubkey.pem")],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log("UPDATE %s signed -> %s" % (ver, rel))
+    else:
+        log("UPDATE %s manifest written UNSIGNED (%s) — pass --signing-key to publish it; "
+            "the app refuses unsigned updates by design" % (ver, rel))
     return 0
+
+
+def _sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _plat_tag():
+    if IS_WIN:
+        return "windows"
+    if IS_MAC:
+        return "macos-arm64" if platform.machine() == "arm64" else "macos-x86_64"
+    return "linux"
+
+
+def _stamped_version():
+    """Read APP_VERSION out of the source we just packaged, so the manifest and the binary
+    can never disagree about what version this is."""
+    import re as _re
+    m = _re.search(r'^APP_VERSION\s*=\s*"([^"]+)"',
+                   (HERE / "source_app.py").read_text(), _re.M)
+    return m.group(1) if m else "0.0.0"
 
 
 if __name__ == "__main__":

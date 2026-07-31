@@ -29,6 +29,11 @@ HOST, PORT = "127.0.0.1", 8765
 # Ports the bridge listens on (bridge-feeder-net / bridge-feeder-audio).
 RTP_VIDEO, RTP_VOICE = 5000, 5002
 
+# Build stamp. build.py rewrites this line, and it is what the updater compares against
+# the signed manifest — so a build that forgets to bump it simply never updates, rather
+# than update-looping.
+APP_VERSION = "1.0.9"
+
 
 # --------------------------------------------------------------------------- state
 def load_state():
@@ -47,6 +52,143 @@ def save_state(d):
         STATE_FILE.chmod(0o600)   # holds the personal bearer token
     except Exception:
         pass
+
+
+# ------------------------------------------------------------------------ updates
+# Walkthrough J3: "One signed desktop app, kept current by auto-update" / "Updated to
+# 2.3.1 while you were away". Trust model is deliberately the SAME one the image OTA
+# already uses (bridge-update.sh): an EC-signed manifest naming a sha256, verified
+# against a pinned public key that ships inside the app. Apple's Developer ID is about
+# Gatekeeper letting the app RUN; it does not authenticate an update channel, so this
+# works with or without it.
+#
+# Two rules make it safe to leave on:
+#   * NEVER swap a running binary mid-session. The download stages a file next to the
+#     app; the swap happens at the NEXT start, before anything binds a port. That is
+#     literally "updated while you were away" — a live meeting can never be interrupted.
+#   * FAIL CLOSED. No pubkey, no openssl, bad signature, wrong hash -> no update.
+UPDATE_MANIFEST = "manifest.txt"
+UPDATE_CHECK_S = 6 * 3600      # re-check while running; the swap still waits for a restart
+_update_note = None            # set once an update has been staged/applied, shown in the UI
+
+
+def _app_binary():
+    """The file that gets replaced — only meaningful for a frozen (packaged) build."""
+    return pathlib.Path(sys.executable) if getattr(sys, "frozen", False) else None
+
+
+def _update_pubkey():
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    for p in (os.path.join(base, "app-pubkey.pem"),
+              os.path.join(os.path.dirname(str(_app_binary() or "")), "app-pubkey.pem")):
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
+def _verify_sig(pubkey, sig_path, data_path):
+    """EC/SHA256 verify, same invocation the bridge uses. Absent openssl => unverifiable
+    => refuse (never 'update anyway')."""
+    if not shutil.which("openssl"):
+        return False
+    r = subprocess.run(["openssl", "dgst", "-sha256", "-verify", pubkey,
+                        "-signature", sig_path, data_path],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return r.returncode == 0
+
+
+def _sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def apply_staged_update():
+    """Swap in a previously staged update. Runs FIRST at startup, before any port is
+    bound, so the app can replace itself with nothing in flight. Keeps the outgoing
+    binary as .old — if the new one cannot start, that file is the way back."""
+    global _update_note
+    exe = _app_binary()
+    if not exe:
+        return
+    staged, meta = exe.with_suffix(".new"), exe.with_suffix(".new.json")
+    if not (staged.exists() and meta.exists()):
+        return
+    try:
+        info = json.loads(meta.read_text())
+        # Re-verify at apply time: the file sat on disk since the download.
+        if _sha256(str(staged)) != info.get("sha256"):
+            staged.unlink(missing_ok=True); meta.unlink(missing_ok=True)
+            return
+        old = exe.with_suffix(".old")
+        old.unlink(missing_ok=True)
+        os.replace(str(exe), str(old))       # atomic; the running image stays mapped
+        os.replace(str(staged), str(exe))
+        os.chmod(str(exe), 0o755)
+        if not IS_WIN:
+            # Ad-hoc re-sign: macOS SIGKILLs a binary whose signature does not match
+            # its contents, which would brick the app on Apple Silicon.
+            subprocess.run(["codesign", "--force", "--sign", "-", str(exe)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        meta.unlink(missing_ok=True)
+        save_state({**load_state(), "updated_to": info.get("version"),
+                    "updated_from": APP_VERSION})
+        os.execv(str(exe), [str(exe)] + sys.argv[1:])     # start the new build
+    except Exception:
+        # Never let a failed swap stop the app from running the version it already has.
+        try:
+            staged.unlink(missing_ok=True); meta.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _plat_tag():
+    if IS_WIN:
+        return "windows"
+    return "macos-arm64" if (IS_MAC and os.uname().machine == "arm64") else \
+           ("macos-x86_64" if IS_MAC else "linux")
+
+
+def check_for_update(base_url):
+    """Fetch + verify + stage. Returns the new version string, or None. Safe to call in a
+    background thread; it never touches the running binary."""
+    global _update_note
+    exe = _app_binary()
+    pub = _update_pubkey()
+    if not (exe and base_url and pub):
+        return None                      # dev run, or no pinned key -> updates disabled
+    root = "%s/app/%s" % (base_url.rstrip("/"), _plat_tag())
+    tmp = pathlib.Path(STATE_DIR) / "update"
+    try:
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True, exist_ok=True)
+        man, sig = tmp / UPDATE_MANIFEST, tmp / (UPDATE_MANIFEST + ".sig")
+        urllib.request.urlretrieve("%s/%s" % (root, UPDATE_MANIFEST), man)
+        urllib.request.urlretrieve("%s/%s.sig" % (root, UPDATE_MANIFEST), sig)
+        if not _verify_sig(pub, str(sig), str(man)):
+            return None                  # unsigned/tampered manifest: stop here
+        fields = dict(l.split("=", 1) for l in man.read_text().splitlines()
+                      if "=" in l and not l.startswith("#"))
+        ver, want, fname = fields.get("version"), fields.get("sha256"), fields.get("file")
+        if not (ver and want and fname) or ver == APP_VERSION:
+            return None
+        blob = tmp / fname
+        urllib.request.urlretrieve("%s/%s" % (root, fname), blob)
+        if _sha256(str(blob)) != want:
+            return None                  # signed manifest, wrong bytes: refuse
+        staged = exe.with_suffix(".new")
+        shutil.move(str(blob), str(staged))
+        exe.with_suffix(".new.json").write_text(
+            json.dumps({"version": ver, "sha256": want}))
+        _update_note = "Update %s ready — it installs next time you start the app." % ver
+        return ver
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- http
@@ -715,6 +857,8 @@ class Handler(BaseHTTPRequestHandler):
                 "last_mic": st.get("mic_name"),
                 "live": SESSION.live,
                 "return_on": SESSION.return_on,
+                "version": APP_VERSION,
+                "update_note": _update_note,
             })
         if self.path == "/api/devices":
             return self._send(av_devices())
@@ -929,6 +1073,8 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
   <div class=trow><span>Play meeting audio here</span>
     <label class=sw><input type=checkbox id=playhere checked onchange=togglePlay()><span class=sl></span></label></div>
 </div>
+<div style="text-align:center;font-size:11.5px;color:var(--faint);margin-top:10px">
+  <span id=updnote></span> <span id=ver style="opacity:.6"></span></div>
 </div>
 <script>
 const $=id=>document.getElementById(id); let BR=[],timer=null;
@@ -940,7 +1086,11 @@ async function boot(){
   if(typeof s.return_on==='boolean')$('playhere').checked=s.return_on;
   if(s.signed_in){$('who').textContent='Signed in as '+(s.email||'');$('signout').style.display='';
     $('signin').style.display='none';$('main').style.display='';await load(s)}
-  setLive(s.live)
+  setLive(s.live);
+  // Walkthrough J3: "Updated to 2.3.1 while you were away". Only rendered when there is
+  // actually something to say — an update just applied, or one is staged for next start.
+  if(s.update_note)$('updnote').textContent=s.update_note;
+  $('ver').textContent='v'+(s.version||'?');
 }
 function setLive(v){$('livepill').innerHTML=v?'<span class="pill on">● LIVE</span>':'';
   $('go').textContent=v?'End session':'Go live';$('health').style.display=v?'':'none';
@@ -1011,12 +1161,36 @@ boot();
 
 
 def main():
+    # FIRST: install anything staged by a previous run. This happens before any port is
+    # bound or any device is opened, so the app replaces itself with nothing in flight —
+    # and re-execs, meaning this function runs again as the new build.
+    apply_staged_update()
     # Reap anything orphaned by a previous crash/hard-quit before we start — a leftover mesh
     # helper holding the media ports would make the first go-live time out, and a leftover
     # ffmpeg/gst would keep the camera on / keep playing the room.
     _kill_orphan_mesh()
     _kill_orphan_media()
     st = load_state()
+    # Report a completed update once, then clear it so it does not stick forever.
+    global _update_note
+    if st.get("updated_to") == APP_VERSION:
+        _update_note = "Updated to %s while you were away." % APP_VERSION
+        st.pop("updated_to", None); st.pop("updated_from", None)
+        save_state(st)
+    # Check for the NEXT one in the background — never blocks startup, and only ever
+    # stages a file (the swap is the next launch). Re-checked on a timer, not just at
+    # startup: a presenter can leave this running for days, and a startup-only check
+    # means an update is not even DISCOVERED until the app has been restarted twice.
+    if st.get("control_url"):
+        def _update_loop(url):
+            while True:
+                try:
+                    check_for_update(url)
+                except Exception:
+                    pass
+                time.sleep(UPDATE_CHECK_S)
+        threading.Thread(target=_update_loop, args=(st["control_url"],),
+                         daemon=True).start()
     if not st.get("control_url") and len(sys.argv) > 1:
         st["control_url"] = sys.argv[1].rstrip("/")
         save_state(st)

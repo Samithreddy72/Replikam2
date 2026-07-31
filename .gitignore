@@ -11,3 +11,6 @@ __pycache__/
 
 # local python env for the control plane (recreate: python3.11 -m venv .venv)
 .venv/
+
+# app update-signing PRIVATE key never belongs in the repo (lives in ~/.netbridge/keys/)
+*signing-key*.pem
