@@ -36,6 +36,10 @@ STUB
 cat > "$T/bin/amixer" <<'STUB'
 #!/bin/bash
 [ -f "$T_HOSTRATE" ] || exit 1          # simulates "control does not exist"
+# REALISTIC output — including the type line whose values=1 (a COUNT) fooled the parser
+# into reporting rate=1 on real hardware while the stub's minimal output passed 14/14.
+echo "numid=5,iface=PCM,name='Capture Rate'"
+echo "  ; type=INTEGER,access=r--v----,values=1,min=0,max=192000,step=0"
 echo "  : values=$(cat "$T_HOSTRATE")"
 STUB
 # --- stub alsactl monitor: emit an event line whenever the test bumps eventfile --------

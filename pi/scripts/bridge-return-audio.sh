@@ -73,7 +73,13 @@ have_ctl() {
 host_rate() {
   # POSIX basic-regex only: \+ is a GNU extension and silently matches nothing under BSD
   # sed, which made host_rate() return empty and the follower a no-op on the test machine.
-  _ctl_get | sed -n 's/.*values=\([0-9][0-9]*\).*/\1/p' | head -1
+  # ONLY the value line ('  : values=44100'). amixer cget also prints a type line
+  # ('; type=INTEGER,...,values=1,...') where values=1 is the COUNT of values — the old
+  # pattern matched that line first and returned '1', which failed validation and silently
+  # fell back to 48000 while the host streamed 44.1k: every start died not-negotiated.
+  # The test stub only printed the value line, which is why 14/14 passed against a parser
+  # that fails on the real device.
+  _ctl_get | sed -n 's/^ *: *values=\([0-9][0-9]*\).*/\1/p' | head -1
 }
 rate_ok() { case " $ALLOWED_RATES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
