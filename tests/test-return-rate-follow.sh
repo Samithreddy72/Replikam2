@@ -69,7 +69,12 @@ run(){ RUNSEQ=$((RUNSEQ+1))
 
 # ============================ 1. fail-safe, no control ============================
 rm -f "$T_HOSTRATE"; : > "$RATE_LOG"
-P=$(run 0); sleep 2
+P=$(run 0)
+# Poll rather than sleep a fixed 2s: on a loaded machine the message can land later, and a
+# flaky test is worse than no test.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  grep -q "no 'Capture Rate' control" "$T/out.log" 2>/dev/null && break; sleep 0.5
+done
 grep -q "no 'Capture Rate' control" "$T/out.log" && ok "no control -> fail-safe message" \
    || no "no control -> expected fail-safe message"
 kill -9 $P 2>/dev/null; stopall
