@@ -32,7 +32,7 @@ RTP_VIDEO, RTP_VOICE = 5000, 5002
 # Build stamp. build.py rewrites this line, and it is what the updater compares against
 # the signed manifest — so a build that forgets to bump it simply never updates, rather
 # than update-looping.
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 
 
 # --------------------------------------------------------------------------- state
@@ -627,8 +627,15 @@ def _bridge_reachable(host, st):
     since the helper is the thing under suspicion."""
     try:
         rec = _bridge_rec(host, st) or {}
+        seen = []
         for addr in filter(None, [rec.get("ip"), rec.get("tailscale_ip"), host]):
-            r = api("GET", "http://%s:8080/api/status" % addr, timeout=4)
+            if addr in seen:
+                continue                      # the id often equals one of the addresses
+            seen.append(addr)
+            # Short timeout ON PURPOSE: this runs while the presenter waits for the bridge
+            # dropdown. A reachable bridge answers on the first probe; a genuinely dead one
+            # must not stall the UI for ten seconds to tell you what it already said.
+            r = api("GET", "http://%s:8080/api/status" % addr, timeout=2)
             if not r.get("_error"):
                 return True
     except Exception:
@@ -892,6 +899,21 @@ class Handler(BaseHTTPRequestHandler):
                     "pairing_code": d.get("pairing_code"), "online": d.get("online"),
                     "ip": (d.get("latest") or {}).get("ip"),
                     "tailscale_ip": d.get("tailscale_ip")} for d in (r or [])]
+            # The fleet's "online" is a HEARTBEAT age, and the heartbeat travels a completely
+            # different path (device -> control plane over the internet) from the one that
+            # actually matters to a presenter (app -> device over the mesh). Those fail
+            # independently: on 2026-07-31 a bridge sat healthy and mesh-reachable for 18
+            # minutes while its telemetry path was down, and the app labelled it "(offline)"
+            # and talked the presenter out of going live to a device that would have worked.
+            #
+            # So when the fleet says offline, ASK THE DEVICE. If it answers, it is online for
+            # our purposes — a stale record must never veto a working bridge.
+            for b in out:
+                if b.get("online"):
+                    continue
+                if _bridge_reachable(b.get("id") or "", st):
+                    b["online"] = True
+                    b["online_via"] = "probe"     # fleet says stale; the device itself answered
             return self._send(out)
         if self.path.startswith("/api/checks"):
             host = self.path.split("host=", 1)[1] if "host=" in self.path else ""
