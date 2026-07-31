@@ -8,3 +8,6 @@ factory/replikam-golden.img
 devkit/kits/
 __pycache__/
 *.pyc
+
+# local python env for the control plane (recreate: python3.11 -m venv .venv)
+.venv/
