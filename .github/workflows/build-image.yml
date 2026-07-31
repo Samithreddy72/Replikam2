@@ -63,21 +63,39 @@ jobs:
           V="${{ steps.ver.outputs.version }}"
           sudo mkdir -p /mnt/work && sudo chmod 777 /mnt/work
           export TMPDIR=/mnt/work
-          KEYARG=""
-          if [ -n "${OTA_SIGNING_KEY:-}" ]; then
-            printf '%s' "$OTA_SIGNING_KEY" > "$TMPDIR/ota-key.pem"
-            KEYARG="--signing-key $TMPDIR/ota-key.pem"
-            echo "signed=yes" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::OTA_SIGNING_KEY secret not set — publishing UNSIGNED. Add the repo secret to enable signing."
-            echo "signed=no" >> "$GITHUB_OUTPUT"
+          # Signing is REQUIRED, not best-effort. The walkthrough's J1 promise is "the same
+          # SIGNED, secret-free image", and the bridge's own updater refuses an image whose
+          # manifest it cannot verify (bridge-update.sh: "missing pubkey" / signature check).
+          # Publishing unsigned therefore produced an artifact that looks like a release,
+          # claims to be one, and cannot actually be installed by OTA — with only a warning
+          # buried in the log. Fail loudly instead.
+          if [ -z "${OTA_SIGNING_KEY:-}" ]; then
+            echo "::error::OTA_SIGNING_KEY secret is not set. A NetBridge image MUST be signed:"
+            echo "::error::bridge-update.sh verifies the manifest signature before flashing, so an"
+            echo "::error::unsigned image cannot be OTA-installed. Add the repo secret, or run"
+            echo "::error::factory/ci-disk-from-image.sh locally if you deliberately want an unsigned build."
+            exit 1
           fi
+          printf '%s' "$OTA_SIGNING_KEY" > "$TMPDIR/ota-key.pem"
+          KEYARG="--signing-key $TMPDIR/ota-key.pem"
+          echo "signed=yes" >> "$GITHUB_OUTPUT"
           sudo TMPDIR=/mnt/work bash factory/ci-disk-from-image.sh \
             --image "${{ steps.build.outputs.image }}" \
             --version "$V" --outdir /mnt/work/out $KEYARG
           [ -f "$TMPDIR/ota-key.pem" ] && shred -u "$TMPDIR/ota-key.pem" || true
           sudo chown -R "$(id -u):$(id -g)" /mnt/work/out
           ls -la /mnt/work/out
+          # Prove the signature actually exists and verifies BEFORE we publish it as a
+          # release. "signed=yes" must never be a claim we did not check: a silent signing
+          # failure would otherwise ship exactly the artifact this gate exists to prevent.
+          cd /mnt/work/out
+          for m in *.txt; do
+            [ -e "$m" ] || continue
+            [ -f "$m.sig" ] || { echo "::error::$m has no signature"; exit 1; }
+            openssl dgst -sha256 -verify ota-pubkey.pem -signature "$m.sig" "$m" \
+              || { echo "::error::$m signature does NOT verify against ota-pubkey.pem"; exit 1; }
+          done
+          echo "all manifests verified against the published pubkey"
 
       - name: Publish release
         env:

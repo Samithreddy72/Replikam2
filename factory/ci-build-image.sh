@@ -24,7 +24,7 @@ apt-get install -y --no-install-recommends \
   gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
   gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-alsa \
   v4l2loopback-dkms v4l2loopback-utils v4l-utils alsa-utils \
-  python3 python3-pil git meson ninja-build build-essential \
+  python3 python3-pil git meson ninja-build build-essential file pkg-config \
   gcc-12 cpp-12 gcc-12-base libgcc-12-dev \
   network-manager dnsmasq-base rsync ca-certificates curl \
   cloud-guest-utils parted e2fsprogs \
@@ -101,10 +101,39 @@ for f in pi/scripts/*; do
   if [ "$b" = "uvc-raw-setup.sh" ]; then install -m 0755 "$f" /home/pi/; else install -m 0755 "$f" /usr/local/bin/; fi
 done
 install -m 0644 pi/systemd/*.service pi/systemd/*.timer /etc/systemd/system/
-install -m 0755 restore/binaries/uvc-gadget /usr/local/bin/
-install -m 0755 restore/binaries/libuvcgadget.so.0.4.0 /usr/local/lib/aarch64-linux-gnu/
-ln -sf libuvcgadget.so.0.4.0 /usr/local/lib/aarch64-linux-gnu/libuvcgadget.so.0
+# ---------------- smooth-video gadget: BUILT here, not vendored ----------------
+# Walkthrough J1: "smooth-video gadget build (libuvcgadget) included" / backstage: "gadget
+# .so ELF-verified". That was previously satisfied by copying a prebuilt binary out of
+# restore/binaries/ — so the image shipped a blob nobody could reproduce, the patched
+# sources next to it were never actually compiled, and a source change silently had NO
+# effect on the image. Build it from the tracked sources instead, in the same arch as the
+# image, and verify the result before accepting it.
+log "building uvc-gadget from source (meson/ninja)"
+GADGET_SRC=/tmp/uvc-gadget-build
+rm -rf "$GADGET_SRC"; mkdir -p "$GADGET_SRC"
+tar xzf sources/patched-uvc-gadget-sources.tgz -C "$GADGET_SRC"
+GADGET_DIR="$(find "$GADGET_SRC" -maxdepth 2 -name meson.build -printf '%h\n' | head -1)"
+[ -n "$GADGET_DIR" ] || { echo "FATAL: no meson.build in the gadget sources" >&2; exit 1; }
+meson setup "$GADGET_DIR/_build" "$GADGET_DIR" \
+  --prefix=/usr/local --libdir="lib/$(uname -m)-linux-gnu" --buildtype=release
+ninja -C "$GADGET_DIR/_build"
+ninja -C "$GADGET_DIR/_build" install
 ldconfig
+
+# Verify what we just produced — a build that "succeeded" but emitted the wrong arch, or a
+# binary whose library cannot be resolved at runtime, would only surface as a dead camera
+# on a shipped Pi. Check both here, where it is cheap and loud.
+command -v uvc-gadget >/dev/null || { echo "FATAL: uvc-gadget not installed" >&2; exit 1; }
+file -b "$(command -v uvc-gadget)" | grep -qi 'ELF 64-bit.*aarch64' \
+  || { echo "FATAL: uvc-gadget is not an aarch64 ELF: $(file -b "$(command -v uvc-gadget)")" >&2; exit 1; }
+if ldd "$(command -v uvc-gadget)" 2>/dev/null | grep -q 'not found'; then
+  echo "FATAL: uvc-gadget has unresolved libraries after install" >&2
+  ldd "$(command -v uvc-gadget)" >&2
+  exit 1
+fi
+log "  uvc-gadget: $(file -b "$(command -v uvc-gadget)" | cut -c1-60)"
+log "  libuvcgadget: $(ls -1 /usr/local/lib/*/libuvcgadget.so.* 2>/dev/null | head -1)"
+rm -rf "$GADGET_SRC"
 install -d /etc/modprobe.d /etc/systemd/journald.conf.d /etc/systemd/system.conf.d /etc/NetworkManager/conf.d
 install -m 0644 pi/configs/v4l2loopback.conf       /etc/modprobe.d/
 install -m 0644 pi/configs/size-cap.conf           /etc/systemd/journald.conf.d/
