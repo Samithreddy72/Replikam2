@@ -32,7 +32,7 @@ RTP_VIDEO, RTP_VOICE = 5000, 5002
 # Build stamp. build.py rewrites this line, and it is what the updater compares against
 # the signed manifest — so a build that forgets to bump it simply never updates, rather
 # than update-looping.
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.1.2"
 
 
 # --------------------------------------------------------------------------- state
@@ -1070,6 +1070,9 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
   <div class=row><span id=c5>Your voice arriving at bridge</span><span class=lat id=l5></span></div>
   <div class=row><span id=c3>Meeting laptop sees the camera</span><span class=lat id=l3></span></div>
   <div class=row><span id=c4>Meeting audio flowing back</span><span class=lat id=l4></span></div>
+  <div id=ckfix style="display:none;margin-top:9px;padding:9px 11px;border-radius:8px;
+    background:rgba(198,57,44,.09);border:1px solid rgba(198,57,44,.28);
+    font-size:12.5px;line-height:1.5;color:var(--red)"></div>
   <div class=trow><span>Play meeting audio here</span>
     <label class=sw><input type=checkbox id=playhere checked onchange=togglePlay()><span class=sl></span></label></div>
 </div>
@@ -1149,12 +1152,30 @@ async function golive(){
   $('m2').innerHTML=`live · ${r.camera} · ${r.mic} · <b>${via}</b><br>`+
     `<span style="color:${warn?'var(--red)':'var(--ok)'}">${r.return_note||''}</span>`;
   setLive(true); poll()}
+// Walkthrough J3 step 5: "If one goes red, the app says what to do in plain words."
+// The device's `detail` is a MEASUREMENT ("usb gadget state: not attached") — true, but it
+// tells a presenter mid-meeting nothing about what to DO. Each red check therefore carries
+// its own remediation, written as an instruction, not a diagnosis. Green rows keep showing
+// the measurement, which is the useful thing when everything is fine.
+const FIXES={
+  online:'Bridge is not answering. Check it has power and its Wi-Fi is up, then try again.',
+  video_arriving:'Your camera is not reaching the bridge. Close other apps using the camera (Zoom, Photo Booth), then End session and go live again.',
+  voice_arriving:'Your mic is not reaching the bridge. Pick a different microphone above, then End session and go live again.',
+  client_sees_camera:'The meeting laptop cannot see the camera. Re-seat the USB cable at the laptop end, then pick "NetBridge" as the camera in Zoom/Teams.',
+  return_audio:'No sound coming back. Play something on the meeting laptop and make sure its output is set to the NetBridge speaker.'};
 async function poll(){
   const h=host(); if(!h)return; const c=await j('/api/checks?host='+h); if(c._error)return;
   const map=[['c1','l1','online'],['c2','l2','video_arriving'],['c5','l5','voice_arriving'],
              ['c3','l3','client_sees_camera'],['c4','l4','return_audio']];
+  let firstBad=null;
   for(const [ci,li,k] of map){const v=c[k]||{};
-    $(ci).className=v.ok?'ok':'bad'; $(li).textContent=(v.detail||'').slice(0,42)}}
+    $(ci).className=v.ok?'ok':'bad';
+    $(li).textContent=(v.detail||'').slice(0,42);
+    if(!v.ok&&!firstBad)firstBad=k;}
+  // One instruction at a time — a wall of five red fixes is noise. The first broken link in
+  // the chain is almost always the cause of the ones after it.
+  $('ckfix').textContent=firstBad?FIXES[firstBad]||'':'';
+  $('ckfix').style.display=firstBad?'':'none';}
 boot();
 </script>
 """
