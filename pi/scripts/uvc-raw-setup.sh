@@ -169,22 +169,22 @@ case "$1" in
 	# Deeper URB queue (default 2) rides out dwc2 scheduling latency.
 	echo 8 > functions/uac2.usb0/req_number || true
 	echo 1 > functions/uac2.usb0/c_chmask
-	# Return path (the "Speakers/Source" the client plays into) advertises 48/44.1/32 kHz —
-	# walkthrough J3 step 6, "at whatever rate the meeting laptop happens to play".
+	# Return path (the "Speakers/Source" the client plays into): SINGLE 48 kHz rate.
 	#
-	# This WAS pinned to a single 48k rate, and that was the right call at the time: the
-	# return audio was noisy, and the noise came from resampling 44.1->48 through ALSA's
-	# plug layer. Pinning to 48k forced the CLIENT to resample with its own good SRC and the
-	# noise went away. The pin fixed the symptom, though — the cause was plughw. So we can
-	# advertise the real rates again ONLY because bridge-return-audio.sh now opens hw: at the
-	# negotiated rate and does the one conversion in GStreamer's audioresample quality=10.
-	# If you ever revert that script to a fixed-rate pipeline, put this back to 48000 alone —
-	# a multi-rate gadget with a fixed-rate capture is exactly the desync that caused the
-	# original crackle. Keep c_chmask=1 (mono).
-	echo 48000,44100,32000 > functions/uac2.usb0/c_srate
+	# It was briefly 48000,44100,32000 for walkthrough phase 6 ("at whatever rate the
+	# meeting laptop happens to play"). That produced audible jitter, and capturing the
+	# return stream to a file showed why: 29 runs of EXACT ZEROS >=1ms in 21s, all at ~1ms
+	# granularity — the USB frame interval. The gadget was dropping isochronous frames and
+	# the driver was zero-filling them; opus then encoded the damage faithfully, which is
+	# why every transport measurement (0 packet loss, perfect RTP timestamps) looked clean.
+	#
+	# Advertising several rates changes the descriptor and the gadget's isochronous handling
+	# REGARDLESS of which rate the host selects — so testing at 48 kHz does NOT clear it.
+	# Phase 6 needs a different mechanism than multi-rate advertisement on this controller.
+	echo 48000 > functions/uac2.usb0/c_srate
 	echo 2 > functions/uac2.usb0/c_ssize
 	echo 3 > functions/uac2.usb0/p_chmask
-	echo 48000,44100,32000 > functions/uac2.usb0/p_srate
+	echo 48000 > functions/uac2.usb0/p_srate
 	echo 2 > functions/uac2.usb0/p_ssize
 	ln -s functions/uac2.usb0 configs/c.1/
 	echo "OK"
