@@ -155,7 +155,21 @@ MON_PID=$!
 # fixed-rate script got for free from systemd's Restart=.
 fails=0
 while true; do
-  R="$(cat "$RUNDIR/rate" 2>/dev/null)"; rate_ok "${R:-0}" || R="$FIXED_RATE"
+  # THE LIVE KERNEL CONTROL IS AUTHORITATIVE ON EVERY START — the published file is only a
+  # fallback for when the host is idle (control reads 0), and FIXED_RATE the last resort.
+  #
+  # Learned the hard way (2026-07-31, on hardware): a race during a Windows rate switch
+  # left the file saying 48000 while the host held the stream open at 44100. Every restart
+  # then failed alsasrc not-negotiated, and because the follower only reacts to CHANGE
+  # events — and the control sat steady at 44100 — no event ever arrived to correct the
+  # file. Crash-loop, audio down, until a human flipped Windows back to 48000. Reading the
+  # control here makes every restart self-correcting: the event stream is for promptness,
+  # never for correctness.
+  R="$(host_rate)"
+  if ! rate_ok "${R:-0}"; then
+    R="$(cat "$RUNDIR/rate" 2>/dev/null)"; rate_ok "${R:-0}" || R="$FIXED_RATE"
+  fi
+  echo "$R" > "$RUNDIR/rate"
   started=$(date +%s)
   start_pipeline "$R"
   wait "$GST_PID"

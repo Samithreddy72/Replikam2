@@ -119,6 +119,19 @@ grep -q "ignored (re-opened" "$T/out.log" && ok "rate-limit is logged, not silen
                                           || no "rate-limit suppressed without a log line"
 kill -9 $P 2>/dev/null; stopall
 
+# ============ 4b. THE WEDGE (2026-07-31 hardware failure, must never recur) ============
+# File says 48000, but the DEVICE is at 44100 and no change event will ever arrive (the
+# control is steady). A pipeline restart must reconcile to the LIVE control, not loop on
+# the stale file — on hardware this crash-looped until a human changed the rate on Windows.
+stopall; : > "$RATE_LOG"; : > "$T/out.log"; sethost 48000; event
+P=$(run 0); sleep 2
+sethost 44100                                   # device moves; NO event (steady control)
+pkill -f 'sleep 600' 2>/dev/null; sleep 4       # pipeline dies -> supervisor restarts
+last=$(tail -1 "$RATE_LOG")
+[ "$last" = "44100" ] && ok "restart reconciles to the LIVE rate (no wedge on stale file)" \
+                      || no "restarted on the stale file rate (got: $(rates))"
+kill -9 $P 2>/dev/null; stopall
+
 # ============================ 4. crash recovery ============================
 : > "$RATE_LOG"; : > "$T/out.log"; sethost 48000; event
 P=$(run 0); sleep 2
