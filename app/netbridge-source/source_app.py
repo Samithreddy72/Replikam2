@@ -619,6 +619,23 @@ def _kill_orphan_media():
             pass
 
 
+def _bridge_reachable(host, st):
+    """Is the bridge answering AT ALL, by any route? Used only to tell a presenter WHICH
+    failure they have: a device that is off is a different problem from one that is up but
+    whose mesh path has not come up yet, and 'timed out' hid that distinction completely.
+    Tries the bridge's LAN address directly — deliberately NOT through the mesh helper,
+    since the helper is the thing under suspicion."""
+    try:
+        rec = _bridge_rec(host, st) or {}
+        for addr in filter(None, [rec.get("ip"), rec.get("tailscale_ip"), host]):
+            r = api("GET", "http://%s:8080/api/status" % addr, timeout=4)
+            if not r.get("_error"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _mesh_bin():
     """The embedded mesh client. PREFER a SIDECAR next to the app binary: PyInstaller
     strips/re-signs any Mach-O it bundles, which corrupts this Go binary and silently kills
@@ -953,9 +970,39 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send({"_error": "host and pin required"}, 400)
             # Verified ON THE DEVICE, reached over the mesh. The control plane is not asked
             # and cannot override it.
-            route = bridge_route(host, st)
-            r = api("POST", route["base"] + "/api/unlock", body={"pin": pin}, timeout=20)
-            return self._send(r)
+            #
+            # SELF-HEAL. "unlock timed out" was by far the most common way a presenter got
+            # stuck, and it was almost never a real failure: the mesh helper is usually just
+            # YOUNGER THAN THE PATH IT NEEDS. If the helper joins while the bridge is still
+            # booting (or briefly offline), tsnet has no route to that peer yet and the first
+            # dial hangs — then the route comes up seconds later. The app used to make one
+            # 20 s attempt and give up, so a presenter saw "timed out" against a bridge that
+            # was fine and would have answered on the very next try.
+            #
+            # So: retry, and on the first failure rebuild the helper (that covers the other
+            # case — a helper left over from a previous session that will never route). A
+            # real answer from the device (wrong PIN / lockout) returns immediately; only
+            # transport failures are retried, so a wrong PIN can never burn 3 of the 3
+            # attempts the device allows before locking out.
+            last = None
+            for attempt in range(3):
+                route = bridge_route(host, st)
+                last = api("POST", route["base"] + "/api/unlock",
+                           body={"pin": pin}, timeout=12)
+                if not last.get("_error"):
+                    return self._send(last)                 # unlocked, or a real PIN verdict
+                if attempt == 0:
+                    MESH.stop()                             # rebuild a helper that cannot route
+                    _kill_orphan_mesh()
+                time.sleep(2)
+            # Still failing: say what is actually wrong instead of "timed out".
+            reachable = _bridge_reachable(host, st)
+            detail = ("the bridge is not answering — check it has power and is online"
+                      if not reachable else
+                      "the bridge is up but not reachable over the mesh yet; it may still be "
+                      "starting up — wait a few seconds and try again")
+            return self._send({"_error": detail, "attempts": 3,
+                               "raw": last.get("_error") if last else None}, 502)
 
         if self.path == "/api/golive":
             host = b.get("host")
