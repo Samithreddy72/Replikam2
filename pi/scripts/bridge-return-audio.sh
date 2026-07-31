@@ -11,10 +11,142 @@ if [ -z "$DEST_IP" ]; then
   echo "bridge-return-audio: no RETURN_DEST_IP set (run: bridge set-peer <ip>) - not streaming" >&2
   exec sleep infinity
 fi
-# hw: (not plughw) = no plug-layer resampler noise. Safe to use because the gadget advertises a
-# single 48k rate (uvc-raw-setup.sh c_srate=48000), so the client always sends 48k and hw: can
-# never desync (no rate-lock cascade). audioresample quality=10 is a no-op at 48->48 but a
-# high-quality safety net. opusenc audio-type=generic (the gst default = OPUS_APPLICATION_AUDIO,
-# music-optimized; gst's name for ffmpeg's "application=audio") @128k is transparent for music
-# (64k was the rate, not the mode, that hurt); inband-fec keeps Tailscale/WAN loss concealed.
-exec gst-launch-1.0 alsasrc device=hw:UAC2Gadget buffer-time=200000 latency-time=20000 ! queue max-size-time=300000000 leaky=downstream ! audioconvert ! audioresample quality=10 ! audio/x-raw,rate=48000,channels=2,format=S16LE ! opusenc bitrate=128000 audio-type=generic inband-fec=true packet-loss-percentage=20 ! rtpopuspay pt=97 ! udpsink host="$DEST_IP" port="$DEST_PORT" sync=false
+
+CARD="${RETURN_CARD:-UAC2Gadget}"
+FIXED_RATE="${RETURN_FIXED_RATE:-48000}"
+# PATH is pinned above for systemd determinism, so the external tools are named through
+# variables rather than found on a caller-supplied PATH. Production behaviour is unchanged;
+# the off-hardware test substitutes stubs.
+GST="${RETURN_GST:-gst-launch-1.0}"
+AMIXER="${RETURN_AMIXER:-amixer}"
+ALSACTL="${RETURN_ALSACTL:-alsactl}"
+# Only follow rates the gadget actually advertises. Opening hw: at a bogus rate takes the
+# return audio down completely, so an implausible reading is ignored, never acted on.
+ALLOWED_RATES="${RETURN_ALLOWED_RATES:-32000 44100 48000}"
+DEBOUNCE_S="${RETURN_DEBOUNCE_S:-1}"
+# THE safety net. A previous attempt polled /proc and cycled the pipeline whenever it
+# thought the rate moved; re-opening a live ALSA capture over and over destroyed the audio
+# (measured 21.6 dropouts/sec, vs 0.2 with no follower at all). Even if every other guard
+# here fails, this caps re-opens to one per interval.
+MIN_RESTART_GAP_S="${RETURN_MIN_RESTART_GAP_S:-20}"
+RUNDIR="${RETURN_RUNDIR:-/run/bridge-return-audio}"
+mkdir -p "$RUNDIR" 2>/dev/null || RUNDIR=/tmp
+
+# ------------------------------------------------------------------ rate detection
+# Walkthrough J3 step 6: "at whatever rate the meeting laptop happens to play".
+#
+# Read the kernel's OWN control rather than inferring. drivers/usb/gadget/function/
+# u_audio.c exposes a per-direction PCM control "<Playback|Capture> Rate" holding the
+# host's active sample rate (0 when the host is not streaming or the cable is out), and
+# calls snd_ctl_notify() on every active<->inactive transition - so it is authoritative
+# AND event-driven.
+#
+# The failed attempt parsed /proc/asound/.../hw_params. That reflects the rate OUR OWN
+# capture opened the device at - self-referential, silent about the host, and "closed"
+# mid-restart. Polling it produced phantom changes and a restart cascade. Do not go back.
+have_ctl() { "$AMIXER" -c "$CARD" cget name="Capture Rate" >/dev/null 2>&1; }
+host_rate() {
+  # POSIX basic-regex only: \+ is a GNU extension and silently matches nothing under BSD
+  # sed, which made host_rate() return empty and the follower a no-op on the test machine.
+  "$AMIXER" -c "$CARD" cget name="Capture Rate" 2>/dev/null \
+    | sed -n 's/.*values=\([0-9][0-9]*\).*/\1/p' | head -1
+}
+rate_ok() { case " $ALLOWED_RATES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# ------------------------------------------------------------------ pipeline
+# hw: (never plughw). The plug layer's resampler is what made the return audio noisy; any
+# conversion belongs in GStreamer's audioresample quality=10, a real polyphase SRC. At 48k
+# it is a pass-through and costs nothing.
+start_pipeline() {
+  local rate="$1"
+  echo "bridge-return-audio: capture @ ${rate} Hz -> ${DEST_IP}:${DEST_PORT}" >&2
+  "$GST" alsasrc device="hw:$CARD" buffer-time=200000 latency-time=20000 \
+    ! "audio/x-raw,rate=$rate" \
+    ! queue max-size-time=300000000 leaky=downstream \
+    ! audioconvert ! audioresample quality=10 \
+    ! audio/x-raw,rate=48000,channels=2,format=S16LE \
+    ! opusenc bitrate=128000 audio-type=generic inband-fec=true packet-loss-percentage=20 \
+    ! rtpopuspay pt=97 \
+    ! udpsink host="$DEST_IP" port="$DEST_PORT" sync=false &
+  GST_PID=$!
+  echo "$GST_PID" > "$RUNDIR/gst.pid"
+}
+
+cleanup() {
+  [ -n "${MON_PID:-}" ] && kill "$MON_PID" 2>/dev/null
+  [ -n "${GST_PID:-}" ] && kill "$GST_PID" 2>/dev/null
+  exit 0
+}
+trap cleanup TERM INT
+
+# ------------------------------------------------------------------ fail safe
+# Without the kernel control we cannot know the host's rate, so run exactly the proven
+# fixed-rate pipeline and exec so systemd owns the process directly. Never guess - guessing
+# is what broke the audio last time.
+if ! have_ctl; then
+  echo "bridge-return-audio: no 'Capture Rate' control on card $CARD - fixed ${FIXED_RATE} Hz" >&2
+  exec "$GST" alsasrc device="hw:$CARD" buffer-time=200000 latency-time=20000 \
+    ! queue max-size-time=300000000 leaky=downstream \
+    ! audioconvert ! audioresample quality=10 \
+    ! audio/x-raw,rate=48000,channels=2,format=S16LE \
+    ! opusenc bitrate=128000 audio-type=generic inband-fec=true packet-loss-percentage=20 \
+    ! rtpopuspay pt=97 ! udpsink host="$DEST_IP" port="$DEST_PORT" sync=false
+fi
+
+R="$(host_rate)"; rate_ok "${R:-0}" || R="$FIXED_RATE"   # 0 = host idle right now
+echo "$R" > "$RUNDIR/rate"
+
+# ------------------------------------------------------------------ follower
+# Runs in the BACKGROUND and does exactly two things: publish the wanted rate, and ask the
+# current pipeline to stop. It deliberately does NOT own the pipeline - a `cmd | while`
+# loop runs in a subshell, so any PID or state it kept would be invisible to the main
+# shell. That subshell trap is what made the CI secret-sweep a silent no-op; the same
+# mistake here would leave an orphan gst holding hw: while the parent starts a second one.
+# The last-re-open timestamp lives in a FILE, not a shell variable. `cmd | while` puts the
+# loop in a subshell, and reasoning about which assignments survive that boundary is exactly
+# the class of bug that made the CI secret-sweep a silent no-op and cost hours tonight.
+# A file is unambiguous.
+echo 0 > "$RUNDIR/last_restart"
+(
+  "$ALSACTL" monitor "$CARD" 2>/dev/null | while read -r _l; do
+    case "$_l" in *Rate*) ;; *) continue ;; esac
+    sleep "$DEBOUNCE_S"                          # let USB enumeration settle
+    new="$(host_rate)"
+    [ -n "$new" ] && [ "$new" != "0" ] || continue    # host stopped: keep streaming
+    cur="$(cat "$RUNDIR/rate" 2>/dev/null)"
+    [ "$new" != "$cur" ] || continue
+    rate_ok "$new" || { echo "bridge-return-audio: ignoring implausible rate $new" >&2; continue; }
+    now=$(date +%s)
+    last="$(cat "$RUNDIR/last_restart" 2>/dev/null)"; last="${last:-0}"
+    if [ $((now - last)) -lt "$MIN_RESTART_GAP_S" ]; then
+      echo "bridge-return-audio: ${cur}->${new} ignored (re-opened <${MIN_RESTART_GAP_S}s ago)" >&2
+      continue
+    fi
+    echo "$now" > "$RUNDIR/last_restart"
+    echo "bridge-return-audio: host switched ${cur} -> ${new} Hz; following" >&2
+    echo "$new" > "$RUNDIR/rate"
+    kill "$(cat "$RUNDIR/gst.pid" 2>/dev/null)" 2>/dev/null   # main loop restarts it
+  done
+) &
+MON_PID=$!
+
+# ------------------------------------------------------------------ supervisor
+# The MAIN shell owns the pipeline: start it, wait for it to exit, start it again at
+# whatever rate is currently published. This also covers a plain gst crash, which the old
+# fixed-rate script got for free from systemd's Restart=.
+fails=0
+while true; do
+  R="$(cat "$RUNDIR/rate" 2>/dev/null)"; rate_ok "${R:-0}" || R="$FIXED_RATE"
+  started=$(date +%s)
+  start_pipeline "$R"
+  wait "$GST_PID"
+  ran=$(( $(date +%s) - started ))
+  # Crash-looping (not a rate change) - hand back to systemd rather than spin here.
+  if [ "$ran" -lt 5 ]; then
+    fails=$((fails+1))
+    [ "$fails" -ge 5 ] && { echo "bridge-return-audio: pipeline failing immediately - exiting for systemd" >&2; cleanup; }
+    sleep 2
+  else
+    fails=0
+  fi
+done
