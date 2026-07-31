@@ -3,6 +3,11 @@
 # rate follower dies silently at startup (monitor pipe closes, loop never runs).
 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 [ -f /etc/default/bridge-return-audio ] && . /etc/default/bridge-return-audio
+# Tuning knobs live in their OWN file: `bridge set-peer` rewrites bridge-return-audio
+# wholesale on every go-live, so anything stored there would be silently wiped. Written by
+# `bridge return-tune` (bridge-web /api/return-tune) — remote pipeline experiments without
+# card surgery.
+[ -f /etc/default/bridge-return-tune ] && . /etc/default/bridge-return-tune
 # No hardcoded fallback IP. 192.168.29.49 was one developer's laptop on one LAN in one
 # month; on every other card it meant the bridge quietly streamed the client's audio to a
 # stranger's address on the local network and reported no error. If no peer is set, send
@@ -79,10 +84,21 @@ rate_ok() { case " $ALLOWED_RATES " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 start_pipeline() {
   local rate="$1"
   echo "bridge-return-audio: capture @ ${rate} Hz -> ${DEST_IP}:${DEST_PORT}" >&2
-  "$GST" alsasrc device="hw:$CARD" buffer-time=200000 latency-time=20000 \
+  # RETURN_SRC_PROPS: extra alsasrc properties (e.g. "slave-method=none provide-clock=false").
+  # RETURN_PRE_RESAMPLE: elements spliced in before audioresample (e.g. "audiorate").
+  # Both exist to chase the resampler clicks heard at followed rates (44.1/32k) — the
+  # clicks appear exactly when audioresample is active and never at 48k pass-through, and
+  # the candidate fixes are all src/timestamp properties. Runtime-tunable so each candidate
+  # is one API call + service restart, not one card surgery. UNQUOTED on purpose:
+  # word-splitting is the mechanism; bridge-web validates the charset.
+  local pre=""
+  [ -n "${RETURN_PRE_RESAMPLE:-}" ] && pre="! $RETURN_PRE_RESAMPLE "
+  [ -n "${RETURN_SRC_PROPS:-}" ] && echo "bridge-return-audio: src props: $RETURN_SRC_PROPS" >&2
+  [ -n "$pre" ] && echo "bridge-return-audio: pre-resample: $RETURN_PRE_RESAMPLE" >&2
+  "$GST" alsasrc device="hw:$CARD" buffer-time=200000 latency-time=20000 ${RETURN_SRC_PROPS:-} \
     ! "audio/x-raw,rate=$rate" \
     ! queue max-size-time=300000000 leaky=downstream \
-    ! audioconvert ! audioresample quality=10 \
+    ! audioconvert $pre! audioresample quality=10 \
     ! audio/x-raw,rate=48000,channels=2,format=S16LE \
     ! opusenc bitrate=128000 audio-type=generic inband-fec=true packet-loss-percentage=20 \
     ! rtpopuspay pt=97 \

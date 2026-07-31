@@ -26,6 +26,7 @@ mkdir -p "$T/bin"
 # --- stub gst: log the rate it was opened with, then behave like a running pipeline ----
 cat > "$T/bin/gst" <<'STUB'
 #!/bin/bash
+echo "$@" >> "$ARGV_LOG"
 for a in "$@"; do
   case "$a" in audio/x-raw,rate=*) echo "${a#audio/x-raw,rate=}" >> "$RATE_LOG"; break;; esac
 done
@@ -49,7 +50,7 @@ done
 STUB
 chmod +x "$T/bin"/*
 export PATH="$T/bin:$PATH"
-export RATE_LOG="$T/rates.log" T_HOSTRATE="$T/hostrate" T_EVENT="$T/event"
+export RATE_LOG="$T/rates.log" ARGV_LOG="$T/argv.log" T_HOSTRATE="$T/hostrate" T_EVENT="$T/event"
 : > "$RATE_LOG"
 
 sethost(){ echo "$1" > "$T_HOSTRATE"; }
@@ -138,6 +139,21 @@ P=$(run 0); sleep 2
 pkill -f 'sleep 600' 2>/dev/null; sleep 5          # simulate a crash (supervisor backs off 2s first)
 [ "$(nlines)" -ge 2 ] && ok "pipeline crash is restarted automatically" \
                       || no "crash was not recovered (got: $(rates))"
+kill -9 $P 2>/dev/null; stopall
+
+# ============ 5. tuning knobs reach the pipeline (remote experiments) ============
+stopall; : > "$RATE_LOG"; : > "$T/argv.log"; sethost 48000; event
+P=$(RETURN_SRC_PROPS="slave-method=none provide-clock=false" RETURN_PRE_RESAMPLE="audiorate" \
+    RETURN_GST="$T/bin/gst" RETURN_AMIXER="$T/bin/amixer" RETURN_ALSACTL="$T/bin/alsactl" \
+    RETURN_DEST_IP=10.0.0.1 RETURN_RUNDIR="$T/runK" RETURN_DEBOUNCE_S=0 RETURN_MIN_RESTART_GAP_S=0 \
+    bash "$SCRIPT" >> "$T/out.log" 2>&1 & echo $!)
+sleep 2
+if grep -q "slave-method=none" "$T/argv.log" && grep -q "provide-clock=false" "$T/argv.log"; then
+  ok "RETURN_SRC_PROPS lands in the gst argv"
+else no "src props missing from argv: $(tail -1 "$T/argv.log" 2>/dev/null | cut -c1-120)"; fi
+if grep -qE "audiorate +! +audioresample" "$T/argv.log"; then
+  ok "RETURN_PRE_RESAMPLE spliced before audioresample"
+else no "pre-resample not spliced correctly: $(tail -1 "$T/argv.log" 2>/dev/null | cut -c1-160)"; fi
 kill -9 $P 2>/dev/null; stopall
 
 echo

@@ -7,7 +7,7 @@ Serves:
                     status/telemetry stay instant)
   GET /api/health   tiny liveness JSON
 on http://<pi>:8080"""
-import http.server, socketserver, subprocess, os, time, socket, json, hashlib
+import http.server, socketserver, subprocess, os, time, socket, json, hashlib, re
 
 PORT = 8080
 VERSION_FILE = "/etc/bridge/version"
@@ -405,6 +405,36 @@ class H(http.server.BaseHTTPRequestHandler):
                 ok = False
             self._send(json.dumps({"ok": ok, "changed": True,
                                    "peer": "%s:%s" % (ip, port)}).encode("utf-8"),
+                       "application/json; charset=utf-8")
+        elif path == "/api/return-tune":
+            # Pipeline experiment knobs for the followed-rate clicks — the SSH-free way to
+            # A/B alsasrc/resampler candidates (walkthrough J3 step 6 quality work). Same
+            # trust level as set-peer: reachable only on :8080 (mesh/LAN). The charset is
+            # allow-listed BOTH here and in the CLI because the values are word-split into
+            # a gst-launch command line on the device.
+            try:
+                n = int(self.headers.get("Content-Length", 0) or 0)
+                body = json.loads(self.rfile.read(n) if n else b"{}") or {}
+                props = str(body.get("props", "")).strip()
+                pre = str(body.get("pre", "")).strip()
+                clear = bool(body.get("clear"))
+            except Exception:
+                props, pre, clear = "", "", False
+            ok_chars = re.compile(r"^[a-zA-Z0-9=_.! -]*$")
+            if not clear and (not ok_chars.match(props) or not ok_chars.match(pre)):
+                self._send(json.dumps({"ok": False, "error": "illegal characters"}).encode("utf-8"),
+                           "application/json; charset=utf-8")
+                return
+            args = (["return-tune", "clear"] if clear
+                    else ["return-tune", props, pre])
+            try:
+                r = subprocess.run(["sudo", "-n", "/usr/local/bin/bridge"] + args,
+                                   capture_output=True, text=True, timeout=25)
+                ok = r.returncode == 0
+            except Exception:
+                ok = False
+            self._send(json.dumps({"ok": ok, "clear": clear, "props": props,
+                                   "pre": pre}).encode("utf-8"),
                        "application/json; charset=utf-8")
         elif path == "/api/unlock":
             # The PIN is verified ON THE DEVICE ITSELF — it is never forwarded to

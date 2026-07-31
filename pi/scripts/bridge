@@ -103,6 +103,30 @@ case "$1" in
     echo "return peer set to $2:$P; restarting return-audio..."
     sudo systemctl restart bridge-return-audio; sleep 1
     line "return peer" "$2:$P" ;;
+  return-tune )
+    # Runtime pipeline experiments for the followed-rate clicks: writes the SEPARATE tune
+    # file (set-peer wholesale-rewrites bridge-return-audio, so knobs cannot live there)
+    # and restarts the service. Charset is allow-listed because these values are
+    # word-split into a gst-launch command line: letters/digits = _ . - ! and space only.
+    #   bridge return-tune "<src props>" "<pre-resample elems>"
+    #   bridge return-tune clear
+    TUNE=/etc/default/bridge-return-tune
+    if [ "$2" = "clear" ]; then
+      sudo rm -f "$TUNE"
+      echo "return-tune cleared; restarting return-audio..."
+      sudo systemctl restart bridge-return-audio; sleep 1
+      line "return tune" "(defaults)"; exit 0
+    fi
+    case "$2$3" in *[!a-zA-Z0-9=_.!\ -]* )
+      echo "return-tune: illegal characters (allowed: letters digits = _ . - ! space)"; exit 1 ;;
+    esac
+    { printf '# pipeline experiment knobs (bridge return-tune) - safe to delete\n'
+      [ -n "$2" ] && printf 'RETURN_SRC_PROPS="%s"\n' "$2"
+      [ -n "$3" ] && printf 'RETURN_PRE_RESAMPLE="%s"\n' "$3"
+    } | sudo tee "$TUNE" >/dev/null
+    echo "return-tune set; restarting return-audio..."
+    sudo systemctl restart bridge-return-audio; sleep 1
+    line "src props" "${2:-—}"; line "pre-resample" "${3:-—}" ;;
   profile )
     # Switch the rtpjitterbuffer latency profile. Restarts ONLY the two feeders
     # (safe - does not touch the USB gadget).
@@ -141,6 +165,7 @@ bridge - NetBridge control
   bridge reset-clock       rebuild gadget to reset a degraded UAC2 audio clock (fixes noisy return audio; client re-selects devices)
   bridge heal              run the self-heal watchdog once
   bridge set-peer <ip> [port]   set speaker-return destination (default port 5004)
+  bridge return-tune "<props>" ["<pre>"]  pipeline experiment knobs (clear: bridge return-tune clear)
   bridge profile <lan|wan> set jitterbuffer latency profile (lan=100/120, wan=200/200ms)
   bridge setup-pass        print the setup-label details (AP name, random password, pairing code)
   bridge logs [service]    tail+follow logs (e.g. bridge logs feeder-net)
