@@ -18,19 +18,22 @@ die(){ echo "  ❌ $*" >&2; exit 1; }
 
 echo "════ staging files ════"
 for f in "$R/pi/scripts/bridge-run.sh" "$R/pi/scripts/bridge-deploy-script.sh" \
-         "$R/pi/scripts/bridge-return-audio.sh" "$R/pi/scripts/bridge-web.py" "$PUB"; do
+         "$R/pi/scripts/bridge-return-audio.sh" "$R/pi/scripts/bridge-web.py" \
+         "$R/pi/scripts/bridge-agent.py" "$PUB"; do
   [ -f "$f" ] || die "missing $f"
 done
 bash -n "$R/pi/scripts/bridge-run.sh" || die "loader syntax"
 bash -n "$R/pi/scripts/bridge-deploy-script.sh" || die "deploy script syntax"
 bash -n "$R/pi/scripts/bridge-return-audio.sh" || die "return-audio syntax"
 python3 -m py_compile "$R/pi/scripts/bridge-web.py" || die "bridge-web syntax"
+python3 -m py_compile "$R/pi/scripts/bridge-agent.py" || die "bridge-agent syntax"
 ok "all payloads pass syntax checks locally"
 
 $S 'echo OK' 2>/dev/null | grep -q OK || die "no SSH to $PI"
 scp -i "$KEY" -o StrictHostKeyChecking=no \
   "$R/pi/scripts/bridge-run.sh" "$R/pi/scripts/bridge-deploy-script.sh" \
-  "$R/pi/scripts/bridge-return-audio.sh" "$R/pi/scripts/bridge-web.py" "$PUB" \
+  "$R/pi/scripts/bridge-return-audio.sh" "$R/pi/scripts/bridge-web.py" \
+  "$R/pi/scripts/bridge-agent.py" "$PUB" \
   "pi@$PI:/tmp/" >/dev/null || die "scp failed"
 scp -i "$KEY" -o StrictHostKeyChecking=no "$R"/pi/systemd/bridge-{return-audio,feeder-audio,feeder-net,uvcd}.service \
   "pi@$PI:/tmp/" >/dev/null || die "scp units failed"
@@ -78,6 +81,15 @@ sudo grep -q 'RATE MISMATCH' $M/usr/local/bin/bridge-web.py \
   && echo "  ✅ 5/6 bridge-web (rate-aware check + mismatch telemetry)" \
   || { echo "  ❌ bridge-web markers missing"; exit 1; }
 
+# ---- 5b. AGENT: without this the fleet's deploy-script command is rejected as unknown,
+#      so the whole remote-deploy feature is unreachable. Missing this in the first deploy
+#      is exactly why the live test could not run.
+sudo cp -n $M/usr/local/bin/bridge-agent.py $M/usr/local/bin/bridge-agent.py.pre-final 2>/dev/null || true
+sudo install -m 0755 /tmp/bridge-agent.py $M/usr/local/bin/bridge-agent.py
+sudo grep -q 'deploy-script' $M/usr/local/bin/bridge-agent.py \
+  && echo "  ✅ 5b/7 agent knows deploy-script + revert-script" \
+  || { echo "  ❌ agent missing deploy-script"; exit 1; }
+
 # ---- 6. units LAST, now that the loader they reference exists ----
 for u in bridge-return-audio bridge-feeder-audio bridge-feeder-net bridge-uvcd; do
   [ -f /tmp/$u.service ] || continue
@@ -97,7 +109,7 @@ done
 [ "$missing" = "0" ] && echo "  ✅ every unit ExecStart resolves on the card"
 
 sudo sync; sudo umount /mnt/tc && echo "  ✅ unmounted cleanly"; sudo sync
-rm -f /tmp/bridge-run.sh /tmp/bridge-deploy-script.sh /tmp/bridge-return-audio.sh /tmp/bridge-web.py /tmp/script-pubkey.pem /tmp/bridge-*.service
+rm -f /tmp/bridge-run.sh /tmp/bridge-deploy-script.sh /tmp/bridge-return-audio.sh /tmp/bridge-web.py /tmp/bridge-agent.py /tmp/script-pubkey.pem /tmp/bridge-*.service
 REMOTE
 rc=$?
 echo
