@@ -37,7 +37,15 @@ def require_device(authorization: str | None = Header(default=None),
 
 def _user_for_token(tok: str, db: Session):
     from .models import User, utcnow
-    u = db.scalar(select(User).where(User.token_hash == hash_token(tok)))
+    th = hash_token(tok)
+    u = db.scalar(select(User).where(User.token_hash == th))
+    if u is None:
+        # Any live session for this user is equally valid — see models.Session for why a
+        # single token on the user row silently logged people out of their other app.
+        from .models import Session as _S
+        sess = db.scalar(select(_S).where(_S.token_hash == th))
+        if sess is not None:
+            u = db.get(User, sess.user_id)
     if u:
         u.last_seen = utcnow()
         db.commit()

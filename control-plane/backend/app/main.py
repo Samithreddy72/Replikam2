@@ -678,7 +678,10 @@ def redeem_invite(body: dict, db: Session = Depends(get_db)):
         raise HTTPException(401, "invalid or already-used invite")
     import secrets as _s
     token = _s.token_urlsafe(32)
-    u.token_hash = auth.hash_token(token)
+    # Record this sign-in as its own session rather than overwriting the user's only
+    # token — signing in here must not sign you out of the panel or the presenter app.
+    from .models import Session as _S
+    db.add(_S(user_id=u.id, token_hash=auth.hash_token(token), label="sign-in"))
     u.invite_hash = None            # single use
     db.commit()
     _audit(db, auth.Actor(u.email, u.org_id, u.role), "user:redeem-invite")
@@ -746,7 +749,10 @@ def redeem_magic_link(body: dict, db: Session = Depends(get_db)):
     if not u or exp is None or exp < now:
         raise HTTPException(401, "invalid or expired code")
     token = _s.token_urlsafe(32)
-    u.token_hash = auth.hash_token(token)
+    # Record this sign-in as its own session rather than overwriting the user's only
+    # token — signing in here must not sign you out of the panel or the presenter app.
+    from .models import Session as _S
+    db.add(_S(user_id=u.id, token_hash=auth.hash_token(token), label="sign-in"))
     u.login_hash = None                     # single use
     u.login_expires = None
     db.commit()

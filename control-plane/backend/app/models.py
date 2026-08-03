@@ -190,3 +190,20 @@ class RolloutTarget(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     rollout: Mapped[Rollout] = relationship(back_populates="targets")
+
+
+class Session(Base):
+    """One live sign-in. A user may hold SEVERAL at once.
+
+    The bearer token used to live on the user row, so every sign-in overwrote the last one:
+    signing into the presenter app silently logged you out of the fleet panel, and a second
+    device logged out the first. Being signed in on the panel AND the app at the same time is
+    the normal case, not an edge case. Each sign-in now gets its own row, revocable
+    independently. User.token_hash is kept so tokens minted before this still work."""
+    __tablename__ = "sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    token_hash: Mapped[str] = mapped_column(String, index=True)
+    label: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow)
