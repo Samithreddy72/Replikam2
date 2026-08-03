@@ -155,8 +155,13 @@ const isAdmin = () => ROLE !== "presenter";
 
 function gate(err){ $("panel").classList.add("hidden"); $("gate").classList.remove("hidden");
   $("gateerr").textContent = err || ""; $("invitein").focus(); }
-function saveKey(){ KEY = $("keyin").value.trim(); localStorage.setItem("nb_admin_key", KEY);
-  WHO=""; ROLE=""; $("gate").classList.add("hidden"); refresh(true); }
+async function saveKey(){ const v = $("keyin").value.trim(); if(!v) return;
+  const prev = KEY; KEY = v; WHO=""; ROLE="";
+  // Validate BEFORE persisting: a key that never worked must not be left behind, or it
+  // silently poisons every later sign-in attempt (including emailed links).
+  try { await api("/auth/whoami"); localStorage.setItem("nb_admin_key", KEY);
+        $("gate").classList.add("hidden"); refresh(true); }
+  catch(e){ KEY = prev; localStorage.removeItem("nb_admin_key"); gate("that key was rejected"); } }
 async function redeem(){
   const invite = $("invitein").value.trim();
   if (!invite) return;
@@ -560,7 +565,7 @@ async function refresh(first){
 // If we arrived from an emailed sign-in link (/signin?code=…), redeem it first.
 (async () => {
   const code = new URLSearchParams(location.search).get("code");
-  if (code && !KEY) { await redeemCode(code); }
+  if (code) { await redeemCode(code); }
   refresh(true);
 })();
 setInterval(refresh, 5000);
