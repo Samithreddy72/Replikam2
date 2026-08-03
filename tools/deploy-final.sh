@@ -89,8 +89,10 @@ echo "  ✅ 6/6 $n units now start through the loader"
 
 # every unit's ExecStart must point at something that exists, or that service is dead on boot
 missing=0
-for f in $(sudo grep -ho 'ExecStart=[^ ]*' $M/etc/systemd/system/bridge-*.service $M/lib/systemd/system/bridge-*.service 2>/dev/null | sed 's/ExecStart=//' | sort -u); do
-  sudo test -x "$M${f#/}" 2>/dev/null || sudo test -x "$M$f" || { echo "  ❌ ExecStart missing on card: $f"; missing=1; }
+# Strip systemd's ExecStart prefixes (-, @, +, !, :) before testing the path — leaving the
+# '-' on turned /bin/sh into '-/bin/sh' and reported three false failures on a good card.
+for f in $(sudo grep -ho 'ExecStart=[^ ]*' $M/etc/systemd/system/bridge-*.service $M/lib/systemd/system/bridge-*.service 2>/dev/null | sed 's/ExecStart=//' | sed 's/^[-@+!:]*//' | sort -u); do
+  sudo test -x "$M$f" || { echo "  ❌ ExecStart missing on card: $f"; missing=1; }
 done
 [ "$missing" = "0" ] && echo "  ✅ every unit ExecStart resolves on the card"
 
