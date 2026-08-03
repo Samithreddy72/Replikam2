@@ -1232,12 +1232,37 @@ const FIXES={
   voice_arriving:'Your mic is not reaching the bridge. Pick a different microphone above, then End session and go live again.',
   client_sees_camera:'The meeting laptop cannot see the camera. Re-seat the USB cable at the laptop end, then pick "NetBridge" as the camera in Zoom/Teams.',
   return_audio:'No sound coming back. Play something on the meeting laptop and make sure its output is set to the NetBridge speaker.'};
+// Older bridges judge return audio against a hardcoded ">40000 frames/s", which only 48kHz
+// can ever reach — so a perfectly healthy 32kHz meeting (~34000/s) is reported red while the
+// presenter hears clean audio. A check that cries wolf is worse than no check: the presenter
+// stops believing the green lights. Re-judge here from the number the bridge already reports:
+// if the measured pace sits within 4% of a rate the gadget actually offers, audio IS flowing.
+// Newer bridges do this themselves and their verdict is already correct, so this only ever
+// rescues a false red — it never turns a real failure green (a stalled stream reports a pace
+// near zero, which matches no rate).
+// The lowest rate the gadget offers. "Flowing" means the capture is moving at something
+// like an audio rate - NOT that we can identify which one. Measured pace runs a few percent
+// above nominal (the sampling window is wall-clock, not sample-clock), and 44.1k and 48k sit
+// only 8.8% apart, so nearest-rate matching mislabels; a floor does not.
+const MIN_OFFERED_RATE=32000;
+function rescueReturnAudio(v){
+  if(!v||v.ok)return v;
+  const d=v.detail||'';
+  if(/mismatch/i.test(d))return v;                // a real rate mismatch must stay red
+  const m=/~\s*(\d+)\s*\/s/.exec(d);
+  if(!m)return v;                                 // "stream not open" has no pace: stays red
+  const pace=parseInt(m[1],10);
+  return pace>0.7*MIN_OFFERED_RATE
+    ? {ok:true,detail:'audio flowing (~'+pace+' frames/s)'}
+    : v;                                          // stalled stream reports near zero: stays red
+}
 async function poll(){
   const h=host(); if(!h)return; const c=await j('/api/checks?host='+h); if(c._error)return;
   const map=[['c1','l1','online'],['c2','l2','video_arriving'],['c5','l5','voice_arriving'],
              ['c3','l3','client_sees_camera'],['c4','l4','return_audio']];
   let firstBad=null;
-  for(const [ci,li,k] of map){const v=c[k]||{};
+  for(const [ci,li,k] of map){let v=c[k]||{};
+    if(k==='return_audio')v=rescueReturnAudio(v);
     $(ci).className=v.ok?'ok':'bad';
     $(li).textContent=(v.detail||'').slice(0,42);
     if(!v.ok&&!firstBad)firstBad=k;}
