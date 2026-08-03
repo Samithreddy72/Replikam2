@@ -160,8 +160,18 @@ echo 0 > "$RUNDIR/last_restart"
     now=$(date +%s)
     last="$(cat "$RUNDIR/last_restart" 2>/dev/null)"; last="${last:-0}"
     if [ $((now - last)) -lt "$MIN_RESTART_GAP_S" ]; then
-      echo "bridge-return-audio: ${cur}->${new} ignored (re-opened <${MIN_RESTART_GAP_S}s ago)" >&2
-      continue
+      # DEFER, never drop. This limiter once DISCARDED a 48->32 switch that arrived inside
+      # the window; the control then sat steady at 32000 so no further event ever came, and
+      # the pipeline ran 44.1k-caps against a 32k device indefinitely - alive, errorless,
+      # and audibly ROBOTIC at 72% speed (36 RTP pkts/s instead of 50). Sleep out the
+      # window, re-read the control, and apply if the change is still real.
+      wait_s=$((MIN_RESTART_GAP_S - (now - last)))
+      echo "bridge-return-audio: ${cur}->${new} deferred ${wait_s}s (re-opened recently)" >&2
+      sleep "$wait_s"
+      new="$(host_rate)"
+      cur="$(cat "$RUNDIR/rate" 2>/dev/null)"
+      [ -n "$new" ] && [ "$new" != "0" ] && [ "$new" != "$cur" ] && rate_ok "$new" || continue
+      now=$(date +%s)
     fi
     echo "$now" > "$RUNDIR/last_restart"
     echo "bridge-return-audio: host switched ${cur} -> ${new} Hz; following" >&2
@@ -194,7 +204,26 @@ while true; do
   echo "$R" > "$RUNDIR/rate"
   started=$(date +%s)
   start_pipeline "$R"
+  # Event-loss-proof reconcile: while the pipeline runs, periodically compare the LIVE
+  # control against the rate it was opened at. A mismatched-but-alive pipeline throws no
+  # error - u_audio keeps the old-session stream running when the host changes rate - so
+  # neither the crash path nor the event path can catch it. This watchdog can.
+  (
+    while kill -0 "$GST_PID" 2>/dev/null; do
+      sleep 30
+      live="$(host_rate)"
+      [ -n "$live" ] && [ "$live" != "0" ] || continue
+      rate_ok "$live" || continue
+      [ "$live" = "$(cat "$RUNDIR/rate" 2>/dev/null)" ] && continue
+      echo "bridge-return-audio: mismatch watchdog - device at ${live}, pipeline at $(cat "$RUNDIR/rate" 2>/dev/null); re-opening" >&2
+      echo "$live" > "$RUNDIR/rate"
+      kill "$GST_PID" 2>/dev/null
+      break
+    done
+  ) &
+  WD_PID=$!
   wait "$GST_PID"
+  kill "$WD_PID" 2>/dev/null; wait "$WD_PID" 2>/dev/null
   ran=$(( $(date +%s) - started ))
   # Crash-looping (not a rate change) - hand back to systemd rather than spin here.
   if [ "$ran" -lt 5 ]; then
