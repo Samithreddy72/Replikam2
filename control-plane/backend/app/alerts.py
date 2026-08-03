@@ -25,6 +25,11 @@ def is_online(dev: Device) -> bool:
 _FIXES = {
     "clock_suspect": {"command": "reset-clock", "args": {}, "label": "Reset audio clock now"},
     "service_down":  {"command": "restart",     "args": {}, "label": "Restart media services"},
+    # Return audio running at the wrong rate (pitch-shifted/robotic). The bridge's own
+    # watchdog re-opens it within ~10s, so by the time a human reads this it is usually
+    # already fixed - the alert's job is the AUDIT TRAIL (it kept happening silently for
+    # a whole evening once). The fix restarts media services for the stubborn case.
+    "return_mismatch": {"command": "restart", "args": {}, "label": "Re-sync return audio now"},
 }
 
 
@@ -96,6 +101,16 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
         pass
     if t.get("clock_suspect"):
         out.append({"kind": "clock_suspect", "detail": "return-audio I/O errors; run reset-clock"})
+    # Rate mismatch: the robotic/pitch-shift class. Published by the bridge's watchdog the
+    # moment device pace and pipeline caps disagree; the file (and so this alert) clears on
+    # the next successful re-open. Discovered 2026-08-01: 36 or 69 RTP pkts/s where
+    # real-time is 50 = exactly this, and NOTHING else in the system could see it.
+    mm = t.get("return_mismatch")
+    if mm:
+        out.append({"kind": "return_mismatch",
+                    "detail": "return audio wrong-rate: device %sHz vs pipeline %sHz "
+                              "(pitch-shifted; self-heal <10s)" % (
+                                  mm.get("device_rate", "?"), mm.get("pipeline_rate", "?"))})
     # PIN brute-force: the device locked itself after 3 wrong tries. This alert IS
     # the "pages its admin" of the walkthrough — no auto-fix (rotate the PIN offline).
     pin = t.get("pin") or {}

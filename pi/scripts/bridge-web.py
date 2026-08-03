@@ -178,6 +178,8 @@ def gather():
         "uvcd": svc_restarts("bridge-uvcd"),
         "return_audio": svc_restarts("bridge-return-audio"),
     }
+    d["return_mismatch"] = _return_mismatch()   # None = healthy; dict = wrong-rate now
+    d["return_rate"] = _return_opened_rate()    # what the pipeline is opened at (0=idle)
     suspect, detail = clock_verdict()
     d["clock_suspect"] = suspect          # bool (backward compat for the control plane)
     d["clock"] = detail                   # M4: full FFT verdict {verdict,score,reasons,...}
@@ -190,6 +192,24 @@ def gather():
 # so they block ~2s. That is why they live on /api/checks, NOT in gather().
 
 PCM_RETURN_STATUS = "/proc/asound/UAC2Gadget/pcm0c/sub0/status"
+RETURN_RUNDIR = "/run/bridge-return-audio"
+
+def _return_opened_rate():
+    """The rate the return pipeline opened the capture at (written by
+    bridge-return-audio.sh). 0 = unknown/idle."""
+    try:
+        return int(open(RETURN_RUNDIR + "/rate").read().strip())
+    except Exception:
+        return 0
+
+def _return_mismatch():
+    """Watchdog-published rate-mismatch event, or None. Present only between the
+    watchdog detecting device!=pipeline rate and the next successful re-open, so its
+    mere existence means 'return audio is currently wrong-rate (self-heal underway)'."""
+    try:
+        return json.loads(open(RETURN_RUNDIR + "/mismatch").read())
+    except Exception:
+        return None
 
 def _udc_state():
     udcdir = "/sys/class/udc"
@@ -264,8 +284,26 @@ def checks():
         audio_ok, audio_detail = False, "return capture stream not open (client mic path idle)"
     else:
         dp = p1 - p0
-        audio_ok = dp > 40000 * win  # 48 kHz nominal; >40k frames/s = flowing
-        audio_detail = "hw_ptr advanced %d frames in %.0fs (~%d/s)" % (dp, win, dp / win)
+        rate = dp / win
+        opened = _return_opened_rate()
+        expect = opened or 48000
+        # RATE-AWARE, not hardcoded: the old '>40000/s' threshold marked a perfectly
+        # healthy 32 kHz session (~34k/s) as red. Flowing = within reach of the rate the
+        # pipeline actually opened at.
+        flowing = rate > 0.7 * expect
+        # THE MISMATCH ALARM. Device pace vs pipeline caps disagreeing >12% is the
+        # robotic/pitch bug (a mismatched-but-alive stream throws no error anywhere
+        # else). hw_ptr advances at the DEVICE's true pace; `opened` is what the
+        # pipeline believes. 50 RTP pkts/s is the same invariant seen from outside.
+        mismatch = flowing and opened and abs(rate / opened - 1.0) > 0.12
+        if mismatch:
+            audio_ok = False
+            audio_detail = ("RATE MISMATCH: device ~%d/s vs pipeline %d — audio is "
+                            "pitch-shifted; self-heals within ~10s" % (rate, opened))
+        else:
+            audio_ok = flowing
+            audio_detail = "hw_ptr advanced %d frames in %.0fs (~%d/s @ %s)" % (
+                dp, win, rate, ("%dHz" % opened) if opened else "?")
 
     if vpid is None:
         voice_ok, voice_detail = False, "voice feeder process not running"

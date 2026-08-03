@@ -93,6 +93,7 @@ rate_ok() { case " $ALLOWED_RATES " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 # it is a pass-through and costs nothing.
 start_pipeline() {
   local rate="$1"
+  rm -f "$RUNDIR/mismatch" 2>/dev/null   # a fresh start at the reconciled rate = resolved
   echo "bridge-return-audio: capture @ ${rate} Hz -> ${DEST_IP}:${DEST_PORT}" >&2
   # RETURN_SRC_PROPS: extra alsasrc properties (e.g. "slave-method=none provide-clock=false").
   # RETURN_PRE_RESAMPLE: elements spliced in before audioresample (e.g. "audiorate").
@@ -225,6 +226,12 @@ while true; do
       rate_ok "$live" || continue
       [ "$live" = "$(cat "$RUNDIR/rate" 2>/dev/null)" ] && continue
       echo "bridge-return-audio: mismatch watchdog - device at ${live}, pipeline at $(cat "$RUNDIR/rate" 2>/dev/null); re-opening" >&2
+      # Publish the event for telemetry/alerts (bridge-web reads this into /api/status ->
+      # fleet -> email). One file, cleared on the next successful start, so the alert
+      # self-resolves the moment the pipeline is correct again.
+      printf '{"device_rate":%s,"pipeline_rate":%s,"ts":%s}\n' \
+        "$live" "$(cat "$RUNDIR/rate" 2>/dev/null || echo 0)" "$(date +%s)" \
+        > "$RUNDIR/mismatch" 2>/dev/null
       echo "$live" > "$RUNDIR/rate"
       kill "$GST_PID" 2>/dev/null
       break
