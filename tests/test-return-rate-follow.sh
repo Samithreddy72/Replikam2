@@ -117,11 +117,21 @@ P=$(run 60); sleep 2                      # 60s minimum gap
 sethost 44100; event; sleep 2.5           # 1st change: expected to be honoured
 [ "$(nth 2)" = "44100" ] && ok "first rate change is honoured despite the limit" \
                          || no "first change was wrongly blocked (got: $(rates))"
-sethost 32000; event; sleep 2.5           # 2nd change, well inside 60s: must be blocked
-[ "$(nlines)" = "2" ] && ok "rate-limit blocks a too-soon re-open (the 21.6/s safety net)" \
+sethost 32000; event; sleep 2.5           # 2nd change, well inside 60s: must be DEFERRED
+[ "$(nlines)" = "2" ] && ok "rate-limit holds inside the window (the 21.6/s safety net)" \
                       || no "rate-limit did not hold (got: $(rates))"
-grep -q "ignored (re-opened" "$T/out.log" && ok "rate-limit is logged, not silent" \
-                                          || no "rate-limit suppressed without a log line"
+grep -q "deferred" "$T/out.log" && ok "blocked change is DEFERRED and logged, not dropped" \
+                               || no "no deferral log line"
+kill -9 $P 2>/dev/null; stopall
+
+# deferral must eventually APPLY: with a 4s window, a change at t=2 lands by ~t=7.
+# (Dropping it silently is the robotic-32k bug: control sits steady, no event ever again.)
+: > "$RATE_LOG"; : > "$T/out.log"; sethost 48000; event
+P=$(run 4); sleep 2
+sethost 44100; event                       # inside the 4s window -> deferred
+sleep 7
+[ "$(tail -1 "$RATE_LOG")" = "44100" ] && ok "deferred change is applied after the window" \
+                                       || no "deferred change was lost (got: $(rates))"
 kill -9 $P 2>/dev/null; stopall
 
 # ============ 4b. THE WEDGE (2026-07-31 hardware failure, must never recur) ============
