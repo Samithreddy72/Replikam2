@@ -215,7 +215,11 @@ while true; do
   # neither the crash path nor the event path can catch it. This watchdog can.
   (
     while kill -0 "$GST_PID" 2>/dev/null; do
-      sleep 30
+      # 10s, down from 30: measured on hardware, single rate switches sometimes settle via
+      # THIS watchdog rather than the event path (the user waited 15-20s). The check is one
+      # amixer read - cheap enough to run 6x/min - and it bounds worst-case adaptation at
+      # ~10-12s instead of ~30.
+      sleep 10
       live="$(host_rate)"
       [ -n "$live" ] && [ "$live" != "0" ] || continue
       rate_ok "$live" || continue
