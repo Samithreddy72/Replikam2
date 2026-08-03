@@ -26,7 +26,13 @@ set -uo pipefail
 NAME="${1:?usage: bridge-run.sh <script-name> [args...]}"; shift || true
 BAKED="/usr/local/bin/$NAME"
 DIR="/data/overrides"
-PUBKEY="/data/config/script-pubkey.pem"
+# TRUST ANCHOR on the READ-ONLY root, not on the writable data partition. Putting it in
+# /data was a security hole: overrides live in /data too, so anyone able to write there could
+# replace the key and then sign their own code. Root is mounted ro, so the anchor is immutable
+# for exactly the party this mechanism defends against. /data is kept only as a fallback for
+# cards imaged before this change, and is checked SECOND so it can never override the anchor.
+PUBKEY="/etc/netbridge/script-pubkey.pem"
+[ -f "$PUBKEY" ] || PUBKEY="/data/config/script-pubkey.pem"
 STATE="/data/overrides/.state"
 TRIP_N="${BRIDGE_RUN_TRIP_N:-3}"
 TRIP_WINDOW_S="${BRIDGE_RUN_TRIP_WINDOW_S:-120}"

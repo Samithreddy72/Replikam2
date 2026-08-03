@@ -55,12 +55,17 @@ sudo install -m 0755 /tmp/bridge-run.sh          $M/usr/local/bin/bridge-run.sh
 sudo bash -n $M/usr/local/bin/bridge-run.sh || { echo "  ❌ loader syntax on card"; exit 1; }
 echo "  ✅ 1/6 loader installed  ($(sudo md5sum $M/usr/local/bin/bridge-run.sh | cut -c1-12))"
 
-# ---- 2. public key (without it the loader always runs the baked-in copy) ----
-sudo mkdir -p $M/data/config $M/data/overrides 2>/dev/null || true
-sudo install -m 0644 /tmp/script-pubkey.pem $M/data/config/script-pubkey.pem 2>/dev/null \
-  || sudo install -m 0644 /tmp/script-pubkey.pem $M/etc/netbridge-script-pubkey.pem
-sudo grep -q 'PUBLIC KEY' $M/data/config/script-pubkey.pem 2>/dev/null \
-  && echo "  ✅ 2/6 signing pubkey installed" || echo "  ⚠️ 2/6 pubkey staged to /etc (data partition not on this card)"
+# ---- 2. public key: THE TRUST ANCHOR, on the read-only root ----
+# The first attempt wrote this to $M/data/config — but /data is a SEPARATE partition mounted
+# OVER that path at boot, so the file was invisible at runtime and the device (correctly)
+# refused every deploy with "no pubkey ... cannot verify". Putting it on the root also closes
+# a real hole: /data is writable, and a key living beside the overrides could be swapped by
+# whoever can write there. The anchor belongs where the override mechanism cannot reach it.
+sudo mkdir -p $M/etc/netbridge
+sudo install -m 0644 /tmp/script-pubkey.pem $M/etc/netbridge/script-pubkey.pem
+sudo grep -q 'PUBLIC KEY' $M/etc/netbridge/script-pubkey.pem \
+  && echo "  ✅ 2/6 trust anchor at /etc/netbridge/script-pubkey.pem (read-only root)" \
+  || { echo "  ❌ pubkey did not install"; exit 1; }
 
 # ---- 3. deploy helper ----
 sudo install -m 0755 /tmp/bridge-deploy-script.sh $M/usr/local/bin/bridge-deploy-script.sh

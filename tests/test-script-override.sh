@@ -20,7 +20,7 @@ no(){ echo "  FAIL  $1"; fail=$((fail+1)); }
 
 # A sandbox that stands in for the device's filesystem: the loader takes its paths from the
 # environment so the whole thing runs on a laptop.
-mkdir -p "$T/baked" "$T/data/overrides" "$T/data/config"
+mkdir -p "$T/baked" "$T/data/overrides" "$T/data/config" "$T/root"
 cat > "$T/baked/demo.sh" <<'EOF'
 #!/bin/bash
 echo "BAKED"
@@ -29,7 +29,7 @@ chmod +x "$T/baked/demo.sh"
 
 # Real keys — the point of the test is that real openssl verification gates execution.
 openssl ecparam -name prime256v1 -genkey -noout -out "$T/key.pem" 2>/dev/null
-openssl ec -in "$T/key.pem" -pubout -out "$T/data/config/script-pubkey.pem" 2>/dev/null
+openssl ec -in "$T/key.pem" -pubout -out "$T/root/script-pubkey.pem" 2>/dev/null
 openssl ecparam -name prime256v1 -genkey -noout -out "$T/evil.pem" 2>/dev/null
 
 mkoverride(){ printf '#!/bin/bash\necho "%s"\n' "$1" > "$T/data/overrides/demo.sh"
@@ -44,7 +44,8 @@ clear_ovr(){ rm -f "$T/data/overrides/demo.sh" "$T/data/overrides/demo.sh.sig"
 # not a copy of the logic — a reimplementation would pass while the shipped script failed.)
 sed -e "s#^BAKED=.*#BAKED=\"$T/baked/\$NAME\"#" \
     -e "s#^DIR=.*#DIR=\"$T/data/overrides\"#" \
-    -e "s#^PUBKEY=.*#PUBKEY=\"$T/data/config/script-pubkey.pem\"#" \
+    -e "s#^PUBKEY=\"/etc.*#PUBKEY=\"$T/root/script-pubkey.pem\"#" \
+    -e "s#^\[ -f \"\$PUBKEY\" \] || PUBKEY=.*#[ -f \"\$PUBKEY\" ] || PUBKEY=\"$T/data/config/script-pubkey.pem\"#" \
     -e "s#^STATE=.*#STATE=\"$T/data/overrides/.state\"#" \
     "$LOADER" > "$T/run.sh"
 chmod +x "$T/run.sh"
@@ -76,10 +77,10 @@ printf '#!/bin/bash\necho "TAMPERED"\n' > "$T/data/overrides/demo.sh"   # same s
 
 # ===================== 6. missing pubkey = fail safe =====================
 clear_ovr; mkoverride "OVERRIDE"; sign
-mv "$T/data/config/script-pubkey.pem" "$T/pub.bak"
+mv "$T/root/script-pubkey.pem" "$T/pub.bak"
 [ "$(run)" = "BAKED" ] && ok "no pubkey on the device -> baked-in (cannot verify = do not run)" \
                        || no "ran an override with no way to verify it"
-mv "$T/pub.bak" "$T/data/config/script-pubkey.pem"
+mv "$T/pub.bak" "$T/root/script-pubkey.pem"
 
 # ===================== 7. auto-rollback quarantines a crash-looper =====================
 clear_ovr; mkoverride "OVERRIDE"; sign
@@ -102,6 +103,15 @@ mkoverride "NEWVERSION"; sign; rm -rf "$T/data/overrides/.state" "$T/data/overri
 # ===================== 9. path traversal is refused =====================
 out="$(bash "$T/run.sh" ../../etc/passwd 2>&1; echo "rc=$?")"
 echo "$out" | grep -q 'rc=64' && ok "path-traversal script name is refused" || no "traversal not refused: $out"
+
+# ========= 9b. the writable partition cannot override the root trust anchor =========
+# The original design kept the pubkey in /data - the same writable place overrides live, so
+# anyone able to drop a file there could install THEIR key and then sign their own code.
+clear_ovr; mkoverride "EVIL"; sign "$T/evil.pem"
+openssl ec -in "$T/evil.pem" -pubout -out "$T/data/config/script-pubkey.pem" 2>/dev/null
+[ "$(run)" = "BAKED" ] && ok "a pubkey planted in /data cannot override the read-only anchor" \
+                       || no "writable-partition key was trusted — SECURITY FAILURE"
+rm -f "$T/data/config/script-pubkey.pem"
 
 # ===================== 10. the signing tool round-trips =====================
 if bash "$SIGNER" --pubkey >/dev/null 2>&1; then

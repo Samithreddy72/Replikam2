@@ -11,7 +11,9 @@
 #   bridge-deploy-script.sh --list                what is currently overridden
 set -uo pipefail
 DIR=/data/overrides
-PUBKEY=/data/config/script-pubkey.pem
+# Same trust anchor as the loader: read-only root first, /data only as a legacy fallback.
+PUBKEY=/etc/netbridge/script-pubkey.pem
+[ -f "$PUBKEY" ] || PUBKEY=/data/config/script-pubkey.pem
 STAGE=/tmp/bridge-deploy.$$
 log()  { echo "bridge-deploy: $*"; }
 die()  { echo "bridge-deploy: ERROR $*" >&2; rm -rf "$STAGE"; exit "${2:-1}"; }
