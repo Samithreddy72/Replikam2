@@ -35,7 +35,11 @@ DEBOUNCE_S="${RETURN_DEBOUNCE_S:-1}"
 # thought the rate moved; re-opening a live ALSA capture over and over destroyed the audio
 # (measured 21.6 dropouts/sec, vs 0.2 with no follower at all). Even if every other guard
 # here fails, this caps re-opens to one per interval.
-MIN_RESTART_GAP_S="${RETURN_MIN_RESTART_GAP_S:-20}"
+# 8s, down from 20: the gap exists to stop restart CASCADES, and since blocked changes
+# are now DEFERRED (not dropped), a long window only delays legitimate switches - at 20s
+# a user hopping rates waited up to 20s for audio to land. 8s still caps any cascade at
+# ~7 restarts/min worst case while feeling immediate to a human.
+MIN_RESTART_GAP_S="${RETURN_MIN_RESTART_GAP_S:-8}"
 RUNDIR="${RETURN_RUNDIR:-/run/bridge-return-audio}"
 mkdir -p "$RUNDIR" 2>/dev/null || RUNDIR=/tmp
 
@@ -114,6 +118,7 @@ start_pipeline() {
 }
 
 cleanup() {
+  [ -n "${WD_PID:-}" ] && kill "$WD_PID" 2>/dev/null
   [ -n "${MON_PID:-}" ] && kill "$MON_PID" 2>/dev/null
   [ -n "${GST_PID:-}" ] && kill "$GST_PID" 2>/dev/null
   exit 0
