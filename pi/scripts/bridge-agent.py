@@ -36,6 +36,13 @@ ALLOWED = {
     "start":       lambda a: ["bridge", "restart"],
     "stop":        lambda a: ["bridge", "stop"],
     "diagnose":    lambda a: ["sudo", "/usr/local/bin/bridge-diagnose.sh"],
+    # Remote script deploy. The payload is NOT trusted here: bridge-deploy-script.sh verifies
+    # the detached EC signature before installing, and bridge-run.sh verifies again at every
+    # service start. This command only names WHICH script and WHERE to fetch it.
+    "deploy-script": lambda a: ["sudo", "/usr/local/bin/bridge-deploy-script.sh",
+                                _script_name(a.get("name")), _src(a.get("source"))],
+    "revert-script": lambda a: ["sudo", "/usr/local/bin/bridge-deploy-script.sh",
+                                "--revert", _script_name(a.get("name"))],
     "set-pin":     lambda a: ["sudo", "bridge-pin", "set", _pin(a.get("pin"))],
     "unlock":      lambda a: ["sudo", "bridge-pin", "unlock", _pin(a.get("pin"))],
     "lock":        lambda a: ["sudo", "bridge-pin", "lock"],
@@ -63,6 +70,14 @@ def _src(v):
         raise ValueError("bad update source %r" % (v,))
     return v
 
+
+def _script_name(v):
+    """A bare <something>.sh — no paths, no traversal. This value becomes a filename under
+    /data/overrides on the device."""
+    v = str(v or "")
+    if not re.fullmatch(r"[a-zA-Z0-9._-]+\.sh", v) or v.startswith("."):
+        raise ValueError("bad script name")
+    return v
 
 def _enum(v, allowed):
     if v not in allowed:

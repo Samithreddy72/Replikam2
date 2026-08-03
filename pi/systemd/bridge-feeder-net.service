@@ -5,7 +5,7 @@ Wants=bridge-gadget.service
 StartLimitIntervalSec=0
 [Service]
 ExecStartPre=/usr/local/bin/bridge-wait.sh video40
-ExecStart=/usr/local/bin/bridge-feeder-net.sh
+ExecStart=/usr/local/bin/bridge-run.sh bridge-feeder-net.sh
 Restart=always
 TimeoutStopSec=5
 KillMode=mixed
