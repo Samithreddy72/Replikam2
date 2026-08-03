@@ -406,7 +406,16 @@ class Session:
         self.return_player = "none"
         self.voice_proc = None
         self.return_proc = None     # the return-audio player, tracked so it can be toggled
-        self.return_on = True       # "Play meeting audio here" — on by default
+        self.return_on = True
+        # Return-audio tunables, seeded from env and changeable mid-session (see
+        # set_return_tuning). Kept on the session, not read from os.environ at each start,
+        # so a presenter can correct pumping or jitter without quitting a live meeting.
+        self.return_gain = os.environ.get("NB_RETURN_GAIN", "2.0")
+        self.return_jitter_ms = os.environ.get("NB_RETURN_JITTER_MS", "250")
+        # Compressor+limiter chain. On by default (it is what keeps voices audible over
+        # loud rooms), but switchable: the dynamics stage is the prime suspect whenever the
+        # artifact appears only on loud material, and bypassing it is the decisive test.
+        self.return_dynamics = os.environ.get("NB_RETURN_DYNAMICS", "1") != "0"       # "Play meeting audio here" — on by default
 
     @property
     def live(self):
@@ -467,6 +476,28 @@ class Session:
 
         self.return_player = self._start_return(return_port) if self.return_on else "off"
 
+    def set_return_tuning(self, gain=None, jitter_ms=None, dynamics=None):
+        """Change return-audio gain / buffer depth WITHOUT ending the session.
+
+        These were env-vars read once at app launch, so trying a different value meant
+        quitting mid-meeting - which is exactly when you discover you need one. The two
+        documented failure modes both live here: loud media "pumping" through the
+        compressor (lower the gain) and Wi-Fi timing bursts (raise the buffer). A presenter
+        should be able to fix what they are hearing while they are hearing it."""
+        if gain is not None:
+            try: self.return_gain = "%.2f" % max(0.2, min(4.0, float(gain)))
+            except (TypeError, ValueError): pass
+        if jitter_ms is not None:
+            try: self.return_jitter_ms = str(int(max(60, min(1000, int(jitter_ms)))))
+            except (TypeError, ValueError): pass
+        if dynamics is not None:
+            self.return_dynamics = bool(dynamics)
+        if self.return_on:            # re-open the player so the new values take effect
+            self.set_return(False)
+            self.set_return(True)
+        return {"gain": self.return_gain, "jitter_ms": self.return_jitter_ms,
+                "dynamics": self.return_dynamics, "player": self.return_player}
+
     def set_return(self, on):
         """Toggle 'Play meeting audio here' live, without disturbing the video/voice legs.
         Off stops just the local return player (the bridge keeps sending; you simply don't
@@ -518,18 +549,26 @@ class Session:
                 # This only works now because return audio is LAN-DIRECT — the nb-mesh relay that
                 # previously masked the fix is out of the return path. Knobs via env for tuning
                 # without a rebuild: NB_RETURN_JITTER_MS (buffer depth), NB_RETURN_GAIN (loudness).
-                lat = os.environ.get("NB_RETURN_JITTER_MS", "250")   # 180 on strong Wi-Fi; 250 here (~-53dBm)
-                gain = os.environ.get("NB_RETURN_GAIN", "2.0")
+                # Live values (seeded from env at startup, changeable mid-session via
+                # /api/return-tuning) — see set_return_tuning for why.
+                lat = getattr(self, "return_jitter_ms", None) or os.environ.get("NB_RETURN_JITTER_MS", "250")
+                gain = getattr(self, "return_gain", None) or os.environ.get("NB_RETURN_GAIN", "2.0")
                 chain = [gst, "-q",
                     "udpsrc", "port=%d" % port, "caps=" + caps, "!",
                     "rtpjitterbuffer", "latency=" + lat, "!",
                     "rtpopusdepay", "!", "opusdec", "!",
                     "audioconvert", "!", "audioresample", "quality=10", "!",
-                    "audiodynamic", "mode=compressor", "characteristics=soft-knee",
-                        "ratio=0.1", "threshold=0.12", "!",
-                    "volume", "volume=" + gain, "!",
-                    "audiodynamic", "mode=compressor", "characteristics=hard-knee",
-                        "ratio=0.08", "threshold=0.97", "!",
+                ]
+                if getattr(self, "return_dynamics", True):
+                    chain += [
+                        "audiodynamic", "mode=compressor", "characteristics=soft-knee",
+                            "ratio=0.1", "threshold=0.12", "!",
+                        "volume", "volume=" + gain, "!",
+                        "audiodynamic", "mode=compressor", "characteristics=hard-knee",
+                            "ratio=0.08", "threshold=0.97", "!"]
+                else:
+                    chain += ["volume", "volume=" + gain, "!"]   # gain only, no dynamics
+                chain += [
                     "audioconvert", "!",
                     "queue", "max-size-time=400000000", "!"]
                 if IS_MAC:
@@ -842,7 +881,7 @@ def bridge_route(host, st):
 
 
 # --------------------------------------------------------------------------- server
-from http.server import BaseHTTPRequestHandler, HTTPServer   # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer   # noqa: E402
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -864,14 +903,25 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _body(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        try:
-            return json.loads(self.rfile.read(n) or b"{}")
-        except Exception:
-            return {}
+        """Parse the JSON body — ONCE per request, cached.
+
+        A request body can only be read off the socket once. do_POST reads it up front, so
+        any handler that called _body() again blocked in rfile.read() waiting for bytes that
+        had already been consumed — the request then hung until the client gave up. That is
+        exactly what "Play meeting audio here" did: the toggle appeared dead, and the return
+        player was never actually stopped or started. Caching makes a second call free and
+        correct instead of fatal."""
+        if getattr(self, "_body_cache", None) is None:
+            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                self._body_cache = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                self._body_cache = {}
+        return self._body_cache
 
     # ---------------- GET
     def do_GET(self):
+        self._body_cache = None
         if self.path == "/":
             return self._send(UI.encode(), ctype="text/html; charset=utf-8")
         st = load_state()
@@ -884,7 +934,7 @@ class Handler(BaseHTTPRequestHandler):
                 "last_camera": st.get("camera_name"),
                 "last_mic": st.get("mic_name"),
                 "live": SESSION.live,
-                "return_on": SESSION.return_on,
+                "return_on": SESSION.return_on, "return_gain": SESSION.return_gain, "return_jitter_ms": SESSION.return_jitter_ms,
                 "version": APP_VERSION,
                 "update_note": _update_note,
             })
@@ -938,6 +988,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------- POST
     def do_POST(self):
+        self._body_cache = None      # fresh per request (connections are reused)
         st, b = load_state(), self._body()
 
         if self.path == "/api/signin-request":
@@ -1062,6 +1113,14 @@ class Handler(BaseHTTPRequestHandler):
             SESSION.stop()
             MESH.stop()
             return self._send({"ok": True})
+
+        if self.path == "/api/return-tuning":
+            # Live return-audio tuning. Both documented artifacts are fixed from here:
+            # loud media pumping through the compressor (lower gain) and Wi-Fi timing
+            # bursts (raise the buffer). No restart, no terminal, no lost session.
+            b = self._body()
+            return self._send({"ok": True,
+                               **SESSION.set_return_tuning(b.get("gain"), b.get("jitter_ms"), b.get("dynamics"))})
 
         if self.path == "/api/return":
             # "Play meeting audio here" toggle — starts/stops the local return player only.
@@ -1313,7 +1372,13 @@ def main():
     if not st.get("control_url") and len(sys.argv) > 1:
         st["control_url"] = sys.argv[1].rstrip("/")
         save_state(st)
-    srv = HTTPServer((HOST, PORT), Handler)
+    # THREADED, deliberately. /api/checks proxies the bridge and blocks ~2s by design (it
+    # samples real hw_ptr and CPU deltas). On a single-threaded server that one slow call
+    # starves everything else: the "Play meeting audio here" toggle and the tuning endpoint
+    # would simply hang until they timed out, which reads as "the app is broken" and made
+    # live audio tuning impossible. Each request is independent here, so threading is safe.
+    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    srv.daemon_threads = True
     url = "http://%s:%d/" % (HOST, PORT)
     print("NetBridge Source  ->  %s" % url)
     print("(local only; ctrl-c to quit)")
