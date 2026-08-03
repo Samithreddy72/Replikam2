@@ -898,7 +898,24 @@ def _mount_panel():
         if _os.path.isdir(_cand):
             static = _os.path.abspath(_cand)
             print("[panel] serving admin UI from %s" % static)
-            app.mount("/", StaticFiles(directory=static, html=True), name="panel")
+
+            class _NoCacheStatic(StaticFiles):
+                """Serve the panel with no-store.
+
+                StaticFiles' default validators let a browser keep showing an OLD index.html
+                after the server has been updated. That is not a cosmetic problem here: a
+                sign-in fix shipped, the server had it, and the browser kept rendering the
+                broken page and its old error text - indistinguishable from "the fix didn't
+                work", with no way for the user to tell. The panel is one small HTML file
+                served from localhost or a tailnet; revalidating it every time costs nothing
+                next to shipping a fix nobody can see."""
+                async def get_response(self, path, scope):
+                    resp = await super().get_response(path, scope)
+                    resp.headers["Cache-Control"] = "no-store, must-revalidate"
+                    resp.headers["Pragma"] = "no-cache"
+                    return resp
+
+            app.mount("/", _NoCacheStatic(directory=static, html=True), name="panel")
             return
     print("[panel] NO admin UI found — '/' will 404. Looked for panel-dist / static "
           "next to app/. Build the panel or check the checkout.")
