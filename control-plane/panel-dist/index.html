@@ -95,7 +95,7 @@
     <input id="invitein" type="password" placeholder="invite from your admin" onkeydown="if(event.key==='Enter')redeem()" style="margin-bottom:8px">
     <button onclick="redeem()" style="background:var(--ink)">Redeem invite &amp; sign in</button>
     <div style="text-align:center;color:var(--faint);font-size:11px;margin:10px 0 6px">— or —</div>
-    <input id="keyin" type="password" placeholder="personal token (or bootstrap key, first run only)" onkeydown="if(event.key==='Enter')saveKey()">
+    <input id="keyin" type="password" placeholder="paste your sign-in code (or a personal token)" onkeydown="if(event.key==='Enter')saveKey()">
     <button onclick="saveKey()" style="background:var(--ink)">Sign in with a token</button>
     <div class="err" id="gateerr"></div>
   </div>
@@ -160,8 +160,13 @@ async function saveKey(){ const v = $("keyin").value.trim(); if(!v) return;
   // Validate BEFORE persisting: a key that never worked must not be left behind, or it
   // silently poisons every later sign-in attempt (including emailed links).
   try { await api("/auth/whoami"); localStorage.setItem("nb_admin_key", KEY);
-        $("gate").classList.add("hidden"); refresh(true); }
-  catch(e){ KEY = prev; localStorage.removeItem("nb_admin_key"); gate("that key was rejected"); } }
+        $("gate").classList.add("hidden"); refresh(true); return; }
+  catch(e){ KEY = prev; localStorage.removeItem("nb_admin_key"); }
+  // Not a token — but the email sends a CODE, and this is the box people paste it into.
+  // Rejecting it outright sends you round a loop of fresh codes that can never work here.
+  // Try it as a sign-in code before giving up: one box, either credential.
+  if (await redeemCode(v)) return;
+  gate("that code or key was rejected — request a fresh sign-in code"); }
 async function redeem(){
   const invite = $("invitein").value.trim();
   if (!invite) return;
@@ -204,7 +209,7 @@ async function redeemCode(code){
     $("gate").classList.add("hidden"); refresh(true);
     toast(`welcome, ${d.email} (${d.role})`);
     return true;
-  } catch(e){ gate("sign-in link: " + e.message); return false; }
+  } catch(e){ return false; }   // the caller decides whether this was fatal
 }
 async function syncWho(){
   try { const d = await api("/auth/whoami");
@@ -565,7 +570,7 @@ async function refresh(first){
 // If we arrived from an emailed sign-in link (/signin?code=…), redeem it first.
 (async () => {
   const code = new URLSearchParams(location.search).get("code");
-  if (code) { await redeemCode(code); }
+  if (code) { if(!(await redeemCode(code))) gate("that sign-in link is expired or already used — request a fresh one"); }
   refresh(true);
 })();
 setInterval(refresh, 5000);
