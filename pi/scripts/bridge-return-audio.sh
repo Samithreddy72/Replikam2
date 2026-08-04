@@ -30,6 +30,13 @@ ALSACTL="${RETURN_ALSACTL:-alsactl}"
 # Only follow rates the gadget actually advertises. Opening hw: at a bogus rate takes the
 # return audio down completely, so an implausible reading is ignored, never acted on.
 ALLOWED_RATES="${RETURN_ALLOWED_RATES:-32000 44100 48000}"
+# PHASE 7 - echo cancellation (walkthrough J3: "your own voice already removed").
+# OFF by default until it has been judged BY EAR on real hardware: an echo canceller that
+# mis-estimates its delay does not fail loudly, it quietly chews holes in speech, and this
+# path carries the audio a presenter actually listens to. Flip with RETURN_AEC=1.
+AEC="${RETURN_AEC:-0}"
+AEC_REF_PORT="${AEC_REF_PORT:-5006}"
+AEC_SUPPRESSION="${RETURN_AEC_SUPPRESSION:-moderate}"   # low | moderate | high
 DEBOUNCE_S="${RETURN_DEBOUNCE_S:-1}"
 # THE safety net. A previous attempt polled /proc and cycled the pipeline whenever it
 # thought the rate moved; re-opening a live ALSA capture over and over destroyed the audio
@@ -106,11 +113,20 @@ start_pipeline() {
   [ -n "${RETURN_PRE_RESAMPLE:-}" ] && pre="! $RETURN_PRE_RESAMPLE "
   [ -n "${RETURN_SRC_PROPS:-}" ] && echo "bridge-return-audio: src props: $RETURN_SRC_PROPS" >&2
   [ -n "$pre" ] && echo "bridge-return-audio: pre-resample: $RETURN_PRE_RESAMPLE" >&2
-  "$GST" alsasrc device="hw:$CARD" buffer-time=200000 latency-time=20000 ${RETURN_SRC_PROPS:-} \
+  # The reference chain and the canceller must live in the SAME gst process, so both are
+  # declared here as two top-level chains of one pipeline: the probe consumes the copy the
+  # feeder tees to loopback, and webrtcdsp subtracts it from the room capture.
+  local aec_probe="" aec_filter=""
+  if [ "$AEC" = "1" ]; then
+    aec_probe="udpsrc port=$AEC_REF_PORT caps=application/x-rtp,media=audio,clock-rate=48000,encoding-name=L16,channels=2 ! queue leaky=downstream max-size-time=200000000 ! rtpL16depay ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2,format=S16LE ! webrtcechoprobe ! fakesink sync=true async=false"
+    aec_filter="webrtcdsp echo-cancel=true echo-suppression-level=$AEC_SUPPRESSION high-pass-filter=false noise-suppression=false gain-control=false voice-detection=false ! "
+  fi
+  "$GST" ${aec_probe:+$aec_probe} alsasrc device="hw:$CARD" buffer-time=200000 latency-time=20000 ${RETURN_SRC_PROPS:-} \
     ! "audio/x-raw,rate=$rate" \
     ! queue max-size-time=300000000 leaky=downstream \
     ! audioconvert $pre! audioresample quality=10 \
     ! audio/x-raw,rate=48000,channels=2,format=S16LE \
+    ! ${aec_filter}\
     ! opusenc bitrate=128000 audio-type=generic inband-fec=true packet-loss-percentage=20 \
     ! rtpopuspay pt=97 \
     ! udpsink host="$DEST_IP" port="$DEST_PORT" sync=false &

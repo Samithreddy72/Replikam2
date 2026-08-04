@@ -170,6 +170,35 @@ if grep -qE "audiorate +! +audioresample" "$T/argv.log"; then
 else no "pre-resample not spliced correctly: $(tail -1 "$T/argv.log" 2>/dev/null | cut -c1-160)"; fi
 kill -9 $P 2>/dev/null; stopall
 
+# ============ 6. PHASE 7 — echo cancellation is wired, and OFF by default ============
+# An echo canceller that mis-estimates its delay does not fail loudly; it quietly chews holes
+# in speech. So it must be opt-in, and when opted in BOTH halves must appear: the canceller
+# is useless without its far-end reference, and a probe with no canceller is dead weight.
+stopall; : > "$T/argv.log"; sethost 48000; event
+P=$(RETURN_GST="$T/bin/gst" RETURN_AMIXER="$T/bin/amixer" RETURN_ALSACTL="$T/bin/alsactl" \
+    RETURN_DEST_IP=10.0.0.1 RETURN_RUNDIR="$T/runA0" RETURN_DEBOUNCE_S=0 RETURN_MIN_RESTART_GAP_S=0 \
+    bash "$SCRIPT" >> "$T/out.log" 2>&1 & echo $!)
+sleep 2
+grep -q 'webrtcdsp' "$T/argv.log" && no "AEC is ON by default — it must be opt-in" \
+                                  || ok "AEC is OFF by default (opt-in only)"
+kill -9 $P 2>/dev/null; stopall
+
+: > "$T/argv.log"; sethost 48000; event
+P=$(RETURN_AEC=1 RETURN_GST="$T/bin/gst" RETURN_AMIXER="$T/bin/amixer" RETURN_ALSACTL="$T/bin/alsactl" \
+    RETURN_DEST_IP=10.0.0.1 RETURN_RUNDIR="$T/runA1" RETURN_DEBOUNCE_S=0 RETURN_MIN_RESTART_GAP_S=0 \
+    bash "$SCRIPT" >> "$T/out.log" 2>&1 & echo $!)
+sleep 2
+grep -q 'webrtcdsp echo-cancel=true' "$T/argv.log" && ok "RETURN_AEC=1 inserts the canceller" \
+                                                   || no "canceller missing with RETURN_AEC=1"
+grep -q 'webrtcechoprobe' "$T/argv.log" && ok "the far-end reference probe is wired too" \
+                                        || no "probe missing — the canceller has nothing to subtract"
+grep -q 'udpsrc port=5006' "$T/argv.log" && ok "probe reads the feeder's reference on 5006" \
+                                         || no "probe is not reading the reference port"
+# the canceller must sit AFTER the 48k resample: webrtcdsp only accepts 8/16/32/48 kHz
+grep -qE 'rate=48000[^!]*! *webrtcdsp' "$T/argv.log" && ok "canceller sits after the 48k resample" \
+                                                     || no "canceller placed at an unsupported rate"
+kill -9 $P 2>/dev/null; stopall
+
 echo
 echo "  rates opened: $(rates)"
 echo "  $pass passed, $fail failed"
