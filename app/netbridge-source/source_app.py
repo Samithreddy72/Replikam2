@@ -423,7 +423,15 @@ class Session:
         # equal, so the ring buffer slowly drifts and periodically jumps. GStreamer documents
         # this as "periodic fast-forwarding every few seconds" — which is what a listener
         # calls jitter. Switchable so the two modes can be judged by ear on the real path.
-        self.return_sink_sync = os.environ.get("NB_RETURN_SINK_SYNC", "0") != "0"       # "Play meeting audio here" — on by default
+        self.return_sink_sync = os.environ.get("NB_RETURN_SINK_SYNC", "0") != "0"
+        # Loss concealment. The bridge encodes with inband-fec=true and
+        # packet-loss-percentage=20 - it is ALREADY sending recovery data - but a plain
+        # opusdec ignores all of it, so every lost packet became a hole in the audio with a
+        # discontinuity at each edge, which is what a click is. It was switched off after
+        # testing on a LOSSLESS link, where concealment can only invent artifacts; the moment
+        # the link actually drops packets that trade reverses, because FEC reconstructs the
+        # real audio from redundancy rather than guessing.
+        self.return_conceal = os.environ.get("NB_RETURN_CONCEAL", "1") != "0"       # "Play meeting audio here" — on by default
 
     @property
     def live(self):
@@ -484,7 +492,7 @@ class Session:
 
         self.return_player = self._start_return(return_port) if self.return_on else "off"
 
-    def set_return_tuning(self, gain=None, jitter_ms=None, dynamics=None, sink_sync=None):
+    def set_return_tuning(self, gain=None, jitter_ms=None, dynamics=None, sink_sync=None, conceal=None):
         """Change return-audio gain / buffer depth WITHOUT ending the session.
 
         These were env-vars read once at app launch, so trying a different value meant
@@ -502,12 +510,14 @@ class Session:
             self.return_dynamics = bool(dynamics)
         if sink_sync is not None:
             self.return_sink_sync = bool(sink_sync)
+        if conceal is not None:
+            self.return_conceal = bool(conceal)
         if self.return_on:            # re-open the player so the new values take effect
             self.set_return(False)
             self.set_return(True)
         return {"gain": self.return_gain, "jitter_ms": self.return_jitter_ms,
                 "dynamics": self.return_dynamics, "sink_sync": self.return_sink_sync,
-                "player": self.return_player}
+                "conceal": self.return_conceal, "player": self.return_player}
 
     def set_return(self, on):
         """Toggle 'Play meeting audio here' live, without disturbing the video/voice legs.
@@ -566,8 +576,11 @@ class Session:
                 gain = getattr(self, "return_gain", None) or os.environ.get("NB_RETURN_GAIN", "2.0")
                 chain = [gst, "-q",
                     "udpsrc", "port=%d" % port, "caps=" + caps, "!",
-                    "rtpjitterbuffer", "latency=" + lat, "!",
-                    "rtpopusdepay", "!", "opusdec", "!",
+                    "rtpjitterbuffer", "latency=" + lat] + (
+                        ["do-lost=true"] if getattr(self, "return_conceal", True) else []) + ["!",
+                    "rtpopusdepay", "!",
+                    "opusdec"] + (["use-inband-fec=true", "plc=true"]
+                                  if getattr(self, "return_conceal", True) else []) + ["!",
                     "audioconvert", "!", "audioresample", "quality=10", "!",
                 ]
                 if getattr(self, "return_dynamics", True):
@@ -946,7 +959,7 @@ class Handler(BaseHTTPRequestHandler):
                 "last_camera": st.get("camera_name"),
                 "last_mic": st.get("mic_name"),
                 "live": SESSION.live,
-                "return_on": SESSION.return_on, "return_gain": SESSION.return_gain, "return_jitter_ms": SESSION.return_jitter_ms, "return_sink_sync": SESSION.return_sink_sync,
+                "return_on": SESSION.return_on, "return_gain": SESSION.return_gain, "return_jitter_ms": SESSION.return_jitter_ms, "return_sink_sync": SESSION.return_sink_sync, "return_conceal": SESSION.return_conceal,
                 "version": APP_VERSION,
                 "update_note": _update_note,
             })
@@ -1132,7 +1145,7 @@ class Handler(BaseHTTPRequestHandler):
             # bursts (raise the buffer). No restart, no terminal, no lost session.
             b = self._body()
             return self._send({"ok": True,
-                               **SESSION.set_return_tuning(b.get("gain"), b.get("jitter_ms"), b.get("dynamics"), b.get("sink_sync"))})
+                               **SESSION.set_return_tuning(b.get("gain"), b.get("jitter_ms"), b.get("dynamics"), b.get("sink_sync"), b.get("conceal"))})
 
         if self.path == "/api/return":
             # "Play meeting audio here" toggle — starts/stops the local return player only.
