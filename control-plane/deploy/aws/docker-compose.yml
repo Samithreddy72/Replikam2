@@ -1,0 +1,50 @@
+# NetBridge control plane — one small always-on host.
+#
+# Two containers only. Caddy terminates TLS (it gets and renews the certificate itself, no
+# cron, no certbot) and proxies to the app. The app keeps its SQLite database on a named
+# volume so a container rebuild never touches the data.
+#
+# Why not serverless: the control plane runs a background alert loop every 30s and holds an
+# on-disk database. Lambda has neither. This shape is the honest fit for the app as written.
+services:
+  fleet:
+    image: netbridge-fleet:latest
+    restart: always
+    environment:
+      # PUBLIC_BASE_URL is what puts a clickable link in sign-in emails. Without it the
+      # email carries only a paste-in code — the exact friction that cost us an hour.
+      PUBLIC_BASE_URL: "https://${FLEET_DOMAIN}"
+      DATABASE_URL: "sqlite:////data/bridge.db"
+      SMTP_HOST: "${SMTP_HOST}"
+      SMTP_PORT: "${SMTP_PORT}"
+      SMTP_USER: "${SMTP_USER}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD}"
+      ALERT_EMAIL_FROM: "${ALERT_EMAIL_FROM}"
+      ALERT_EMAIL_TO: "${ALERT_EMAIL_TO}"
+      # Left EMPTY on purpose: the bootstrap key self-retires once a real admin exists, and
+      # an unconfigured deployment should be closed, not open with a guessable credential.
+      BOOTSTRAP_TOKENS: ""
+    volumes:
+      - fleetdata:/data
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      FLEET_DOMAIN: "${FLEET_DOMAIN}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data          # certificates live here — keep this volume or you re-issue
+      - caddyconfig:/config
+    depends_on:
+      - fleet
+
+volumes:
+  fleetdata:
+  caddydata:
+  caddyconfig:

@@ -1,0 +1,18 @@
+# Automatic HTTPS. Caddy obtains and renews the certificate from Let's Encrypt on its own,
+# which is why port 80 must stay open (the ACME challenge uses it) even though everything
+# real happens on 443.
+{$FLEET_DOMAIN} {
+	encode zstd gzip
+
+	# The device tokens and admin sessions crossing this proxy are bearer credentials, so
+	# say plainly that this host is HTTPS-only and should never be downgraded.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+	}
+
+	reverse_proxy fleet:8000 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+}
