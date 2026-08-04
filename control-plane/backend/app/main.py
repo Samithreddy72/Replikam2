@@ -727,9 +727,17 @@ def request_magic_link(body: dict, db: Session = Depends(get_db)):
     # a timing side channel that defeats the no-enumeration guarantee above).
     def _send():
         try:
-            notifier.send_mail(email, "Your NetBridge sign-in link", "\n".join(lines))
-        except Exception:
-            pass
+            ok = notifier.send_mail(email, "Your NetBridge sign-in link", "\n".join(lines))
+            if not ok:
+                print("[signin] SMTP not configured — no link sent; the code is still valid "
+                      "and can be pasted into the app", flush=True)
+        except Exception as e:
+            # LOG it. Swallowing this silently meant a user who never received a link had
+            # no way to tell "the mail failed" from "the address has no account" - and
+            # neither did we. The response stays generic (no account enumeration); only
+            # the server log learns anything.
+            print("[signin] send failed for a requested link: %s: %s"
+                  % (type(e).__name__, e), flush=True)
     threading.Thread(target=_send, daemon=True).start()
     return generic
 
