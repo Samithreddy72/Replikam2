@@ -106,6 +106,12 @@ install -m 0755 restore/binaries/libuvcgadget.so.0.4.0 /usr/local/lib/aarch64-li
 ln -sf libuvcgadget.so.0.4.0 /usr/local/lib/aarch64-linux-gnu/libuvcgadget.so.0
 ldconfig
 install -d /etc/modprobe.d /etc/systemd/journald.conf.d /etc/systemd/system.conf.d /etc/NetworkManager/conf.d
+# The script-override TRUST ANCHOR, on the read-only root. Without it every bridge refuses
+# signed remote deploys ("no pubkey ... cannot verify") and card surgery comes back. It must
+# NOT live on /data: that partition is writable and holds the overrides themselves, so a key
+# there could be swapped by whoever can write it.
+install -d /etc/netbridge
+install -m 0644 pi/configs/script-pubkey.pem /etc/netbridge/script-pubkey.pem
 install -m 0644 pi/configs/v4l2loopback.conf       /etc/modprobe.d/
 install -m 0644 pi/configs/size-cap.conf           /etc/systemd/journald.conf.d/
 install -m 0644 pi/configs/journald-persistent.conf /etc/systemd/journald.conf.d/
