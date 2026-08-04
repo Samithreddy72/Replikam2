@@ -132,7 +132,19 @@ def http(method, url, token=None, body=None):
         return json.loads(raw) if raw else {}
 
 
-def enroll(base, conf, tel):
+def enroll(base, conf, tel, force=False):
+    """Return this device's token for `base`, enrolling if we do not have a usable one.
+
+    `force` discards the stored token first. That matters when the control plane MOVES: the
+    token we hold was issued by the OLD fleet, the new one has never seen it, and every call
+    401s forever while the bridge sits silently offline with nothing to explain it. Without a
+    way to re-enroll, migrating a fleet means physically rewriting every card."""
+    if force and os.path.exists(TOKEN_FILE):
+        try:
+            os.replace(TOKEN_FILE, TOKEN_FILE + ".rejected")
+            syslog("device token rejected by %s - discarded, re-enrolling" % base)
+        except OSError:
+            pass
     if os.path.exists(TOKEN_FILE):
         return open(TOKEN_FILE).read().strip()
     boot = conf.get("BOOTSTRAP_TOKEN")
@@ -254,6 +266,18 @@ def main():
         except Exception:
             body["setup_pass"] = None
         http("POST", base + "/v1/telemetry", token=token, body=body)
+    except urllib.error.HTTPError as e:
+        # 401 = this control plane does not recognise our token. That is what a fleet MOVE
+        # looks like from the device: the token was issued by the old control plane and the
+        # new one has never seen it, so every call fails forever and the bridge sits silently
+        # offline. Discard it and enrol once with the bootstrap token; if that also fails,
+        # report honestly rather than looping on a credential that cannot work.
+        if e.code in (401, 403):
+            syslog("telemetry %s from %s - re-enrolling" % (e.code, base))
+            token = enroll(base, conf, tel, force=True)
+            http("POST", base + "/v1/telemetry", token=token, body=body)
+        else:
+            raise SystemExit("telemetry failed: %s" % e)
     except urllib.error.URLError as e:
         raise SystemExit("telemetry failed: %s" % e)
     # apply one-time provisioning issued at claim
