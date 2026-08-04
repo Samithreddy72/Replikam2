@@ -41,3 +41,20 @@ A bridge that cannot reach the old URL cannot be told about the new one.
 
 `./deploy.sh fleet.<yourdomain>` — builds locally, streams the image over ssh, restarts.
 No registry, no CI dependency.
+
+## Live deployment (2026-08-04)
+
+| | |
+|---|---|
+| URL | `https://fleet.scine.online` |
+| Host | Lightsail `netbridge-fleet`, Ubuntu 22.04, micro_3_0, us-east-1a, **$7/mo** |
+| Static IP | `100.29.201.7` (DNS at GoDaddy) |
+| SSH | `ssh -i ~/.ssh/netbridge-fleet.pem ubuntu@100.29.201.7` |
+| Backups | auto-snapshot daily 07:00 UTC, 7 retained |
+| Verified | reboot → HTTPS back unattended in 30 s, certificate survived |
+
+The first admin was created with a temporary `ADMIN_API_KEY`, which was then removed — it is
+one secret shared by every operator, so it should not outlive its single job.
+
+**Not yet migrated:** bridges still point at the old control plane. See the ordering note above.
+
