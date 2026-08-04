@@ -24,6 +24,11 @@ services:
       # Left EMPTY on purpose: the bootstrap key self-retires once a real admin exists, and
       # an unconfigured deployment should be closed, not open with a guessable credential.
       BOOTSTRAP_TOKENS: ""
+      # FIRST-ADMIN bootstrap credential, normally EMPTY. Set it only long enough to create
+      # the first admin account, then clear it: auth.py retires it automatically once an
+      # admin user exists, because it is one secret shared by every operator - unrevocable
+      # per person, unattributable in the audit log, and never expiring.
+      ADMIN_API_KEY: "${ADMIN_API_KEY:-}"
       # Tailscale credentials. The control plane mints a SHORT-LIVED, TAG-SCOPED key each time
       # a bridge is claimed or the presenter app goes live — which is what lets the walkthrough
       # promise "no Tailscale key on the SD card". Without these the mint fails and the app
