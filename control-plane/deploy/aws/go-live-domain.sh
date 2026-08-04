@@ -12,9 +12,17 @@ KEY="${3:-$HOME/.ssh/netbridge-fleet.pem}"
 S="ssh -i $KEY -o StrictHostKeyChecking=accept-new ubuntu@$IP"
 
 echo "[1/4] confirming $DOMAIN resolves to $IP"
-GOT="$(dig +short "$DOMAIN" A | tail -1)"
-[ "$GOT" = "$IP" ] || { echo "  ✗ $DOMAIN -> '${GOT:-nothing}' (want $IP). DNS has not propagated; not touching Caddy."; exit 1; }
-echo "  ✓ resolves correctly"
+# Ask PUBLIC resolvers, not this machine's. The local cache can still hold an old NXDOMAIN
+# long after the record exists worldwide - which is exactly what happened here and made a
+# perfectly good record look un-propagated. Let's Encrypt resolves from the internet, so the
+# internet's answer is the one that decides whether issuance will succeed.
+GOT=""
+for R in 8.8.8.8 1.1.1.1; do
+  GOT="$(dig +short "$DOMAIN" A @"$R" 2>/dev/null | tail -1)"
+  [ "$GOT" = "$IP" ] && break
+done
+[ "$GOT" = "$IP" ] || { echo "  ✗ $DOMAIN -> '${GOT:-nothing}' via public DNS (want $IP). Not touching Caddy."; exit 1; }
+echo "  ✓ public DNS resolves correctly ($GOT)"
 
 echo "[2/4] pointing the app and Caddy at the hostname"
 $S "sudo sed -i 's|^FLEET_DOMAIN=.*|FLEET_DOMAIN=$DOMAIN|' /opt/netbridge/.env

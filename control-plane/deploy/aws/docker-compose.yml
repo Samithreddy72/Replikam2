@@ -24,6 +24,16 @@ services:
       # Left EMPTY on purpose: the bootstrap key self-retires once a real admin exists, and
       # an unconfigured deployment should be closed, not open with a guessable credential.
       BOOTSTRAP_TOKENS: ""
+      # Tailscale credentials. The control plane mints a SHORT-LIVED, TAG-SCOPED key each time
+      # a bridge is claimed or the presenter app goes live — which is what lets the walkthrough
+      # promise "no Tailscale key on the SD card". Without these the mint fails and the app
+      # silently falls back to the LAN path the walkthrough forbids.
+      TS_API_KEY: "${TS_API_KEY}"
+      TS_TAILNET: "${TS_TAILNET}"
+      TS_SOURCE_TAG: "${TS_SOURCE_TAG}"
+      TS_BRIDGE_TAG: "${TS_BRIDGE_TAG}"
+      TS_KEY_TTL_S: "${TS_KEY_TTL_S}"
+      # NB_LAN_ONLY is deliberately NOT passed. The mesh is the only sanctioned media path.
     volumes:
       - fleetdata:/data
     expose:
