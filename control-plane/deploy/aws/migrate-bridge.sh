@@ -36,6 +36,29 @@ echo "CONTROL_URL=$URL"      | sudo tee -a "\$C" >/dev/null
 echo "BOOTSTRAP_TOKEN=$BOOT" | sudo tee -a "\$C" >/dev/null
 echo "  ✅ 1/3 CONTROL_URL + BOOTSTRAP_TOKEN written"
 
+# ---- /data SHADOWS THE READ-ONLY ROOT ----
+# Learned the hard way: the agent's config and its device token are /data bind targets, so
+# writing only rootA changes nothing at runtime. The first migration attempt looked perfect
+# on the card and the bridge still 401'd forever, because /data/config/bridge-agent still
+# held an address that had been dead for weeks and /data/etc-bridge/agent.token still held
+# the OLD fleet's credential.
+if sudo mkdir -p /mnt/td && sudo mount /dev/sda4 /mnt/td 2>/dev/null; then
+  D=/mnt/td
+  if sudo test -f \$D/config/bridge-agent; then
+    sudo cp -n \$D/config/bridge-agent \$D/config/bridge-agent.pre-migrate 2>/dev/null || true
+    sudo sed -i '/^CONTROL_URL=/d;/^BOOTSTRAP_TOKEN=/d' \$D/config/bridge-agent
+    echo "CONTROL_URL=$URL"      | sudo tee -a \$D/config/bridge-agent >/dev/null
+    echo "BOOTSTRAP_TOKEN=$BOOT" | sudo tee -a \$D/config/bridge-agent >/dev/null
+    echo "  ✅ /data config updated (this is the one that actually takes effect)"
+  fi
+  for t in \$(sudo find \$D -name 'agent.token' 2>/dev/null); do
+    sudo mv "\$t" "\$t.pre-migrate" && echo "  ✅ stale device token on /data moved aside"
+  done
+  sudo sync; sudo umount /mnt/td 2>/dev/null
+else
+  echo "  ⚠️ could not mount /data — the migration may not take effect"
+fi
+
 # The old device token MUST go, or enroll() short-circuits and the bridge never registers.
 if sudo test -f \$M/etc/bridge/agent.token; then
   sudo mv \$M/etc/bridge/agent.token \$M/etc/bridge/agent.token.pre-migrate
