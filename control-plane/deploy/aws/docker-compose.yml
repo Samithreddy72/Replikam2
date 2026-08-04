@@ -23,7 +23,11 @@ services:
       ALERT_EMAIL_TO: "${ALERT_EMAIL_TO}"
       # Left EMPTY on purpose: the bootstrap key self-retires once a real admin exists, and
       # an unconfigured deployment should be closed, not open with a guessable credential.
-      BOOTSTRAP_TOKENS: ""
+      # DEVICE-enrollment token(s). Normally empty; set while a bridge is enrolling, then
+      # clear it. Distinct from ADMIN_API_KEY below: this one lets a DEVICE exchange a
+      # bootstrap token for its own long-lived token, the other creates the first ADMIN.
+      # Hardcoding "" here silently defeated the .env value and left devices unable to enroll.
+      BOOTSTRAP_TOKENS: "${BOOTSTRAP_TOKENS:-}"
       # FIRST-ADMIN bootstrap credential, normally EMPTY. Set it only long enough to create
       # the first admin account, then clear it: auth.py retires it automatically once an
       # admin user exists, because it is one secret shared by every operator - unrevocable
