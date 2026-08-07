@@ -882,6 +882,105 @@ MESH = MeshManager()
 _BRIDGES = {"list": [], "ts": 0.0}
 
 
+# ---------------------------------------------------------------- media-leg watchdog
+#
+# The helper is asked for three legs (--forward 5000,5002 --return 5004) and answers a
+# one-line handshake. Until now the app trusted that answer for the rest of the session and
+# never looked again. On 7 Aug a live session lost BOTH forward legs while the helper process
+# stayed alive: ffmpeg kept encoding at 20 fps and firing packets at 127.0.0.1:5000, nothing
+# was listening, and the bridge reported `feeder ... used 0 cpu ticks`. The app showed LIVE
+# throughout and blamed the presenter's camera.
+#
+# The return leg survives these events independently, which is what makes them so confusing:
+# the room still comes through perfectly, so it does not feel like a connection problem.
+#
+# So: keep asking. A leg that is gone is a fact the app can check in microseconds, and
+# "silence that looks like success" is the failure mode this whole product keeps re-learning.
+
+def _leg_bound(port, host="127.0.0.1"):
+    """True if something already holds this UDP port.
+
+    We probe by attempting the bind ourselves rather than parsing lsof on every tick — it
+    asks exactly the question the helper's own bind asked, and costs microseconds. Note the
+    inverted sense: if OUR bind SUCCEEDS the port was free, which means the leg we asked for
+    is NOT there. Success here is the failure signal.
+
+    Deliberately no SO_REUSEADDR/SO_REUSEPORT: with either set the bind can succeed
+    alongside the helper's socket and we would report a healthy leg as missing.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind((host, port))
+        return False
+    except OSError:
+        return True
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+class LegWatch:
+    """Polls the three media legs while a session is live and publishes the truth."""
+
+    PERIOD_S = 3.0
+    # Two consecutive misses before calling it. A single miss can be the helper rebinding
+    # during a rate change, and a watchdog that cries wolf gets ignored — which is exactly
+    # how we ended up not trusting the green lights in the first place.
+    STRIKES = 2
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.missing = []          # ports currently believed down
+        self.since = 0.0           # when they went down
+        self.strikes = 0
+        self.drops = 0             # how many times this session lost a leg
+
+    def snapshot(self):
+        with self.lock:
+            return {"ok": not self.missing, "missing": list(self.missing),
+                    "down_for_s": round(time.time() - self.since, 1) if self.missing else 0,
+                    "drops": self.drops}
+
+    def reset(self):
+        with self.lock:
+            self.missing, self.since, self.strikes, self.drops = [], 0.0, 0, 0
+
+    def _tick(self):
+        if not SESSION.live or not MESH.proc or MESH.proc.poll() is not None:
+            with self.lock:
+                self.missing, self.strikes = [], 0
+            return
+        gone = [p for p in (RTP_VIDEO, RTP_VOICE, SESSION.return_port) if not _leg_bound(p)]
+        with self.lock:
+            if gone:
+                self.strikes += 1
+                if self.strikes >= self.STRIKES and not self.missing:
+                    self.missing = gone
+                    self.since = time.time()
+                    self.drops += 1
+                    print("[legs] lost: %s — helper alive but not listening"
+                          % ", ".join(str(p) for p in gone), flush=True)
+                elif self.missing:
+                    self.missing = gone
+            else:
+                if self.missing:
+                    print("[legs] restored", flush=True)
+                self.missing, self.strikes = [], 0
+
+    def run(self):
+        while True:
+            try:
+                self._tick()
+            except Exception:
+                pass
+            time.sleep(self.PERIOD_S)
+
+
+LEGS = LegWatch()
+
+
 def _bridge_rec(host, st):
     """Find the bridge record for a UI-supplied host (its tailnet or LAN IP). Falls back
     to a bare {ip:host} so a hand-typed address still works."""
@@ -959,6 +1058,7 @@ class Handler(BaseHTTPRequestHandler):
                 "last_camera": st.get("camera_name"),
                 "last_mic": st.get("mic_name"),
                 "live": SESSION.live,
+                "legs": LEGS.snapshot(),
                 "return_on": SESSION.return_on, "return_gain": SESSION.return_gain, "return_jitter_ms": SESSION.return_jitter_ms, "return_sink_sync": SESSION.return_sink_sync, "return_conceal": SESSION.return_conceal,
                 "version": APP_VERSION,
                 "update_note": _update_note,
@@ -1000,6 +1100,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send({"_error": "host required"}, 400)
             route = bridge_route(host, load_state())   # over the mesh when the bridge has one
             r = api("GET", route["base"] + "/api/checks", timeout=10)
+            # Attach the leg state to the SAME response the UI already polls, so the front
+            # end can tell "your camera is busy" apart from "this app is not sending
+            # anywhere" without a second round trip.
+            if isinstance(r, dict):
+                r["_legs"] = LEGS.snapshot()
             if isinstance(r, dict) and "voice_arriving" not in r and not r.get("_error"):
                 # Older bridge firmware does not measure the forward-voice leg. Fall back to
                 # what THIS app can see: the mic->bridge ffmpeg leg is alive and sending.
@@ -1314,6 +1419,11 @@ async function golive(){
 // tells a presenter mid-meeting nothing about what to DO. Each red check therefore carries
 // its own remediation, written as an instruction, not a diagnosis. Green rows keep showing
 // the measurement, which is the useful thing when everything is fine.
+// One of these is only ever RIGHT when this app is actually sending. If the media legs have
+// dropped, video and voice go red no matter how healthy the camera is — the packets are
+// discarded on this Mac before they reach the network. Telling a presenter to close Zoom in
+// that state sends them hunting the wrong thing; LEG_FIX below replaces the advice whenever
+// the watchdog says the legs are gone.
 const FIXES={
   online:'Bridge is not answering. Check it has power and its Wi-Fi is up, then try again.',
   video_arriving:'Your camera is not reaching the bridge. Close other apps using the camera (Zoom, Photo Booth), then End session and go live again.',
@@ -1344,6 +1454,17 @@ function rescueReturnAudio(v){
     ? {ok:true,detail:'audio flowing (~'+pace+' frames/s)'}
     : v;                                          // stalled stream reports near zero: stays red
 }
+// Auto-recovery is deliberately ONE attempt per outage, not a retry loop. Rebuilding the
+// helper interrupts the session; doing it repeatedly against a fault that rebuilding cannot
+// fix would leave a presenter in a permanent reconnect cycle mid-meeting, which is worse
+// than one honest red line telling them what is wrong.
+let legRepairDone=false;
+async function repairLegs(){
+  if(legRepairDone)return; legRepairDone=true;
+  $('m2').textContent='media path lost — reconnecting…';
+  await j('/api/stop',{method:'POST'});
+  await golive();
+}
 async function poll(){
   const h=host(); if(!h)return; const c=await j('/api/checks?host='+h); if(c._error)return;
   const map=[['c1','l1','online'],['c2','l2','video_arriving'],['c5','l5','voice_arriving'],
@@ -1354,6 +1475,19 @@ async function poll(){
     $(ci).className=v.ok?'ok':'bad';
     $(li).textContent=(v.detail||'').slice(0,42);
     if(!v.ok&&!firstBad)firstBad=k;}
+  // The legs outrank every per-check fix. When they are down the red rows are a SYMPTOM,
+  // and the camera/mic advice above is actively wrong — this app is not sending anywhere.
+  const legs=c._legs||{ok:true};
+  if(!legs.ok){
+    const names={5000:'video',5002:'voice',5004:'return audio'};
+    const lost=(legs.missing||[]).map(p=>names[p]||p).join(' and ');
+    $('ckfix').textContent='This app stopped sending — the '+lost+' path to the bridge dropped '
+      +(legs.down_for_s||0)+'s ago. Your camera and mic are fine. Reconnecting…';
+    $('ckfix').style.display='';
+    repairLegs();
+    return;
+  }
+  legRepairDone=false;   // healthy again: re-arm for the next outage
   // One instruction at a time — a wall of five red fixes is noise. The first broken link in
   // the chain is almost always the cause of the ones after it.
   $('ckfix').textContent=firstBad?FIXES[firstBad]||'':'';
@@ -1373,6 +1507,9 @@ def main():
     # ffmpeg/gst would keep the camera on / keep playing the room.
     _kill_orphan_mesh()
     _kill_orphan_media()
+    # Watch the media legs for the life of the process. It self-gates on SESSION.live, so it
+    # costs three failed binds every 3s while idle and nothing at all in attention.
+    threading.Thread(target=LEGS.run, daemon=True).start()
     st = load_state()
     # Report a completed update once, then clear it so it does not stick forever.
     global _update_note
