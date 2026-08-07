@@ -424,14 +424,25 @@ class Session:
         # this as "periodic fast-forwarding every few seconds" — which is what a listener
         # calls jitter. Switchable so the two modes can be judged by ear on the real path.
         self.return_sink_sync = os.environ.get("NB_RETURN_SINK_SYNC", "0") != "0"
-        # Loss concealment. The bridge encodes with inband-fec=true and
-        # packet-loss-percentage=20 - it is ALREADY sending recovery data - but a plain
-        # opusdec ignores all of it, so every lost packet became a hole in the audio with a
-        # discontinuity at each edge, which is what a click is. It was switched off after
-        # testing on a LOSSLESS link, where concealment can only invent artifacts; the moment
-        # the link actually drops packets that trade reverses, because FEC reconstructs the
-        # real audio from redundancy rather than guessing.
-        self.return_conceal = os.environ.get("NB_RETURN_CONCEAL", "1") != "0"       # "Play meeting audio here" — on by default
+        # Loss concealment: opusdec use-inband-fec + plc, and rtpjitterbuffer do-lost.
+        #
+        # DEFAULT OFF, and that default is the whole point of this line. The field-proven
+        # recipe (338c578, "port the field-proven return-audio recipe — kills the jitter")
+        # is explicit: "plc=true + inband-fec + do-lost SYNTHESIZE audio to conceal loss —
+        # tested cleaner WITHOUT it (PLC's guesses are the artifacts). Use plain opusdec."
+        #
+        # When this pipeline was made tunable on 2026-08-03 the knob was added defaulting
+        # ON, which quietly reverted that fix. Every fresh launch then started in the
+        # configuration July had already proven worse, and the jitter came back — costing
+        # days of hunting the bridge, the network, the mesh and the encoder, all of which
+        # were healthy. A default that contradicts a proven result is not a default, it is
+        # a regression with a switch on it.
+        #
+        # It is still switchable, because the trade genuinely reverses on a LOSSY link:
+        # the bridge encodes with inband-fec=true and packet-loss-percentage=20, so the
+        # redundancy is already on the wire and FEC reconstructs real audio rather than
+        # guessing. On our link, measured loss is zero — so concealment can only invent.
+        self.return_conceal = os.environ.get("NB_RETURN_CONCEAL", "0") != "0"
 
     @property
     def live(self):
@@ -1306,7 +1317,7 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
   <span id=livepill></span></span></div>
 
 <div class=card id=signin>
-  <label>Control plane URL</label><input id=curl placeholder="http://192.168.29.155:8000">
+  <label>Control plane URL</label><input id=curl placeholder="https://fleet.scine.online">
   <label>Work email</label><input id=email placeholder="you@company.com">
   <button class=sec onclick=req()>Email me a sign-in code</button>
   <div style=height:11px></div>
@@ -1539,7 +1550,19 @@ def main():
     # starves everything else: the "Play meeting audio here" toggle and the tuning endpoint
     # would simply hang until they timed out, which reads as "the app is broken" and made
     # live audio tuning impossible. Each request is independent here, so threading is safe.
-    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    # "Address already in use" on a FIXED, known port has exactly one meaning: another copy
+    # of this app is running. Letting that surface as a raw Python traceback told a presenter
+    # nothing and looked like a crash — the same "we know exactly what is wrong and say
+    # something useless" failure this app keeps making. Say the useful thing instead.
+    try:
+        srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    except OSError as e:
+        if getattr(e, "errno", None) in (48, 98):     # EADDRINUSE: macOS 48, Linux 98
+            print("\nNetBridge is already running.")
+            print("  Open %s" % ("http://%s:%d/" % (HOST, PORT)))
+            print("  Or quit the other copy first, then relaunch.\n")
+            raise SystemExit(0)                        # not an error: the app IS available
+        raise
     srv.daemon_threads = True
     url = "http://%s:%d/" % (HOST, PORT)
     print("NetBridge Source  ->  %s" % url)
