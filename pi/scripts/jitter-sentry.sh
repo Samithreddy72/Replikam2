@@ -6,6 +6,42 @@
 # 30 consecutive good on wan -> back to lan (low latency)
 LOG(){ logger -t jitter-sentry "$*"; }
 PEER_FILE=/etc/default/bridge-return-audio
+
+# NEVER switch profiles while media is flowing.
+#
+# `bridge profile <x>` rewrites /etc/default/bridge-net and RESTARTS the pipeline —
+# uvcd, feeder-net and feeder-audio all stop and come back. Mid-meeting that is a visible
+# video freeze and an audible audio gap. This sentry had no liveness check at all, so a
+# LIVE session was torn down at 17:30:13 for the most perverse possible reason: the network
+# had been PRISTINE for ten minutes, so it "upgraded" to the LAN profile. The reward for a
+# stable connection was a dropped stream, and to a presenter it looks like a random fault.
+#
+# A profile switch is an OPTIMISATION. Nothing breaks by applying it thirty seconds later
+# when nobody is on air, and the hysteresis counters are preserved so the decision is not
+# lost — only deferred.
+#
+# "Live" = the video feeder is burning CPU, i.e. RTP is actually arriving. Same signal
+# bridge-web's own health check uses, sampled over 1s so it costs almost nothing.
+media_live(){
+  local pid t0 t1
+  pid=$(pgrep -f 'udpsrc port=5000' | head -1)
+  [ -n "$pid" ] || return 1
+  t0=$(awk '{print $14+$15}' "/proc/$pid/stat" 2>/dev/null) || return 1
+  sleep 1
+  t1=$(awk '{print $14+$15}' "/proc/$pid/stat" 2>/dev/null) || return 1
+  [ "${t1:-0}" -gt "${t0:-0}" ]
+}
+
+switch_profile(){   # switch_profile <lan|wan> <reason>
+  if media_live; then
+    LOG "DEFERRED profile $1 ($2) — a session is live; will apply when the stream is idle"
+    return 1        # counters kept: we re-evaluate next loop and switch once idle
+  fi
+  LOG "$2 -> profile $1"
+  /usr/local/bin/bridge profile "$1" >/dev/null 2>&1
+  return 0
+}
+
 bad=0; good=0
 sleep 30
 while true; do
@@ -22,11 +58,9 @@ while true; do
     else good=$((good+1)); bad=0; fi
   fi
   if [ $bad -ge 3 ] && [ "${cur:-200}" -lt 300 ]; then
-    LOG "network degraded (loss=$loss% jitter=${mdev}ms rtt=${avg}ms) -> profile WAN"
-    /usr/local/bin/bridge profile wan >/dev/null 2>&1; bad=0
+    switch_profile wan "network degraded (loss=$loss% jitter=${mdev}ms rtt=${avg}ms)" && bad=0
   elif [ $good -ge 30 ] && [ "${cur:-200}" -ge 300 ]; then
-    LOG "network pristine for 10min -> profile LAN"
-    /usr/local/bin/bridge profile lan >/dev/null 2>&1; good=0
+    switch_profile lan "network pristine for 10min" && good=0
   fi
   sleep 20
 done

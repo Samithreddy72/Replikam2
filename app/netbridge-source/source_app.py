@@ -492,16 +492,64 @@ class Session:
         # Keep each leg's stderr so a dead leg can be explained instead of guessed at.
         self.logs = []
         self.voice_proc = None
+        # Remember each leg's argv so ONE leg can be respawned without disturbing the others.
+        # Previously a dead video leg meant restarting the whole session — a visible freeze
+        # plus an audible gap — to fix a fault that only touched video.
+        self.leg_argv = {"video": v, "voice": a}
+        self.leg_proc = {}
         logdir = _logdir()
         for name, argv in (("video", v), ("voice", a)):
             lf = open(os.path.join(str(logdir), "netbridge-source-%s.log" % name), "w")
             self.logs.append(lf)
             proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=lf)
             self.procs.append(proc)
+            self.leg_proc[name] = proc
             if name == "voice":
                 self.voice_proc = proc          # so the app can report the voice leg is alive
 
         self.return_player = self._start_return(return_port) if self.return_on else "off"
+
+    def respawn_leg(self, name):
+        """Restart ONE media leg in place. Returns True if it came back.
+
+        The whole point is that the other legs never notice. Video dying is not a reason to
+        interrupt the audio the room is listening to, and vice versa — a supervisor that
+        rebuilds the session to fix one leg causes a bigger outage than the fault it is
+        repairing. That mistake was made once tonight and it ended a live call."""
+        argv = (getattr(self, "leg_argv", {}) or {}).get(name)
+        if not argv:
+            return False
+        old = (getattr(self, "leg_proc", {}) or {}).get(name)
+        if old is not None:
+            try:
+                if old.poll() is None:
+                    old.terminate()
+                    old.wait(timeout=3)
+            except Exception:
+                try: old.kill()
+                except Exception: pass
+            if old in self.procs:
+                self.procs.remove(old)
+        try:
+            lf = open(os.path.join(str(_logdir()), "netbridge-source-%s.log" % name), "w")
+            self.logs.append(lf)
+            proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=lf)
+        except Exception:
+            return False
+        self.procs.append(proc)
+        self.leg_proc[name] = proc
+        if name == "voice":
+            self.voice_proc = proc
+        return proc.poll() is None
+
+    def leg_status(self):
+        """Which media legs are alive right now, by name."""
+        out = {}
+        for name, p in (getattr(self, "leg_proc", {}) or {}).items():
+            out[name] = bool(p and p.poll() is None)
+        out["return"] = bool(self.return_proc and self.return_proc.poll() is None) \
+            if self.return_on else None      # None = deliberately off, not a fault
+        return out
 
     def set_return_tuning(self, gain=None, jitter_ms=None, dynamics=None, sink_sync=None, conceal=None):
         """Change return-audio gain / buffer depth WITHOUT ending the session.
@@ -1007,6 +1055,86 @@ class LegWatch:
 LEGS = LegWatch()
 
 
+# ---------------------------------------------------------------- stream guard
+#
+# Watches the media legs every 5s and repairs the SMALLEST thing that is broken.
+#
+# The failure this exists for: SESSION.live is `any(p.poll() is None for p in procs)`, so if
+# the VIDEO ffmpeg dies while voice is still running, the app happily reports LIVE and the
+# presenter's camera is simply gone from the meeting with nothing said. Same for the return
+# player. Nobody was watching individual legs.
+#
+# The rule it follows, learned the hard way tonight: NEVER repair upward. A dead video leg
+# gets a new video leg — not a session rebuild. Tearing down the session to fix one leg
+# causes a larger outage than the fault, and when the earlier leg-watchdog did exactly that
+# it ended a live call and printed "session ended" as though the user had done it.
+#
+# What it deliberately does NOT touch: the mesh helper and the session itself. Those are
+# LegWatch's business, they are genuinely interruptive to rebuild, and they need the human
+# in the loop. This guard only ever restarts a process that has already died.
+
+class StreamGuard:
+    PERIOD_S = 5.0
+    GRACE_S = 15.0        # legs need a moment after go-live; do not race startup
+    MAX_PER_LEG = 5       # a leg that will not stay up is a real fault, not a blip
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.repairs = {}          # leg -> count of repairs this session
+        self.last = None           # human-readable last action
+        self.live_since = 0.0
+        self.giving_up = []        # legs that exceeded MAX_PER_LEG
+
+    def snapshot(self):
+        with self.lock:
+            return {"repairs": dict(self.repairs), "last": self.last,
+                    "abandoned": list(self.giving_up)}
+
+    def _tick(self):
+        if not SESSION.live:
+            with self.lock:
+                self.live_since = 0.0
+                if self.repairs or self.giving_up:
+                    self.repairs, self.giving_up, self.last = {}, [], None
+            return
+        with self.lock:
+            if not self.live_since:
+                self.live_since = time.time()
+            if (time.time() - self.live_since) < self.GRACE_S:
+                return
+            abandoned = list(self.giving_up)
+
+        for name, alive in (SESSION.leg_status() or {}).items():
+            if alive is not False or name in abandoned:
+                continue          # True = healthy, None = deliberately off
+            with self.lock:
+                n = self.repairs.get(name, 0)
+                if n >= self.MAX_PER_LEG:
+                    if name not in self.giving_up:
+                        self.giving_up.append(name)
+                        self.last = ("%s leg failed %d times — not restarting again; "
+                                     "End session and go live to rebuild" % (name, n))
+                        print("[guard] %s" % self.last, flush=True)
+                    continue
+            ok = SESSION.set_return(True) if name == "return" else SESSION.respawn_leg(name)
+            with self.lock:
+                self.repairs[name] = self.repairs.get(name, 0) + 1
+                self.last = "%s leg died -> %s (repair #%d)" % (
+                    name, "restarted" if ok else "restart FAILED", self.repairs[name])
+            print("[guard] %s" % self.last, flush=True)
+
+    def run(self):
+        while True:
+            try:
+                self._tick()
+            except Exception:
+                pass
+            time.sleep(self.PERIOD_S)
+
+
+GUARD = StreamGuard()
+
+
 def _bridge_rec(host, st):
     """Find the bridge record for a UI-supplied host (its tailnet or LAN IP). Falls back
     to a bare {ip:host} so a hand-typed address still works."""
@@ -1085,6 +1213,7 @@ class Handler(BaseHTTPRequestHandler):
                 "last_mic": st.get("mic_name"),
                 "live": SESSION.live,
                 "legs": LEGS.snapshot(),
+                "guard": GUARD.snapshot(),
                 "return_on": SESSION.return_on, "return_gain": SESSION.return_gain, "return_jitter_ms": SESSION.return_jitter_ms, "return_sink_sync": SESSION.return_sink_sync, "return_conceal": SESSION.return_conceal,
                 "version": APP_VERSION,
                 "update_note": _update_note,
@@ -1131,6 +1260,7 @@ class Handler(BaseHTTPRequestHandler):
             # anywhere" without a second round trip.
             if isinstance(r, dict):
                 r["_legs"] = LEGS.snapshot()
+                r["_guard"] = GUARD.snapshot()
             if isinstance(r, dict) and "voice_arriving" not in r and not r.get("_error"):
                 # Older bridge firmware does not measure the forward-voice leg. Fall back to
                 # what THIS app can see: the mic->bridge ffmpeg leg is alive and sending.
@@ -1541,6 +1671,8 @@ def main():
     # Watch the media legs for the life of the process. It self-gates on SESSION.live, so it
     # costs three failed binds every 3s while idle and nothing at all in attention.
     threading.Thread(target=LEGS.run, daemon=True).start()
+    # Per-leg repair every 5s. Restarts only what actually died; never the session.
+    threading.Thread(target=GUARD.run, daemon=True).start()
     st = load_state()
     # Report a completed update once, then clear it so it does not stick forever.
     global _update_note

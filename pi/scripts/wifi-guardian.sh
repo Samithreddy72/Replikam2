@@ -3,6 +3,11 @@
 IW=/usr/sbin/iw
 LOG(){ logger -t wifi-guardian "$*"; }
 NETLOG=/home/pi/netlog.txt
+# Same read-only-root trap as flight-recorder.sh: /home/pi/netlog.txt is redirected onto
+# /data so the append works, but "$NETLOG.tmp" lands in /home/pi, which is read-only. The
+# ring rotation failed every single time and logged "Read-only file system" for it.
+NETLOG_REAL="$(readlink -f "$NETLOG" 2>/dev/null || echo "$NETLOG")"
+NETLOG_TMP="$(dirname "$NETLOG_REAL")/.netlog.rotate.tmp"
 
 for i in $(seq 1 30); do [ -d /sys/class/net/wlan0 ] && break; sleep 2; done
 $IW dev wlan0 set power_save off 2>/dev/null && LOG "power_save off"
@@ -64,7 +69,7 @@ while true; do
   # forensic netlog every ~30s (ring: keep last 400 lines)
   if [ $((tick % 6)) -eq 0 ]; then
     echo "$(date "+%H:%M:%S") ssid=$(/usr/sbin/iw dev wlan0 link 2>/dev/null | awk -F': ' '/SSID/{print $2}') ip=$(ip -o -4 addr show wlan0 2>/dev/null | awk '{print $4}') sig=$(/usr/sbin/iw dev wlan0 link 2>/dev/null | awk '/signal/{print $2}')dBm nm=$(nmcli -t -f CONNECTIVITY general status 2>/dev/null) ts=$(timeout 4 tailscale status --peers=false >/dev/null 2>&1 && echo up || echo down) fails=$fails" >> $NETLOG
-    tail -400 $NETLOG > $NETLOG.tmp && mv $NETLOG.tmp $NETLOG
+    tail -400 "$NETLOG_REAL" > "$NETLOG_TMP" 2>/dev/null && mv -f "$NETLOG_TMP" "$NETLOG_REAL" 2>/dev/null
   fi
   sleep 5
 done
