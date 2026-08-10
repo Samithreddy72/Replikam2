@@ -891,7 +891,7 @@ class MeshManager:
                     "error": "the control plane would not issue a mesh key for this bridge"}
 
         argv = [mesh_bin, "--authkey", key, "--bridge", tsip,
-                "--hostname", "nb-source-%s" % (rec.get("id") or "app")[-6:],
+                "--hostname", _mesh_hostname(rec, st),
                 "--forward", "%d,%d" % (RTP_VIDEO, RTP_VOICE), "--return", "5004",
                 "--control", "%d:8080" % self.CTRL_LOCAL]
         if login:
@@ -1144,6 +1144,39 @@ class StreamGuard:
 GUARD = StreamGuard()
 
 
+def _mesh_hostname(rec, st):
+    """Name the presenter's mesh node after WHO is connecting and to WHAT.
+
+    It used to be "nb-source-<last6 of the BRIDGE id>" — named after the bridge, not the
+    person. With one bridge and one presenter that is invisible. With several it is a mess:
+    two presenters on the same bridge both request the SAME hostname and Tailscale
+    disambiguates them as -1 and -2, while one presenter on two bridges appears under two
+    unrelated names. Either way you cannot tell from the node list who is connected to what.
+
+    Now: nb-<user>-<pairing code>, e.g. nb-samith-2626.
+
+    TO OVERRIDE, either:
+      * set NB_MESH_NAME=<something>   (env, wins over everything), or
+      * add "mesh_name": "<something>" to ~/.netbridge-source/state.json
+    Both are sanitised to what Tailscale accepts for a hostname (a-z 0-9 and dashes).
+    """
+    def clean(v, n):
+        v = re.sub(r"[^a-zA-Z0-9-]+", "-", str(v or "")).strip("-").lower()
+        return v[:n]
+
+    override = os.environ.get("NB_MESH_NAME") or st.get("mesh_name")
+    if override:
+        return clean(override, 60) or "nb-source"
+
+    # who: the local part of the signed-in email, which is the person's own name to them
+    who = clean((st.get("email") or "").split("@")[0], 20) or "source"
+    # what: the pairing code is what is printed on the bridge's label, so it is the name a
+    # human already associates with that box — better than 6 hex digits of an internal id
+    code = clean((rec or {}).get("pairing_code", "").replace("BRIDGE-", ""), 8) \
+        or clean(((rec or {}).get("id") or "")[-6:], 8) or "bridge"
+    return "nb-%s-%s" % (who, code)
+
+
 def _uptime_seconds(s):
     """Parse the bridge's human uptime ('1 minute', '2 hours 5 minutes') to seconds.
 
@@ -1303,6 +1336,9 @@ class Handler(BaseHTTPRequestHandler):
                 s2 = api("GET", route["base"] + "/api/status", timeout=6)
                 if isinstance(s2, dict) and not s2.get("_error"):
                     r["_bridge_uptime_s"] = _uptime_seconds(s2.get("uptime"))
+                    # direct vs DERP relay — on a long link this decides whether the call
+                    # is usable, and it was previously invisible without a terminal.
+                    r["_mesh_path"] = s2.get("mesh_path") or {}
             if isinstance(r, dict) and "voice_arriving" not in r and not r.get("_error"):
                 # Older bridge firmware does not measure the forward-voice leg. Fall back to
                 # what THIS app can see: the mic->bridge ffmpeg leg is alive and sending.
@@ -1749,6 +1785,12 @@ async function poll(){
   }
 
   // --- readiness: green for a continuous stretch, not just this instant ---
+  // Show the path whenever it is known. "direct" is quietly reassuring; "relay" is the
+  // one you want to see BEFORE the meeting, because it roughly doubles the latency.
+  const mp=c._mesh_path||{};
+  if(mp.via==="relay") $('m2').textContent='⚠ relayed path ('+(mp.detail||'derp')+') — higher latency than direct';
+  else if(mp.via==="direct") $('m2').textContent='direct mesh path'+(mp.detail?' · '+mp.detail:'');
+
   const guard=c._guard||{};
   const repaired=Object.keys(guard.repairs||{}).length>0;
   if(firstBad){ greenSince=null; }

@@ -42,7 +42,7 @@ switch_profile(){   # switch_profile <lan|wan> <reason>
   return 0
 }
 
-bad=0; good=0
+bad=0; good=0; rtt_floor=""
 sleep 30
 while true; do
   PEER=$(grep -oE "RETURN_DEST_IP=[0-9.]+" $PEER_FILE 2>/dev/null | cut -d= -f2)
@@ -54,7 +54,23 @@ while true; do
   avg=$(echo "$R" | grep -oE "= [0-9.]+/[0-9.]+" | cut -d/ -f2 | cut -d. -f1)
   cur=$(grep -o "NET_AUDIO_LATENCY=[0-9]*" /etc/default/bridge-net 2>/dev/null | cut -d= -f2)
   if [ -z "$loss" ]; then bad=$((bad+1)); else
-    if [ "${loss:-0}" -gt 2 ] || [ "${mdev:-0}" -gt 25 ] || [ "${avg:-0}" -gt 80 ] || [ "${mx:-0}" -gt 150 ]; then bad=$((bad+1)); good=0
+    # RTT threshold, relative to the link's own baseline rather than a fixed 80ms.
+    #
+    # 80ms was written for a same-city link. India<->US is ~200-250ms on a PERFECT direct
+    # path, so a fixed 80 marks a healthy intercontinental link "degraded" on every single
+    # sample: `bad` never resets, the sentry pins itself to the WAN profile and stops
+    # adapting entirely. WAN is the safe default, so nothing breaks — the sentry just
+    # silently becomes a no-op, which is worse than being absent because you would trust it.
+    #
+    # Learn the floor instead: the best RTT seen this run is the physics of the link, and
+    # what matters is DEVIATION from it. Jitter (mdev) and loss stay absolute — those are
+    # bad at any distance.
+    if [ -n "${avg:-}" ] && { [ -z "${rtt_floor:-}" ] || [ "$avg" -lt "$rtt_floor" ]; }; then
+      rtt_floor="$avg"
+      LOG "link RTT floor now ${rtt_floor}ms (thresholds follow it)"
+    fi
+    rtt_bad=$(( ${rtt_floor:-40} * 2 + 40 ))     # e.g. 20ms floor -> 80 (unchanged locally)
+    if [ "${loss:-0}" -gt 2 ] || [ "${mdev:-0}" -gt 25 ] || [ "${avg:-0}" -gt "$rtt_bad" ] || [ "${mx:-0}" -gt $((rtt_bad*2)) ]; then bad=$((bad+1)); good=0
     else good=$((good+1)); bad=0; fi
   fi
   if [ $bad -ge 3 ] && [ "${cur:-200}" -lt 300 ]; then

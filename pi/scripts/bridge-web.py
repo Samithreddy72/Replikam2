@@ -180,6 +180,7 @@ def gather():
     }
     d["return_mismatch"] = _return_mismatch()   # None = healthy; dict = wrong-rate now
     d["return_rate"] = _return_opened_rate()    # what the pipeline is opened at (0=idle)
+    d["mesh_path"] = mesh_path()                # direct vs DERP relay — the big one on a long link
     d["quarantined"] = _quarantined()           # [] = none; names = deployed code NOT running
     suspect, detail = clock_verdict()
     d["clock_suspect"] = suspect          # bool (backward compat for the control plane)
@@ -211,6 +212,43 @@ def _return_mismatch():
         return json.loads(open(RETURN_RUNDIR + "/mismatch").read())
     except Exception:
         return None
+
+def mesh_path():
+    """How the presenter's node is actually reached: a DIRECT hole-punched path, or relayed
+    through a DERP server.
+
+    This is the single biggest determinant of quality on a long link and until now it was
+    invisible without SSHing in. India<->US direct is ~200-250ms; the same pair relayed is
+    often 400ms+ because the traffic detours via a shared relay. A presenter needs to know
+    which one they are on BEFORE a meeting, not after it goes badly — and an admin needs to
+    see it for a bridge on another continent without touching it.
+
+    Read from the BRIDGE's own tailscale, because it is the side that knows how it reaches
+    the peer. Returns {} when there is no session, which the UI shows as nothing at all
+    rather than a scary blank."""
+    peer = ""
+    for ln in read("/etc/default/bridge-return-audio").splitlines():
+        if ln.startswith("RETURN_DEST_IP"):
+            peer = ln.split("=", 1)[1].strip()
+    if not peer:
+        return {}
+    for ln in sh("tailscale status 2>/dev/null").splitlines():
+        if not ln.startswith(peer + " ") and not ln.startswith(peer + "\t"):
+            continue
+        low = ln.lower()
+        if "relay" in low:
+            m = re.search(r'relay "([^"]+)"', ln)
+            return {"via": "relay", "detail": m.group(1) if m else "derp",
+                    "note": "relayed — expect higher latency than a direct path"}
+        if "direct" in low:
+            m = re.search(r"direct ([0-9a-fA-F:.\[\]]+:\d+)", ln)
+            return {"via": "direct", "detail": m.group(1) if m else "",
+                    "note": "direct path — best possible latency for this link"}
+        if "offline" in low:
+            return {"via": "offline", "detail": "", "note": "peer not reachable"}
+        return {"via": "idle", "detail": "", "note": "no active connection to the presenter"}
+    return {}
+
 
 def _quarantined():
     """Overrides auto-rollback has parked, i.e. code the operator deployed that is NOT

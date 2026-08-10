@@ -381,6 +381,12 @@ function render(){
     const isLive = !!(d.online && (t.streams||{}).video);
     // Deployed code that is NOT running. Nothing else on this row would show it.
     const quar = (t.quarantined||[]);
+    // How the presenter is actually reached. Lets you check a bridge on another continent
+    // without anyone touching it — relayed roughly doubles latency versus a direct path.
+    const mp = t.mesh_path || {};
+    const pathPill = mp.via === "relay"
+      ? ` <span class="pill warn" title="${mp.note||""}">relayed</span>`
+      : (mp.via === "direct" ? ` <span class="pill ok" title="${mp.note||""}">direct</span>` : "");
     const code = (d.pairing_code||"").replace("BRIDGE-","");
     const tr = document.createElement("tr");
     if (!d.claimed) {
@@ -399,7 +405,7 @@ function render(){
       tr.querySelector(".claimbtn").onclick = ()=>claim(d.id, d.pairing_code||d.id);
     } else {
       tr.innerHTML = `<td class="dev">${d.name||d.hostname||d.id} <span class="dim">${code}</span></td>
-        <td>${statusPill(d)}${quar.length ? ` <span class="pill warn" title="Auto-rollback parked ${quar.join(", ")}. This bridge is running its FACTORY script, not the code you deployed. Actions → Restore quarantined override.">deployed code not running</span>` : ""}</td>
+        <td>${statusPill(d)}${pathPill}${quar.length ? ` <span class="pill warn" title="Auto-rollback parked ${quar.join(", ")}. This bridge is running its FACTORY script, not the code you deployed. Actions → Restore quarantined override.">deployed code not running</span>` : ""}</td>
         <td>${pinCell(d)}</td>
         <td class="dim">${d.version||"?"}</td>
         <td class="dim">${sessionCell(d)}</td>
