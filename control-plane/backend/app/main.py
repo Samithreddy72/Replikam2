@@ -9,6 +9,8 @@ can reach the Pis; only the admin panel is publicly exposed (behind the API key 
 """
 import datetime as dt
 import os
+import re
+import hashlib
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
