@@ -1176,6 +1176,176 @@ class StreamGuard:
 GUARD = StreamGuard()
 
 
+class BridgeWatch:
+    """Ask the BRIDGE whether media is actually arriving, and repair what is not.
+
+    LegWatch and StreamGuard only ever prove that THIS machine opened a socket and that a
+    process is alive. Those are real checks — they catch the half-wired mesh — but they are
+    blind to everything past the send() call. On 2026-08-11 the Mac's camera stopped opening
+    and both of them reported `legs ok, drops 0` for the entire time the meeting saw a black
+    tile: sockets bound, encoder process alive, not one frame leaving the machine. A green
+    light that cannot go red is worse than no light, because it sends you looking in the
+    wrong place — the same way the CI smoke test passed a build that could not reach the
+    fleet.
+
+    The bridge already answers the only question that matters. /api/checks measures the
+    feeders' CPU ticks and the return stream's ALSA hardware pointer — that is BYTES ARE
+    MOVING, observed at the far end, not inferred from this one. Nobody was asking it.
+
+    Repairs are the smallest thing that could fix each symptom, and NEVER end the session:
+
+        video / voice not arriving   ->  respawn that one encoder leg
+        return audio not arriving    ->  re-issue set-peer (the presenter's mesh node is
+                                         ephemeral and takes a new IP on every restart,
+                                         which is exactly how the bridge ends up talking
+                                         to an address that no longer exists)
+
+    Deliberately reluctant: a grace period after go-live, two consecutive bad polls before
+    acting, a cap per symptom, and — most importantly — it does NOTHING when the bridge
+    cannot be reached. An unanswered poll means the CHECK failed, not the stream. Acting on
+    absent evidence is how a supervisor tears down a working meeting, which is the precise
+    failure this class exists to prevent.
+    """
+
+    PERIOD_S = 10.0        # the bridge samples CPU over 2s per call; do not hammer it
+    GRACE_S = 30.0         # longer than StreamGuard: the far end has to see traffic first
+    STRIKES = 2            # one bad poll is a sample, two is a symptom
+    MAX_REPAIRS = 3
+
+    # bridge check -> the leg that would fix it
+    LEG_FOR = {"video_arriving": "video", "voice_arriving": "voice"}
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.last_checks = None      # raw /api/checks, for the UI
+        self.last_poll = 0.0
+        self.reachable = None        # None = never polled this session
+        self.strikes = {}
+        self.repairs = {}
+        self.last = None
+        self.live_since = 0.0
+
+    def snapshot(self):
+        with self.lock:
+            return {"checks": self.last_checks, "reachable": self.reachable,
+                    "age_s": round(time.time() - self.last_poll, 1) if self.last_poll else None,
+                    "repairs": dict(self.repairs), "last": self.last}
+
+    def _control_base(self):
+        port = getattr(MESH, "control_port", None)
+        return "http://127.0.0.1:%d" % port if port else None
+
+    def _fetch(self):
+        base = self._control_base()
+        if not base:
+            return None
+        try:
+            req = urllib.request.Request(base + "/api/checks")
+            with urllib.request.urlopen(req, timeout=8) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+        except Exception:
+            return None
+
+    def _reset(self):
+        with self.lock:
+            self.live_since = 0.0
+            self.strikes, self.repairs = {}, {}
+            self.last_checks, self.reachable, self.last_poll = None, None, 0.0
+            self.last = None
+
+    def _repair(self, key, checks):
+        """Fix one failing check. Returns a human sentence, or None if nothing was done."""
+        leg = self.LEG_FOR.get(key)
+        if leg:
+            ok = SESSION.respawn_leg(leg)
+            return "%s not arriving at the bridge -> restarted the %s leg%s" % (
+                leg, leg, "" if ok else " (restart FAILED)")
+
+        if key == "return_audio":
+            # The bridge is sending room audio to an address that is probably stale. Tell it
+            # where we are NOW rather than restarting anything — an ephemeral mesh node takes
+            # a fresh IP on every app start, so this is a re-address, not a fault.
+            me = getattr(MESH, "tailnet_ip", None)
+            base = self._control_base()
+            if not (me and base):
+                return None
+            try:
+                req = urllib.request.Request(
+                    base + "/api/set-peer",
+                    data=json.dumps({"ip": me, "port": SESSION.return_port or 5004}).encode(),
+                    headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    res = json.loads(r.read().decode("utf-8", "replace"))
+                return "room audio was not coming back -> re-pointed the bridge at %s (%s)" % (
+                    me, "changed" if res.get("changed") else "already correct")
+            except Exception as e:
+                return "room audio was not coming back -> could not re-point the bridge (%s)" % e
+        return None
+
+    def _tick(self):
+        if not SESSION.live:
+            if self.live_since or self.last_checks:
+                self._reset()
+            return
+
+        with self.lock:
+            if not self.live_since:
+                self.live_since = time.time()
+            if (time.time() - self.live_since) < self.GRACE_S:
+                return
+
+        checks = self._fetch()
+        with self.lock:
+            self.last_poll = time.time()
+            self.reachable = checks is not None
+            if checks:
+                self.last_checks = checks
+
+        if not checks:
+            # Say so, but do not act. The stream may be perfectly fine.
+            return
+
+        for key, val in checks.items():
+            if not isinstance(val, dict) or key not in ("video_arriving", "voice_arriving",
+                                                        "return_audio"):
+                continue
+            if val.get("ok"):
+                with self.lock:
+                    self.strikes[key] = 0
+                continue
+
+            with self.lock:
+                self.strikes[key] = self.strikes.get(key, 0) + 1
+                n, done = self.strikes[key], self.repairs.get(key, 0)
+            if n < self.STRIKES or done >= self.MAX_REPAIRS:
+                if done >= self.MAX_REPAIRS and n == self.STRIKES:
+                    with self.lock:
+                        self.last = ("%s still failing after %d repairs — this is not something "
+                                     "the app can fix; check the bridge" % (key, done))
+                    print("[bridge] %s" % self.last, flush=True)
+                continue
+
+            note = self._repair(key, checks)
+            if not note:
+                continue
+            with self.lock:
+                self.repairs[key] = done + 1
+                self.strikes[key] = 0
+                self.last = note
+            print("[bridge] %s" % note, flush=True)
+
+    def run(self):
+        while True:
+            try:
+                self._tick()
+            except Exception:
+                pass
+            time.sleep(self.PERIOD_S)
+
+
+BRIDGEWATCH = BridgeWatch()
+
+
 def _mesh_hostname(rec, st):
     """Name the presenter's mesh node after WHO is connecting and to WHAT.
 
@@ -1311,6 +1481,7 @@ class Handler(BaseHTTPRequestHandler):
                 "live": SESSION.live,
                 "legs": LEGS.snapshot(),
                 "guard": GUARD.snapshot(),
+                "bridge_checks": BRIDGEWATCH.snapshot(),
                 "return_on": SESSION.return_on, "return_gain": SESSION.return_gain, "return_jitter_ms": SESSION.return_jitter_ms, "return_sink_sync": SESSION.return_sink_sync, "return_conceal": SESSION.return_conceal,
                 "version": APP_VERSION,
                 "update_note": _update_note,
@@ -1867,6 +2038,7 @@ def main():
     threading.Thread(target=LEGS.run, daemon=True).start()
     # Per-leg repair every 5s. Restarts only what actually died; never the session.
     threading.Thread(target=GUARD.run, daemon=True).start()
+    threading.Thread(target=BRIDGEWATCH.run, daemon=True).start()
     st = load_state()
     # Report a completed update once, then clear it so it does not stick forever.
     global _update_note
