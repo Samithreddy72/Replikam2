@@ -861,9 +861,17 @@ class MeshManager:
         # address, or we lack the helper/key, we fall through to a direct connection below.
         if not (tsip and mesh_bin and st.get("token") and st.get("control_url")):
             self.stop()
-            ip = (rec or {}).get("ip")
-            return {"via": "direct", "control_host": ip, "control_port": 8080,
-                    "media_host": ip, "return_peer": local_ip_towards(ip) if ip else ""}
+            # NO LAN FALLBACK. The walkthrough says the presenter reaches a claimed bridge
+            # "via secure mesh" and never mentions a LAN path; Samith has ruled it out
+            # explicitly. This used to silently downgrade to a direct LAN connection, which
+            # is how a session once reported LIVE while media went nowhere — the fallback
+            # had no usable address either, so it failed anyway, just quietly and with the
+            # wrong explanation. Refusing out loud is strictly better than a forbidden path.
+            missing = [n for n, v in (("bridge mesh address", tsip), ("mesh helper", mesh_bin),
+                                      ("sign-in", st.get("token")),
+                                      ("control plane URL", st.get("control_url"))) if not v]
+            return {"via": "none", "error": "cannot reach the bridge over the mesh — missing: "
+                                            + ", ".join(missing)}
 
         # reuse a live helper for the same bridge
         if self.proc and self.proc.poll() is None and self.bridge_id == rec.get("id"):
@@ -876,9 +884,11 @@ class MeshManager:
         _kill_orphan_mesh()
         key, login = self._mint_key(st)
         if not key:
-            ip = rec.get("ip")
-            return {"via": "direct", "control_host": ip, "control_port": 8080,
-                    "media_host": ip, "return_peer": local_ip_towards(ip) if ip else ""}
+            # Same rule: no silent LAN downgrade. A refused mesh key means the control plane
+            # would not issue one (TS_API_KEY missing, tag policy, expiry) — a real fault
+            # worth surfacing, not something to paper over with a path we do not support.
+            return {"via": "none",
+                    "error": "the control plane would not issue a mesh key for this bridge"}
 
         argv = [mesh_bin, "--authkey", key, "--bridge", tsip,
                 "--hostname", "nb-source-%s" % (rec.get("id") or "app")[-6:],
@@ -904,9 +914,8 @@ class MeshManager:
         if not hs.get("ready"):
             p.terminate()
             ip = rec.get("ip")
-            return {"via": "direct-fallback", "error": hs.get("error", "mesh did not start"),
-                    "control_host": ip, "control_port": 8080, "media_host": ip,
-                    "return_peer": local_ip_towards(ip) if ip else ""}
+            return {"via": "none",
+                    "error": "the mesh helper did not start: %s" % hs.get("error", "no handshake")}
         self.proc, self.bridge_id = p, rec.get("id")
         self.tailnet_ip = hs.get("tailnet_ip")
         self.bridge_lan_ip = (rec or {}).get("ip")
@@ -1166,9 +1175,17 @@ def _bridge_rec(host, st):
 
 
 def bridge_route(host, st):
-    """Base control URL + routing for a bridge, bringing the mesh up if appropriate."""
+    """Base control URL + routing for a bridge, bringing the mesh up if appropriate.
+
+    via="none" means the mesh could not be established. There is deliberately no LAN
+    fallback, so there is nothing to build a base URL from — callers must check `error`
+    rather than dereference control_host, which would otherwise raise a TypeError and
+    surface as a stack trace instead of the plain reason the route failed."""
     rec = _bridge_rec(host, st)
     route = MESH.route(rec, st)
+    if route.get("via") == "none":
+        route["base"] = ""
+        return route
     route["base"] = "http://%s:%d" % (route["control_host"], route["control_port"])
     return route
 
@@ -1269,6 +1286,8 @@ class Handler(BaseHTTPRequestHandler):
             if not host:
                 return self._send({"_error": "host required"}, 400)
             route = bridge_route(host, load_state())   # over the mesh when the bridge has one
+            if route.get("via") == "none":
+                return self._send({"_error": route.get("error", "no route to the bridge")}, 502)
             r = api("GET", route["base"] + "/api/checks", timeout=10)
             # Attach the leg state to the SAME response the UI already polls, so the front
             # end can tell "your camera is busy" apart from "this app is not sending
@@ -1373,6 +1392,8 @@ class Handler(BaseHTTPRequestHandler):
             last = None
             for attempt in range(3):
                 route = bridge_route(host, st)
+                if route.get("via") == "none":
+                    return self._send({"_error": route.get("error", "no route to the bridge")}, 502)
                 last = api("POST", route["base"] + "/api/unlock",
                            body={"pin": pin}, timeout=12)
                 if not last.get("_error"):
@@ -1402,6 +1423,11 @@ class Handler(BaseHTTPRequestHandler):
             # 127.0.0.1 (the helper's local proxies) and the bridge is told to return audio
             # to OUR mesh IP - so no 100.x address is ever handled by the app itself.
             route = bridge_route(host, st)
+            if route.get("via") == "none":
+                # Refuse in plain words rather than starting ffmpeg into nothing. Go-live
+                # reporting ok=True while media went nowhere is the single failure this
+                # project has repeated most.
+                return self._send({"_error": route.get("error", "no route to the bridge")}, 502)
             me = route["return_peer"]
             peer = api("POST", route["base"] + "/api/set-peer",
                        body={"ip": me, "port": port}, timeout=15) if me else {"_error": "no route"}

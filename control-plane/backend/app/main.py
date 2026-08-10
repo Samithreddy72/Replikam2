@@ -24,7 +24,16 @@ from .models import (Device, Telemetry, Command, DiagBundle, User, AuditLog,
 from .schemas import (EnrollIn, EnrollOut, CommandOut, CommandResultIn,
                       ClaimIn, IssueCommandIn, RolloutCreateIn)
 
-ALLOWED_COMMANDS = {"restart", "reset-clock", "profile", "set-peer", "update", "reboot", "start", "stop", "diagnose", "set-pin", "unlock", "lock", "deploy-script", "revert-script"}
+# Must stay in step with the agent's own ALLOWED dict on the device. There are THREE
+# gates a command passes — this one, the panel menu, and the device allow-list — and a
+# command missing from any of them fails. Adding the recovery commands to the device and
+# the panel was not enough: the API refused them here with "unsupported command type"
+# before they were ever queued, so every new button would have failed on first click.
+ALLOWED_COMMANDS = {"restart", "reset-clock", "profile", "set-peer", "update", "reboot",
+                    "start", "stop", "diagnose", "set-pin", "unlock", "lock",
+                    "deploy-script", "revert-script",
+                    # remote recovery for a bridge nobody can physically reach
+                    "unquarantine", "running", "logs"}
 # Commands whose args contain a secret. Their args are scrubbed once the device confirms
 # execution, so a PIN never lives in the fleet database beyond its delivery window.
 PIN_BEARING_COMMANDS = {"set-pin", "unlock"}

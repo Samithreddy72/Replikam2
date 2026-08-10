@@ -344,6 +344,14 @@ async function fix(devId, devName, f, isLive){
 let DEVS = [];
 function render(){
   const rows = $("rows"); rows.innerHTML = "";
+  // A bridge that just finished the Wi-Fi portal shows up UNCLAIMED, and that is exactly the
+  // moment someone is watching for it. Sort it to the top rather than leaving it wherever the
+  // API returned it; on a fleet of any size that is the difference between "there it is" and
+  // scrolling. Offline devices come next because they are the ones needing attention.
+  DEVS.sort((a,b) =>
+    (a.claimed?1:0) - (b.claimed?1:0) ||
+    (a.online?1:0) - (b.online?1:0) ||
+    String(a.name||a.pairing_code||"").localeCompare(String(b.name||b.pairing_code||"")));
   const online = DEVS.filter(d=>d.online).length;
   $("fleetmeta").textContent = `${DEVS.length} bridge${DEVS.length===1?"":"s"} · ${online} online · live refresh`;
   for (const d of DEVS){
@@ -354,9 +362,18 @@ function render(){
     const code = (d.pairing_code||"").replace("BRIDGE-","");
     const tr = document.createElement("tr");
     if (!d.claimed) {
-      tr.innerHTML = `<td class="dev dim">Unclaimed · ${d.pairing_code||d.id}</td>
-        <td>${statusPill(d)}</td><td class="dim">—</td><td class="dim">${d.version||"?"}</td><td class="dim">—</td>
-        <td style="text-align:right"><button class="claimbtn">Claim</button></td>`;
+      tr.innerHTML = `<td class="dev dim">🆕 Unclaimed · ${d.pairing_code||d.id}</td>
+        <td>${statusPill(d)}</td><td class="dim">—</td><td class="dim">${d.version||"?"}</td>
+        <td class="dim">just joined</td>
+        <td style="text-align:right"><select class="act"></select> <button class="claimbtn">Claim</button></td>`;
+      // Read-only only. Repairing or rebooting a device you have not adopted is somebody
+      // else's bridge until you claim it — but LOOKING at one is how you decide.
+      const usel = tr.querySelector(".act");
+      for (const [v,l] of [["","Check…"],["diagnose","Collect diagnostics"],
+                           ["running","What code is it running?"],["logs","Fetch recent logs"]]){
+        const o=document.createElement("option"); o.value=v; o.textContent=l; usel.appendChild(o);
+      }
+      usel.onchange = ()=>{ doAction(d.id, d.pairing_code||d.id, usel.value, false); usel.value=""; };
       tr.querySelector(".claimbtn").onclick = ()=>claim(d.id, d.pairing_code||d.id);
     } else {
       tr.innerHTML = `<td class="dev">${d.name||d.hostname||d.id} <span class="dim">${code}</span></td>
