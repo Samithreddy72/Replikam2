@@ -278,7 +278,8 @@ def main():
         src = HERE / "source_app.py"
         src.write_text(_re.sub(r'^APP_VERSION\s*=\s*"[^"]+"',
                                'APP_VERSION = "%s"' % args.version,
-                               src.read_text(), count=1, flags=_re.M))
+                               src.read_text(encoding="utf-8"), count=1, flags=_re.M),
+                       encoding="utf-8")
         log("stamped APP_VERSION = %s" % args.version)
 
     ff = None if args.no_ffmpeg else fetch_ffmpeg(HERE / "_bundle")
@@ -354,7 +355,7 @@ def main():
     fname = "%s-%s-%s%s" % (name, ver, _plat_tag(), ".exe" if IS_WIN else "")
     shutil.copy2(built, rel / fname)
     man = rel / "manifest.txt"
-    man.write_text("version=%s\nsha256=%s\nfile=%s\n" % (ver, _sha256(built), fname))
+    man.write_text("version=%s\nsha256=%s\nfile=%s\n" % (ver, _sha256(built), fname), encoding="utf-8")
     if args.signing_key:
         subprocess.run(["openssl", "dgst", "-sha256", "-sign", args.signing_key,
                         "-out", str(man) + ".sig", str(man)], check=True)
@@ -391,7 +392,7 @@ def _stamped_version():
     can never disagree about what version this is."""
     import re as _re
     m = _re.search(r'^APP_VERSION\s*=\s*"([^"]+)"',
-                   (HERE / "source_app.py").read_text(), _re.M)
+                   (HERE / "source_app.py").read_text(encoding="utf-8"), _re.M)
     return m.group(1) if m else "0.0.0"
 
 

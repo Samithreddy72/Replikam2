@@ -22,6 +22,12 @@ on:
 permissions:
   contents: write
 
+env:
+  # Windows defaults to cp1252; the source contains UTF-8. Without this a
+  # plain read_text() dies with UnicodeDecodeError partway through the build.
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
 jobs:
   build:
     strategy:
