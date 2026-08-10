@@ -89,6 +89,27 @@ dtoverlay=disable-bt
 arm_freq=900
 kernel=kernel612.img
 initramfs initramfs612 followkernel
+
+# --- power: cut the current SPIKES, not just the average ---
+# The 4.63V trip is caused by transients, not steady draw. A field bridge logged 22
+# "Undervoltage detected!" events in one boot, clustered at 13.7s / 21.8s / 31.9s — exactly
+# when all cores ramp, the USB gadget enumerates and the Wi-Fi radio comes up. Runtime
+# trimming (bridge-powertrim: HDMI, LEDs, eth0, USB-A host, freq cap) only starts AFTER
+# those spikes have happened, so the boot dips have to be handled here.
+#
+# arm_freq=900 above caps the ceiling; arm_boost=0 stops the Pi 4 requesting the 1.8GHz
+# turbo rail at all, which is where the worst transient lives.
+arm_boost=0
+# Headless: no display pipeline and no analog audio (the UAC2 gadget is the only audio
+# path). Minimum gpu_mem also hands ~112MB of RAM back to the system.
+gpu_mem=16
+dtparam=audio=off
+# LEDs dark from boot rather than from whenever powertrim runs — a few mA, but free, and it
+# covers the one window powertrim cannot reach.
+dtparam=act_led_trigger=none
+dtparam=act_led_activelow=off
+dtparam=pwr_led_trigger=none
+dtparam=pwr_led_activelow=off
 EOF
 fi
 grep -q 'modules-load=dwc2' "$CMD" || sed -i '1 s/$/ modules-load=dwc2/' "$CMD"

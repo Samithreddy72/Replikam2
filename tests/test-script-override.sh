@@ -95,6 +95,29 @@ ls "$T/data/overrides/quarantine"/demo.sh.* >/dev/null 2>&1 \
   && ok "quarantined file is PRESERVED for diagnosis, not deleted" || no "quarantined override was lost"
 [ "$(run)" = "BAKED" ] && ok "stays on baked-in after quarantine" || no "override came back after quarantine"
 
+# ============ 7b. REBOOTS ARE NOT A CRASH LOOP (the D1 regression) ============
+# The trip used to be stamped with `date +%s`. Services start before NTP syncs, so every
+# boot stamped nearly the same wall-clock value, and the stamps persist on /data — so three
+# POWER CYCLES looked identical to three crashes in 120s and quarantined a healthy
+# override. Not hypothetical: it silently reverted a field bridge to its baked-in script.
+# Counting is now boot-relative (/proc/uptime) and keyed by boot id.
+clear_ovr; mkoverride "OVERRIDE"; sign
+export BRIDGE_RUN_UPTIME_SRC="$T/uptime" BRIDGE_RUN_BOOTID_SRC="$T/bootid"
+reboot_sim(){ printf '%s\n' "boot-$1" > "$T/bootid"; printf '12.34 100.0\n' > "$T/uptime"; }
+reboot_sim 1; b1=$(run)
+reboot_sim 2; b2=$(run)
+reboot_sim 3; b3=$(run)      # three separate boots, each ~12s in
+[ "$b1$b2$b3" = "OVERRIDEOVERRIDEOVERRIDE" ] \
+  && ok "three REBOOTS do not quarantine a healthy override (D1)" \
+  || no "a reboot was mistaken for a crash loop ($b1,$b2,$b3) — D1 has regressed"
+# ...and a genuine crash loop inside ONE boot must still be caught.
+reboot_sim 9
+c1=$(run); c2=$(run); c3=$(run)
+[ "$c3" = "BAKED" ] && ok "a real crash loop within one boot is still caught" \
+                    || no "crash-loop detection broke while fixing D1 (got '$c3')"
+unset BRIDGE_RUN_UPTIME_SRC BRIDGE_RUN_BOOTID_SRC
+rm -rf "$T/data/overrides/.state" "$T/data/overrides/.quarantined.json" "$T/data/overrides/quarantine"
+
 # ===================== 8. a fresh deploy clears the trip =====================
 mkoverride "NEWVERSION"; sign; rm -rf "$T/data/overrides/.state" "$T/data/overrides/.quarantined.json"
 [ "$(run)" = "NEWVERSION" ] && ok "a new deploy gets a fresh trial after a quarantine" \

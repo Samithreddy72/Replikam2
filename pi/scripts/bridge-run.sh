@@ -68,20 +68,53 @@ fi
 # ---- signature is good; now the crash-loop trip ----
 mkdir -p "$STATE" 2>/dev/null
 STAMP="$STATE/$NAME.starts"
-now=$(date +%s)
-# Keep only starts inside the window, then add this one. A healthy service starts once and
-# its stamp ages out; a crash-looping one accumulates.
+
+# Time this against the BOOT, not the wall clock.
+#
+# This used to stamp with `date +%s`. Services start long before NTP syncs, so every boot
+# stamped very nearly the SAME wall-clock value (fake-hwclock restores one time and the
+# journal shows them all as "Jun 18 01:27:1x"). The stamps live on /data and survive
+# reboots — so after three POWER CYCLES the counter saw "3 starts in 120s", declared a
+# crash loop, and quarantined a perfectly healthy override. It happened: a routine power
+# cycle silently reverted a field bridge to its baked-in script, with one log line as the
+# only evidence.
+#
+# A crash loop is by definition repeated starts WITHIN one boot — systemd restarts a
+# failing unit immediately, so per-boot counting catches it exactly as well. /proc/uptime
+# is monotonic and resets when the machine does, which is precisely the semantics wanted.
+# The boot id is recorded too so stamps from a previous boot are discarded rather than
+# aged out, making the reset explicit instead of a side effect of arithmetic.
+# Both sources are overridable so the reboot case is testable — without that, the very bug
+# this fixes is the one the suite cannot reach.
+UPTIME_SRC="${BRIDGE_RUN_UPTIME_SRC:-/proc/uptime}"
+BOOTID_SRC="${BRIDGE_RUN_BOOTID_SRC:-/proc/sys/kernel/random/boot_id}"
+now=$(cut -d' ' -f1 "$UPTIME_SRC" 2>/dev/null | cut -d. -f1)
+now="${now:-0}"
+BOOT_ID="$(cat "$BOOTID_SRC" 2>/dev/null)"
+BOOT_ID="${BOOT_ID:-unknown}"
+
 recent=""
 if [ -f "$STAMP" ]; then
-  while read -r t; do
-    [ -n "$t" ] || continue
-    [ $((now - t)) -le "$TRIP_WINDOW_S" ] && recent="$recent$t
+  stamped_boot="$(head -n1 "$STAMP" 2>/dev/null)"
+  if [ "$stamped_boot" = "$BOOT_ID" ]; then
+    # same boot: keep only starts still inside the window. Fed by here-doc, NOT a pipe —
+    # a pipe would run this loop in a subshell and `recent` would come back empty.
+    while read -r t; do
+      [ -n "$t" ] || continue
+      case "$t" in *[!0-9]*) continue ;; esac
+      [ $((now - t)) -le "$TRIP_WINDOW_S" ] && recent="$recent$t
 "
-  done < "$STAMP"
+    done <<EOF
+$(tail -n +2 "$STAMP" 2>/dev/null)
+EOF
+  fi
+  # different boot id -> `recent` stays empty: a reboot is NOT a crash loop
 fi
 recent="$recent$now
 "
-printf '%s' "$recent" > "$STAMP" 2>/dev/null
+# Line 1 is the boot id; the rest are boot-relative start times. Writing the id every time
+# means the NEXT boot reads a mismatch and starts counting from zero.
+printf '%s\n%s' "$BOOT_ID" "$recent" > "$STAMP" 2>/dev/null
 n=$(printf '%s' "$recent" | grep -c . )
 
 if [ "$n" -ge "$TRIP_N" ]; then
