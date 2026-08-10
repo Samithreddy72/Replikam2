@@ -3,3 +3,6 @@ uvicorn[standard]==0.34.0
 sqlalchemy==2.0.36
 pydantic==2.10.4
 psycopg[binary]==3.2.3
+# File uploads (POST /admin/payloads). FastAPI asserts on this at REQUEST time, not at
+# import, so a missing dependency surfaces as a 500 on first use rather than a startup error.
+python-multipart==0.0.9
