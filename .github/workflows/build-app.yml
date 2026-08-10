@@ -98,10 +98,22 @@ jobs:
           }
           Write-Error "app did not answer on :8765"; exit 1
 
+      # Upload the app AND its mesh sidecar.
+      #
+      # This used to upload only ${{ matrix.bin }}. On macOS that ships a BROKEN app:
+      # PyInstaller strips and re-signs any Mach-O it bundles, which corrupts the Go mesh
+      # helper — tsnet's inbound UDP dies, so return audio is silently dead while everything
+      # else looks healthy. build.py therefore also writes an unprocessed sidecar next to the
+      # binary, and _mesh_bin() prefers it. Leaving the sidecar out of the artifact meant the
+      # only working copies were the ones on the build machine.
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: app/netbridge-source/dist/${{ matrix.bin }}
+          path: |
+            app/netbridge-source/dist/${{ matrix.bin }}
+            app/netbridge-source/dist/netbridge-mesh
+            app/netbridge-source/dist/netbridge-mesh.exe
+            app/netbridge-source/dist/app-pubkey.pem
           if-no-files-found: error
 
   release:
