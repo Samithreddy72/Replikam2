@@ -312,6 +312,12 @@ def main():
     pub = HERE / "app-pubkey.pem"
     if pub.exists():
         cmd += ["--add-data", "%s%s." % (pub, sep)]
+
+    # certifi's cacert.pem must travel with the app. A frozen build has no OS cert store,
+    # so without this every https call to the fleet fails CERTIFICATE_VERIFY_FAILED and the
+    # bridge list comes back empty. The import lives inside a function, so name it
+    # explicitly rather than relying on PyInstaller's static analysis to spot it.
+    cmd += ["--hidden-import", "certifi", "--collect-data", "certifi"]
     if IS_MAC:
         # A .app bundle is what macOS users expect to double-click. The onefile binary
         # still works from a terminal, and is what CI zips.

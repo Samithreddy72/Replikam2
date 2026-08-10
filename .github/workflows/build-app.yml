@@ -54,7 +54,7 @@ jobs:
           go-version: "1.23"
 
       - name: Install PyInstaller
-        run: python -m pip install --upgrade pip pyinstaller
+        run: python -m pip install --upgrade pip pyinstaller certifi
 
       # GStreamer is the ONLY return-audio player on Windows (ffmpeg has no audio output
       # device there), so it must be present on the runner for build.py to bundle it.
@@ -78,11 +78,24 @@ jobs:
         working-directory: app/netbridge-source
         run: |
           ./dist/NetBridgeSource &
+          up=0
           for i in $(seq 1 20); do
-            curl -sf -m 2 http://127.0.0.1:8765/api/state >/dev/null && { echo "app responds"; exit 0; }
+            curl -sf -m 2 http://127.0.0.1:8765/api/state >/dev/null && { up=1; break; }
             sleep 1
           done
-          echo "app did not answer on :8765"; exit 1
+          [ "$up" = 1 ] || { echo "app did not answer on :8765"; exit 1; }
+          echo "app responds"
+          # TLS regression check. A frozen build has no OS cert store, so every https call
+          # to the fleet died CERTIFICATE_VERIFY_FAILED — the bridge list came back empty
+          # and Go live did nothing. The old smoke test passed anyway, because the app was
+          # answering locally the whole time. Signed out, this endpoint should 401; what it
+          # must never do is fail to verify a certificate.
+          body=$(curl -s -m 15 http://127.0.0.1:8765/api/bridges || true)
+          case "$body" in
+            *CERTIFICATE_VERIFY_FAILED*|*"unable to get local issuer"*)
+              echo "TLS to the fleet is broken in the packaged app:"; echo "$body"; exit 1;;
+          esac
+          echo "fleet TLS ok"; exit 0
 
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
@@ -90,13 +103,24 @@ jobs:
         shell: pwsh
         run: |
           Start-Process -FilePath ".\dist\NetBridgeSource.exe"
+          $up = $false
           for ($i=0; $i -lt 20; $i++) {
             try {
               Invoke-WebRequest -Uri http://127.0.0.1:8765/api/state -TimeoutSec 2 -UseBasicParsing | Out-Null
-              Write-Host "app responds"; exit 0
+              $up = $true; break
             } catch { Start-Sleep -Seconds 1 }
           }
-          Write-Error "app did not answer on :8765"; exit 1
+          if (-not $up) { Write-Error "app did not answer on :8765"; exit 1 }
+          Write-Host "app responds"
+          # TLS regression check — see the macOS step for why this exists.
+          $body = ""
+          try {
+            $body = (Invoke-WebRequest -Uri http://127.0.0.1:8765/api/bridges -TimeoutSec 15 -UseBasicParsing).Content
+          } catch { $body = "$_" }
+          if ($body -match "CERTIFICATE_VERIFY_FAILED" -or $body -match "unable to get local issuer") {
+            Write-Error "TLS to the fleet is broken in the packaged app: $body"; exit 1
+          }
+          Write-Host "fleet TLS ok"; exit 0
 
       # Upload the app AND its mesh sidecar.
       #

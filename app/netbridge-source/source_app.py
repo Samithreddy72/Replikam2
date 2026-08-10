@@ -22,6 +22,38 @@ control plane refuses fleet mutations even if the UI asked for them.
 import json, os, pathlib, re, shutil, socket, subprocess, sys, threading, time
 import urllib.request, urllib.error
 
+
+def _ensure_ca_bundle():
+    """Give the frozen app a CA store before anything opens HTTPS.
+
+    Running from source, Python finds the OS root certificates and TLS to the fleet just
+    works. A PyInstaller build does not: it carries its own Python and OpenSSL with no
+    linked cert store, so the FIRST https call dies with
+
+        [SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate
+
+    and the failure surfaces as an empty BRIDGE dropdown and a dead Go live button — which
+    reads as "the app is broken", not "the app cannot verify a certificate". Source builds
+    were unaffected, so this only ever bit the packaged app.
+
+    certifi ships the Mozilla roots and PyInstaller bundles its cacert.pem. Publishing the
+    path through the environment covers urllib, ssl and anything else that consults
+    OpenSSL's default paths. An operator-set SSL_CERT_FILE always wins, for corporate roots.
+    """
+    if os.environ.get("SSL_CERT_FILE"):
+        return
+    try:
+        import certifi
+        ca = certifi.where()
+    except Exception:
+        return                                   # source run: the OS store is already fine
+    if ca and os.path.exists(ca):
+        os.environ["SSL_CERT_FILE"] = ca
+        os.environ["REQUESTS_CA_BUNDLE"] = ca
+
+
+_ensure_ca_bundle()
+
 STATE_DIR = pathlib.Path(os.path.expanduser("~/.netbridge-source"))
 STATE_FILE = STATE_DIR / "state.json"
 HOST, PORT = "127.0.0.1", 8765
