@@ -29,19 +29,33 @@ R=~/netbridge/replikam2-ci
 S="ssh -i $KEY -o StrictHostKeyChecking=no -o ConnectTimeout=8 pi@$PI"
 die(){ echo "  ❌ $*" >&2; exit 1; }
 
+#   4. jitter-sentry.sh — THE STREAM-DROP FIX. It restarted uvcd + both feeders mid-meeting
+#      because the network had been good for 10 minutes ("pristine -> profile LAN"). Profile
+#      switches are now deferred while media is flowing. This is the one the user actually
+#      feels: it is why the stream "suddenly goes off and on".
+#
+#   5. flight-recorder.sh / wifi-guardian.sh — both rotate their ring buffer through
+#      "$F.tmp", which lands in /home/pi on the READ-ONLY root. Rotation failed on every
+#      pass: a journal line every second, and flight.txt grew to 84,017 lines against a
+#      500-line cap on the finite /data partition.
+
+SCRIPTS="bridge-powertrim.sh bridge-run.sh jitter-sentry.sh flight-recorder.sh wifi-guardian.sh"
+
 echo "════ staging ════"
-for f in "$R/pi/scripts/bridge-powertrim.sh" "$R/pi/systemd/bridge-powertrim.service" \
-         "$R/pi/scripts/bridge-run.sh"; do
+for b in $SCRIPTS; do
+  f="$R/pi/scripts/$b"
   [ -f "$f" ] || die "missing $f"
+  bash -n "$f" || die "$b syntax"
 done
-bash -n "$R/pi/scripts/bridge-powertrim.sh" || die "powertrim syntax"
-bash -n "$R/pi/scripts/bridge-run.sh"       || die "loader syntax"
-echo "  ✅ payloads pass syntax checks locally"
+[ -f "$R/pi/systemd/bridge-powertrim.service" ] || die "missing powertrim unit"
+echo "  ✅ all payloads pass syntax checks locally"
 
 $S 'echo OK' 2>/dev/null | grep -q OK || die "no SSH to $PI"
-scp -i "$KEY" -o StrictHostKeyChecking=no \
-  "$R/pi/scripts/bridge-powertrim.sh" "$R/pi/systemd/bridge-powertrim.service" \
-  "$R/pi/scripts/bridge-run.sh" "pi@$PI:/tmp/" >/dev/null || die "scp failed"
+for b in $SCRIPTS; do
+  scp -i "$KEY" -o StrictHostKeyChecking=no "$R/pi/scripts/$b" "pi@$PI:/tmp/" >/dev/null || die "scp $b failed"
+done
+scp -i "$KEY" -o StrictHostKeyChecking=no "$R/pi/systemd/bridge-powertrim.service" \
+  "pi@$PI:/tmp/" >/dev/null || die "scp unit failed"
 echo "  ✅ payloads on the Pi"
 
 $S 'bash -s' <<'REMOTE'
@@ -106,6 +120,20 @@ sudo grep -q 'BRIDGE_RUN_BOOTID_SRC' /mnt/tcroot/usr/local/bin/bridge-run.sh \
   && echo "  ✅ 3/3 bridge-run.sh carries the D1 boot-id fix" \
   || { echo "  ❌ D1 marker missing"; exit 1; }
 
+# ---- 4. the stream-drop fix + the two ring-rotation fixes ----
+for b in jitter-sentry.sh flight-recorder.sh wifi-guardian.sh; do
+  sudo cp -n "/mnt/tcroot/usr/local/bin/$b" "/mnt/tcroot/usr/local/bin/$b.pre-powerfix" 2>/dev/null || true
+  sudo install -m 0755 "/tmp/$b" "/mnt/tcroot/usr/local/bin/$b"
+  sudo bash -n "/mnt/tcroot/usr/local/bin/$b" || { echo "  ❌ $b syntax on card"; exit 1; }
+done
+sudo grep -q 'media_live' /mnt/tcroot/usr/local/bin/jitter-sentry.sh \
+  && echo "  ✅ 4/4 jitter-sentry will NOT reconfigure a live session (the stream-drop fix)" \
+  || { echo "  ❌ jitter-sentry liveness guard missing"; exit 1; }
+sudo grep -q 'flight.rotate.tmp' /mnt/tcroot/usr/local/bin/flight-recorder.sh \
+  && sudo grep -q 'netlog.rotate.tmp' /mnt/tcroot/usr/local/bin/wifi-guardian.sh \
+  && echo "  ✅ ring rotation now writes beside the real file (read-only-root fix)" \
+  || { echo "  ❌ rotation fix missing"; exit 1; }
+
 # ---- sanity: don't leave a card that cannot boot ----
 sudo test -x /mnt/tcroot/usr/local/bin/bridge-powertrim.sh || { echo "  ❌ powertrim not executable"; exit 1; }
 grep -q 'dtoverlay=dwc2,dr_mode=peripheral' "$CFG" || { echo "  ❌ dwc2 line vanished from config.txt!"; exit 1; }
@@ -114,7 +142,7 @@ echo "  ✅ dwc2 gadget line still present (card will still enumerate)"
 sudo sync
 sudo umount /mnt/tcboot /mnt/tcroot && echo "  ✅ unmounted cleanly"
 sudo sync
-rm -f /tmp/bridge-powertrim.sh /tmp/bridge-powertrim.service /tmp/bridge-run.sh
+rm -f /tmp/bridge-powertrim.sh /tmp/bridge-powertrim.service /tmp/bridge-run.sh /tmp/jitter-sentry.sh /tmp/flight-recorder.sh /tmp/wifi-guardian.sh
 REMOTE
 rc=$?
 echo
