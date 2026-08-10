@@ -130,24 +130,39 @@ let KEY = localStorage.getItem("nb_admin_key") || "";
 // side did exactly that to a live meeting on its own — the two most dangerous entries in
 // this menu were the two that were unguarded.
 const DISRUPTIVE = new Set(["restart","reset-clock","reboot","lock","stop","profile","update","unquarantine"]);
+// Every entry here maps to a failure this fleet has ACTUALLY produced. Two candidates were
+// deliberately left out rather than padding the list:
+//   * "Install OS update" — the OTA path has never been proven end to end, and a failed
+//     image swap at a remote site is the highest-consequence action available. It stays out
+//     until an OTA has actually been done successfully once.
+//   * "Deploy a signed script" — the device accepts it, but it needs a URL the BRIDGE can
+//     reach, and no payload host exists yet (the one attempt hung: the bridge could not
+//     fetch from a laptop). A button that reliably fails is worse than no button.
+// Reverting IS offered, because it needs no URL and is how you undo a bad deploy.
 const ACTIONS = [
   ["", "Actions…"],
-  ["diagnose", "Collect diagnostics"],
-  ["set-pin", "Set / rotate PIN…"],
-  ["mesh-key", "Re-issue mesh key (rejoin the mesh)"],
-  ["profile:lan", "Jitter profile → LAN (low latency)"],
-  ["profile:wan", "Jitter profile → WAN (rough network)"],
-  ["restart", "Restart media services"],
-  ["reset-clock", "Reset audio clock"],
-  ["lock", "Lock (require PIN)"],
-  ["unlock", "Unlock (clear PIN lockout)…"],
-  ["running", "What code is it running?"],
-  ["logs", "Fetch recent logs"],
-  ["unquarantine", "Restore quarantined override"],
-  ["revert-script", "Revert a script to factory…"],
-  ["deploy-script", "Deploy a signed script…"],
-  ["update", "Install OS update (A/B, auto-rollback)"],
-  ["reboot", "Reboot bridge"],
+
+  ["#Look first — safe, changes nothing", null],
+  ["diagnose",     "Collect diagnostics"],
+  ["running",      "What code is it running?"],
+  ["logs",         "Fetch recent logs"],
+
+  ["#Repair — fixes a known fault", null],
+  ["reset-clock",  "Audio robotic or crackling → reset audio clock"],
+  ["mesh-key",     "Return audio going nowhere → re-issue mesh key"],
+  ["unquarantine", "Deployed code not running → restore override"],
+  ["revert-script","Undo a bad script → revert to factory…"],
+
+  ["#Access — no effect on media", null],
+  ["set-pin",      "Set / rotate PIN…"],
+  ["unlock",       "Presenter locked out → clear lockout…"],
+  ["lock",         "Lock (require PIN)"],
+
+  ["#Interrupts the stream", null],
+  ["restart",      "Nothing arriving at the bridge → restart media"],
+  ["profile:wan",  "Network rough → jitter profile WAN"],
+  ["profile:lan",  "Network good → jitter profile LAN"],
+  ["reboot",       "Bridge wedged → reboot"],
 ];
 
 function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("show");
@@ -352,7 +367,15 @@ function render(){
         <td style="text-align:right"></td>`;
       if (isAdmin()){   // presenters see the fleet; only admins can act on it
         const sel = document.createElement("select"); sel.className = "act";
-        for (const [v,l] of ACTIONS){ const o=document.createElement("option"); o.value=v; o.textContent=l; sel.appendChild(o); }
+        let grp = null;
+        for (const [v,l] of ACTIONS){
+          if (v.startsWith("#")){                       // a heading, not a command
+            grp = document.createElement("optgroup"); grp.label = v.slice(1); sel.appendChild(grp);
+            continue;
+          }
+          const o=document.createElement("option"); o.value=v; o.textContent=l;
+          (grp || sel).appendChild(o);
+        }
         sel.onchange = ()=>{ doAction(d.id, d.name||d.id, sel.value, isLive); sel.value=""; };
         tr.lastElementChild.appendChild(sel);
       }
