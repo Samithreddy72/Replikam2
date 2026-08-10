@@ -41,9 +41,10 @@ def soc_throttled():
     every poll — and because it answered, the authoritative vcgencmd read was never reached.
 
     The panel therefore showed a healthy `0x0` on a board whose real value was 0x50000
-    (bit16 undervolt-occurred + bit18 throttled-occurred), with 327 separate live brownout
-    episodes in one flight recording. Every diagnosis that trusted the panel looked past the
-    actual cause, and the only way to learn the truth was to pull a full diagnostics bundle.
+    (bit16 undervolt-occurred + bit18 throttled-occurred) while the flight recorder was
+    catching live brownouts in 1.3% of all sampled seconds. Every diagnosis that trusted the
+    panel looked past the actual cause, and the only way to learn the truth was to pull a
+    full diagnostics bundle and read power.txt by hand.
 
     Order now goes sticky-first. The instantaneous alarm is still read, but as EXTRA
     information in power_state(), never as a substitute for the history.
@@ -80,6 +81,49 @@ _THROTTLE_BITS = ((0x1, "under-voltage NOW"), (0x2, "ARM frequency capped NOW"),
                   (0x80000, "soft temperature limit has occurred"))
 
 
+FLIGHT = "/home/pi/flight.txt"
+
+
+def brownout_rate(window=500):
+    """Percentage of recent seconds in which the board was ACTIVELY browning out.
+
+    The sticky bits answer "has this ever happened", which is necessary but not sufficient:
+    they stay set forever, so a board that browned out once at boot looks identical to one
+    doing it constantly. What actually predicts audio quality is the RATE.
+
+    Measured 2026-08-10 on this hardware: during the window Samith confirmed the audio was
+    clean by ear, the rate was 0.50%. Over the whole recording it was 1.30%, and one 5000-
+    sample stretch hit 3.62%. Same board, same sticky bits, audibly different results — so
+    "has browned out" alone cannot tell you whether tonight will be good.
+
+    Reads only the tail of the flight recorder, which is a ring of the last ~500 seconds.
+    Returns None when unreadable rather than guessing; a missing recorder is not 0%.
+    """
+    try:
+        with open(FLIGHT, "rb") as f:
+            try:
+                f.seek(-window * 64, 2)      # ~64 bytes/line, cheap bounded read
+            except OSError:
+                f.seek(0)
+            lines = f.read().decode("utf-8", "replace").splitlines()[-window:]
+    except Exception:
+        return None
+    seen = live = 0
+    for ln in lines:
+        m = re.search(r"thr=0x([0-9a-fA-F]+)", ln)
+        if not m:
+            continue
+        seen += 1
+        try:
+            if int(m.group(1), 16) & 0x1:    # bit0 = under-voltage RIGHT NOW
+                live += 1
+        except ValueError:
+            pass
+    if not seen:
+        return None
+    return {"samples": seen, "live": live, "pct": round(100.0 * live / seen, 2)}
+
+
 def power_state(raw=None):
     """Decode the throttle mask into something an operator can act on without a bundle.
 
@@ -97,6 +141,14 @@ def power_state(raw=None):
     # Thermal is a separate fault with a separate fix; do not fold it into the power verdict,
     # but never report "clean" while a thermal bit is set — that reads as a contradiction.
     thermal = bool(v & 0x8) or bool(v & 0x80000)
+    rate = brownout_rate()
+    if rate and rate["pct"] >= 2.0:
+        # Above ~2% the stutter is audible. Below ~1% this board has been confirmed clean
+        # by ear with the sticky bits already set, so the rate is what to act on.
+        summary = ("browning out %.1f%% of the time — enough to be audible; raise the "
+                   "return buffer and expect possible reboots" % rate["pct"])
+        return {"raw": raw, "ok": False, "live": live, "ever": True, "rate": rate,
+                "summary": summary, "flags": flags}
     if live:
         summary = "browning out RIGHT NOW — expect stutter and possible reboots"
     elif ever:
@@ -107,7 +159,7 @@ def power_state(raw=None):
     else:
         summary = "power clean since boot"
     return {"raw": raw, "ok": not (live or ever), "live": live, "ever": ever,
-            "summary": summary, "flags": flags}
+            "rate": rate, "summary": summary, "flags": flags}
 
 
 def read(path):
