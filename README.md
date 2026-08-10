@@ -1,72 +1,191 @@
-# RepliKam2 🎥
+# NetBridge
 
-**Turn a Raspberry Pi 4 into a driverless USB webcam + microphone + speaker for any laptop — fed by your Mac, over the network.**
+**A Raspberry Pi that pretends to be a webcam, so a presenter anywhere can appear in a
+meeting anywhere.**
 
-Your camera and voice are wherever *you* are; the meeting runs on a laptop anywhere else. The Pi plugs into that laptop by USB and shows up as a completely standard webcam and headset — **nothing to install on the laptop**. Works with Google Meet, Zoom, and Microsoft Teams.
+Plug the Pi into a meeting laptop with a USB-C cable. It shows up in Zoom, Teams or Meet as
+an ordinary camera, microphone and speaker — **nothing is installed on that laptop**. A
+presenter somewhere else runs the NetBridge app; their face and voice come out of that fake
+webcam, and the room's audio comes back to them. The two ends find each other over a private
+encrypted mesh, so neither needs a public IP, a port forward, or the same network.
 
-```
-┌─────────┐   Wi-Fi / RTP    ┌──────────────┐    USB-C     ┌────────────────┐
-│  YOUR   │ ───────────────► │ RASPBERRY PI │ ───────────► │ CLIENT LAPTOP  │
-│  MAC    │  camera + voice  │   (bridge)   │  UVC camera  │  Meet / Zoom / │
-│         │ ◄─────────────── │              │  UAC2 audio  │     Teams      │
-└─────────┘  meeting audio   └──────────────┘              └────────────────┘
-```
-
-## ✨ What you get
-- 📷 **Video**: your Mac's camera as "UVC Camera" on the client — 320×180 @ a locked 20 fps
-- 🎙 **Your voice**: professionally processed on the Pi (noise suppression, auto-leveling,
-  clip-proof limiting via Google's webrtc audio engine) → "Microphone (Source/Sink)"
-- 🔊 **Meeting audio back to you**: everything the client plays (meeting voices, shared
-  YouTube, system sounds) streams to your Mac, jitter-buffered and click-free
-- 🛡 **Self-healing**: Wi-Fi guardian, hardware + service watchdogs, adaptive jitter
-  buffers that auto-tune to network quality, power-loss-safe — power it on and forget it
-- 🖱 **One-click start/stop** on the Mac, one-command setup for a fresh SD card
-
-## 🚀 Quick start
-1. **Read [docs/SETUP-GUIDE.md](docs/SETUP-GUIDE.md)** — flash the SD card (5 min, guided)
-2. Run the one-click setup:
-   ```bash
-   git clone https://github.com/Samithreddy72/RepliKam2.git
-   cd RepliKam2
-   bash setup.sh bridge-001.local
-   ```
-3. Plug the Pi into the client laptop, run `bash mac/go-live.sh` on your Mac, join your meeting.
-
-## 🧠 Hard-won engineering notes (why this repo exists)
-| Problem | Solution shipped here |
-|---|---|
-| **Kernel ≥ 6.18 hard-freezes the Pi** the moment a laptop connects (dwc2 gadget bug) | pinned, battle-tested **kernel 6.12.93** installed by setup.sh, apt-held |
-| The original uvc-gadget project vanished from GitHub | **patched, working pump binaries + sources preserved** in this repo (3 bugs fixed: memory-mode, buffer `field`, missing format negotiation) |
-| v4l2loopback starves with default buffers; exclusive-caps quirks | pre-configured 16-buffer exclusive device, created automatically at boot |
-| Wi-Fi drops, radio power-save, captive portals, corporate networks | **wifi-guardian**: multi-signal liveness, auto-reconnect ladder, self-reboot last resort |
-| Audio jitter across changing networks | **jitter-sentry**: measures the path every 20 s, auto-switches buffer profiles |
-| Voice too quiet / noisy / clipping | webrtcdsp chain: noise suppression + AGC + limiter, measured at broadcast density |
-
-## 📁 Repository layout
-```
-setup.sh            ← the one-click fresh-SD installer (run from your Mac)
-mac/                ← go-live.sh / stop-live.sh + senders & listener
-pi/                 ← every bridge script, systemd unit, and config (tested versions)
-restore/kernel/     ← kernel 6.12.93 .debs (the freeze fix — keep these safe!)
-restore/binaries/   ← the patched uvc-gadget pump + library (irreplaceable)
-sources/            ← patched source trees for future rebuilds
-docs/               ← setup guide, golden rules, audio tuning, troubleshooting
-```
-
-## 📜 Golden rules
-See [docs/GOLDEN-RULES.md](docs/GOLDEN-RULES.md). The big three:
-1. **Never upgrade the kernel past 6.12.x** (setup pins it — leave the pin alone)
-2. **Never unplug/replug the client mid-meeting** — plug once before joining
-3. After any client replug, **re-check Windows sound devices** (replugs reset them)
+> **New here?** Go straight to the [Setup Guide](docs/SETUP-GUIDE.md) — blank SD card to a
+> working bridge, written for someone who has never touched a Raspberry Pi.
 
 ---
-*Built, broken, debugged, and rebuilt on real hardware. Every file in this repo has run in production.*
 
-## 🌍 Fleet mode (15–20 bridges worldwide)
-This repo also contains the full fleet-management system:
-- `control-plane/` — the admin brain (FastAPI + panel): enroll, telemetry, commands, alerts
-- `fleet` — admin CLI: `fleet status`, `fleet update all`, `fleet ssh bridge-007`
-- `factory/` — SD card mass-production (golden image + per-unit stamping)
-- `devkit/` — personalized one-click developer kits (Mac + Windows)
-- Alerts push to the admin's phone via ntfy.sh
-See `factory/GOLDEN-IMAGE.md` and `devkit/ONBOARDING.md`.
+## Why it exists
+
+Remote presenters normally join a meeting *as a participant on a screen*. NetBridge makes
+them appear *as the room's camera* — full-frame, in the same video tile a physical camera
+would occupy, on a laptop nobody had to configure. That matters for interviews, briefings,
+teaching, and anywhere a guest must look like they are in the room.
+
+The whole design protects one promise: **the meeting laptop installs nothing.** Everything
+else — the mesh, the fleet, the self-provisioning image — exists to keep that true.
+
+---
+
+## Features
+
+| | |
+|---|---|
+| **Zero-install at the meeting end** | Standard USB Video/Audio Class. Any OS, any conferencing app. |
+| **Zero per-device configuration** | Every SD card is identical. A bridge sets itself up from a phone. |
+| **Works across continents** | Encrypted mesh with NAT traversal. No port forwarding, no static IPs. |
+| **Fleet-managed** | Every bridge on one page, with the known fixes one click away. |
+| **Remote repair** | Push a signed code fix to a bridge in another country, or roll one back. |
+| **Self-healing** | Watchdogs, auto-rollback on a bad deploy, read-only root, survives power cuts. |
+| **Follows the meeting's audio rate** | 32 / 44.1 / 48 kHz, switched live, no restart. |
+| **PIN-gated** | The device itself checks the PIN before accepting a single frame. |
+
+---
+
+## Architecture
+
+```
+    PRESENTER                     PRIVATE MESH                  MEETING ROOM
+ ┌──────────────┐                                          ┌──────────────────┐
+ │ NetBridge    │  video 5000  ─────────────────────────►  │  Raspberry Pi 4  │  USB-C
+ │ app (Mac)    │  voice 5002  ─────────────────────────►  │                  │ ═══════►
+ │              │                                          │  UVC camera      │  laptop
+ │  camera ─────┤  ◄───────────────────────  audio 5004    │  UAC2 mic/spkr   │
+ │  mic ────────┤                                          └────────┬─────────┘
+ └──────┬───────┘                                                   │
+        │                                                           │ telemetry
+        │            ┌───────────────────────────────┐              │ + commands
+        └───────────►│   Fleet control plane (AWS)   │◄─────────────┘
+           sign-in   │   fleet.scine.online          │
+           mesh key  │   panel · API · alerts        │
+                     └───────────────────────────────┘
+```
+
+**Every media leg rides the mesh.** There is deliberately no LAN path: if the mesh cannot be
+established the app refuses with a reason rather than silently downgrading.
+
+The control plane never carries media — only telemetry, commands and mesh keys. Deploying it
+does not interrupt a live stream.
+
+---
+
+## Requirements
+
+**Hardware:** Raspberry Pi 4 Model B (2 GB+), microSD 16 GB+, a power supply rated for the
+Pi 4's peak draw, and a **USB-C data cable** (charge-only cables are the most common setup
+failure).
+
+**Presenter:** macOS, with `brew install ffmpeg gstreamer`. Windows is built but not released.
+
+**Network:** ordinary Wi-Fi at both ends. No router changes.
+
+---
+
+## Quick start
+
+```bash
+# 1. Download the latest netbridge-os-VERSION.img.xz from Releases
+# 2. Flash it with Raspberry Pi Imager (custom image, no settings needed)
+# 3. Boot the Pi, join "BridgeSetup-XXXX" from your phone, give it the venue Wi-Fi
+# 4. It appears at https://fleet.scine.online as Unclaimed — click Claim
+# 5. Plug the Pi into the meeting laptop, pick "NetBridge" as camera/mic/speaker
+# 6. Presenter opens the app, signs in, clicks Go live
+```
+
+Full detail, including what you should see at each step:
+**[docs/SETUP-GUIDE.md](docs/SETUP-GUIDE.md)**
+
+---
+
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [SETUP-GUIDE.md](docs/SETUP-GUIDE.md) | **Start here.** Blank SD card → working bridge, in ten phases |
+| [FLEET.md](docs/FLEET.md) | The fleet page: every action, what it fixes, what interrupts a stream |
+| [REMOTE-RECOVERY.md](docs/REMOTE-RECOVERY.md) | Fixing a bridge you cannot physically reach |
+| [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Deeper diagnostics |
+| [AUDIO-TUNING.md](docs/AUDIO-TUNING.md) | The return-audio pipeline and its tunables |
+| [PROVISIONING-V2.md](docs/PROVISIONING-V2.md) | How a card enrols itself |
+| [GOLDEN-RULES.md](docs/GOLDEN-RULES.md) | Hard-won constraints — read before changing the media path |
+| [control-plane/README.md](control-plane/README.md) | Deploying and extending the fleet server |
+
+---
+
+## Repository layout
+
+```
+pi/            what runs on the bridge — scripts/ and systemd/ units
+app/           the presenter app (netbridge-source) + its embedded mesh client
+control-plane/ the fleet server: FastAPI backend, web panel, AWS deploy kit
+factory/       CI image build — turns this repo into a flashable OS image
+tools/         operator tooling: sign and publish scripts, card surgery
+tests/         test suites that run without a Pi
+docs/          the documentation above
+restore/       verified restore points
+```
+
+---
+
+## Updating things
+
+Three places code lives, three different routes:
+
+| Changing | How | Interrupts? |
+|---|---|---|
+| Fleet panel / API | `bash control-plane/deploy/aws/deploy.sh <HOST>` | No |
+| Presenter app | Relaunch it | Ends the session |
+| A media script on the bridge | `bash tools/publish-script.sh <file>` → **Actions → Push a code fix** | Restarts one service |
+| Agent, bridge-web, units, boot config | `gh workflow run build-image.yml` → flash the card | Yes |
+
+The third row is the important one: it works for a bridge **anywhere in the world**, because
+the bridge fetches the signed payload from the fleet over the same HTTPS it already uses.
+
+---
+
+## Security
+
+- **The meeting laptop installs nothing and is never trusted with credentials.**
+- **No pre-auth keys on SD cards.** A bridge's mesh key is issued when you claim it.
+- **PINs are verified on the device**, not just in the cloud, and never displayed after being set.
+- **Remote code is signed.** A script override is verified against a public key on the
+  read-only root — at install, and again at every service start. Auto-rollback quarantines
+  anything that crash-loops.
+- **Per-admin accounts, magic-link sign-in, org scoping, and an audit log.**
+- Secrets live in `/opt/netbridge/.env` on the fleet host and `~/.netbridge/` on the
+  operator's machine. Never in the repository.
+
+> ⚠️ The enrolment token is baked into the OS image, so anyone holding an image file can add
+> a device to your fleet. That is inherent to "no per-device configuration" — treat image
+> files as private and rotate `BOOTSTRAP_TOKENS` if one leaks.
+
+---
+
+## Development
+
+```bash
+git clone https://github.com/Samithreddy72/Replikam2.git
+cd Replikam2
+bash tests/test-script-override.sh      # signed-override loader, 23 checks
+bash tests/test-return-rate-follow.sh   # live sample-rate following, 20 checks
+```
+
+Both run on a laptop with no Pi attached.
+
+Before changing anything in the media path, read [GOLDEN-RULES.md](docs/GOLDEN-RULES.md) —
+several of those constraints were learned by breaking a live call.
+
+---
+
+## Status and honesty
+
+This is a working system, not a finished product. Kept deliberately visible:
+
+- **Echo cancellation is built but not enabled.** A presenter who is also audible in the
+  meeting may hear themselves. Use headphones.
+- **The presenter app is not code-signed.** The packaged macOS binary is killed by Gatekeeper
+  (`CODESIGNING / Invalid Page`), so the launcher runs from source. Fixing this needs an
+  Apple Developer account.
+- **Under-voltage on the reference hardware is unresolved and is not a software problem.**
+  Every available software mitigation is applied and measured ineffective.
+- **Test-boot every new image on a spare card.** A boot-layout bug in this repo's history
+  produced several un-bootable images.
