@@ -46,7 +46,39 @@ ALLOWED = {
     "set-pin":     lambda a: ["sudo", "bridge-pin", "set", _pin(a.get("pin"))],
     "unlock":      lambda a: ["sudo", "bridge-pin", "unlock", _pin(a.get("pin"))],
     "lock":        lambda a: ["sudo", "bridge-pin", "lock"],
+    # --- remote recovery, added after a night where a bridge in another room could not be
+    # --- repaired from the panel at all.
+    # Put a quarantined override back. Auto-rollback silently reverts a device to its
+    # baked-in script; without this the only way back is mounting the SD card, which for a
+    # shipped bridge means it stays reverted forever.
+    "unquarantine": lambda a: ["sudo", "/usr/local/bin/bridge-deploy-script.sh",
+                               "--unquarantine"] + ([_script_name(a["name"])] if a.get("name") else []),
+    # What code is each service ACTUALLY running — override or baked-in, with hashes.
+    "running":     lambda a: ["sudo", "/usr/local/bin/bridge-deploy-script.sh", "--running"],
+    # A light log tail. The diagnostics bundle is right for forensics and wrong for "what
+    # just happened"; at ~470KB it is also a poor fit for a slow venue uplink.
+    "logs":        lambda a: ["journalctl", "-n", _lines(a.get("lines", 200)),
+                              "--no-pager", "-o", "short-iso"]
+                             + (["-u", _unit(a["unit"])] if a.get("unit") else []),
 }
+
+
+def _lines(v):
+    """Bounded log tail — a remote operator on a venue uplink should not be able to ask for
+    the whole journal by accident."""
+    n = int(v or 200)
+    if not (1 <= n <= 2000):
+        raise ValueError("lines must be 1-2000")
+    return str(n)
+
+
+def _unit(v):
+    """Only our own units. Not a shell boundary (argv, never a shell) but a blast-radius one:
+    there is no reason for the fleet to read arbitrary system journals."""
+    v = str(v or "")
+    if not re.fullmatch(r"bridge-[a-z0-9-]{1,32}", v):
+        raise ValueError("bad unit %r" % (v,))
+    return v
 
 
 def _pin(v):

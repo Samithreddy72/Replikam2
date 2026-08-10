@@ -52,6 +52,60 @@ case "${1:-}" in
     log "reverted $NAME to the baked-in version"
     s="$(svc_for "$NAME")"; [ -n "$s" ] && { systemctl restart "$s" && log "restarted $s"; }
     exit 0 ;;
+  --unquarantine)
+    # Put a quarantined override BACK without touching the card.
+    #
+    # Auto-rollback moves a suspect override into quarantine/ and the device silently keeps
+    # running its baked-in script. Until now the ONLY way back was physically mounting the
+    # SD card — so for a bridge in another city it stays reverted indefinitely, with one log
+    # line as the only trace. That is a recovery gap, not a safety feature: the quarantine
+    # did its job, and an operator who has since fixed the cause needs a way to re-arm it.
+    #
+    # The signature is re-verified before anything is restored, so a quarantined file that
+    # was tampered with while it sat there still cannot come back. The start counter is
+    # cleared too, so the restored override gets a genuinely fresh trial instead of resuming
+    # one strike away from tripping again.
+    NAME="${2:-}"
+    Q="$DIR/quarantine"
+    [ -d "$Q" ] || die "nothing quarantined" 0
+    n=0
+    for f in "$Q"/*; do
+      [ -f "$f" ] || continue
+      case "$f" in *.sig.*) continue ;; esac
+      b="$(basename "$f")"; base="${b%%.[0-9]*}"
+      [ -n "$NAME" ] && [ "$base" != "$NAME" ] && continue
+      sig="$Q/${base}.sig.${b##*.}"
+      [ -f "$sig" ] || { log "no signature kept for $base — refusing to restore"; continue; }
+      if ! openssl dgst -sha256 -verify "$PUBKEY" -signature "$sig" "$f" >/dev/null 2>&1; then
+        log "$base FAILED signature re-verify — leaving it quarantined"; continue
+      fi
+      install -m 0755 "$f" "$DIR/$base" && cp -f "$sig" "$DIR/$base.sig" || continue
+      rm -f "$DIR/.state/$base.starts"
+      rm -f "$f" "$sig"
+      log "restored $base from quarantine (signature re-verified)"
+      s="$(svc_for "$base")"; [ -n "$s" ] && { systemctl restart "$s" && log "restarted $s"; }
+      n=$((n+1))
+    done
+    [ "$n" -gt 0 ] || die "nothing restored" 0
+    rm -f "$DIR/.quarantined.json"
+    log "unquarantine complete ($n restored)"
+    exit 0 ;;
+  --running)
+    # Report WHICH code each service is actually executing. An operator otherwise cannot
+    # tell an override from the baked-in script without pulling a diagnostics bundle —
+    # which is exactly how three wrong conclusions got drawn about this bridge in one night.
+    for n in bridge-return-audio.sh bridge-feeder-audio.sh bridge-feeder-net.sh bridge-uvcd.sh; do
+      if [ -f "$DIR/$n" ] && openssl dgst -sha256 -verify "$PUBKEY" -signature "$DIR/$n.sig" "$DIR/$n" >/dev/null 2>&1; then
+        echo "$n override sha256=$(sha256sum "$DIR/$n" | cut -c1-12)"
+      elif [ -f "$DIR/$n" ]; then
+        echo "$n override-UNVERIFIED (baked-in runs)"
+      else
+        echo "$n baked-in sha256=$(sha256sum "/usr/local/bin/$n" 2>/dev/null | cut -c1-12)"
+      fi
+    done
+    q="$(ls "$DIR/quarantine" 2>/dev/null | grep -v '\.sig\.' | tr '\n' ' ')"
+    [ -n "$q" ] && echo "quarantined: $q"
+    exit 0 ;;
 esac
 
 NAME="${1:?usage: bridge-deploy-script.sh <name> <url-base> | --revert <name> | --list}"

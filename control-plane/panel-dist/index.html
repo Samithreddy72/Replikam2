@@ -124,7 +124,12 @@ const $ = id => document.getElementById(id);
 let KEY = localStorage.getItem("nb_admin_key") || "";
 // Commands that interrupt media or reboot the device — always confirmed,
 // and double-confirmed if someone is live on that bridge (meeting-aware).
-const DISRUPTIVE = new Set(["restart","reset-clock","reboot","lock","stop"]);
+// Anything here asks for confirmation, and warns hard if someone is streaming.
+// "profile" belongs in this set: `bridge profile <lan|wan>` rewrites /etc/default/bridge-net
+// and RESTARTS uvcd + feeder-net + feeder-audio. It was missing, and on 10 Aug the device
+// side did exactly that to a live meeting on its own — the two most dangerous entries in
+// this menu were the two that were unguarded.
+const DISRUPTIVE = new Set(["restart","reset-clock","reboot","lock","stop","profile","update","unquarantine"]);
 const ACTIONS = [
   ["", "Actions…"],
   ["diagnose", "Collect diagnostics"],
@@ -135,6 +140,13 @@ const ACTIONS = [
   ["restart", "Restart media services"],
   ["reset-clock", "Reset audio clock"],
   ["lock", "Lock (require PIN)"],
+  ["unlock", "Unlock (clear PIN lockout)…"],
+  ["running", "What code is it running?"],
+  ["logs", "Fetch recent logs"],
+  ["unquarantine", "Restore quarantined override"],
+  ["revert-script", "Revert a script to factory…"],
+  ["deploy-script", "Deploy a signed script…"],
+  ["update", "Install OS update (A/B, auto-rollback)"],
   ["reboot", "Reboot bridge"],
 ];
 
@@ -269,6 +281,24 @@ async function doAction(devId, devName, value, isLive){
     if (!/^\d{6}$/.test(pin)) { toast("PIN must be exactly 6 digits"); return; }
     args = {pin};
   }
+  if (type === "unlock"){
+    const pin = prompt(`PIN for ${devName}?\n\nClears a lockout after three wrong tries.`);
+    if (pin === null) return;
+    if (!/^\d{4,8}$/.test(pin)) { toast("PIN must be 4-8 digits"); return; }
+    args = {pin};
+  }
+  if (type === "revert-script"){
+    const name = prompt(`Which script to revert on ${devName}?\n\ne.g. bridge-return-audio.sh\nThe device drops the override and runs its baked-in copy.`);
+    if (!name) return;
+    args = {name};
+  }
+  if (type === "deploy-script"){
+    const name = prompt(`Script name to deploy to ${devName}?\n\ne.g. bridge-return-audio.sh`);
+    if (!name) return;
+    const source = prompt(`URL base holding ${name} and ${name}.sig?\n\nThe device verifies the signature before installing, and again at every start.`);
+    if (!source) return;
+    args = {name, source};
+  }
   if (DISRUPTIVE.has(type)) {
     if (isLive && !confirm(`⚠ ${devName} is LIVE — someone is streaming through it right now.\n\n"${type}" will interrupt them. Really proceed?`)) return;
     if (!isLive && !confirm(`Run "${type}" on ${devName}?`)) return;
@@ -304,6 +334,8 @@ function render(){
   for (const d of DEVS){
     const t = d.latest || {};
     const isLive = !!(d.online && (t.streams||{}).video);
+    // Deployed code that is NOT running. Nothing else on this row would show it.
+    const quar = (t.quarantined||[]);
     const code = (d.pairing_code||"").replace("BRIDGE-","");
     const tr = document.createElement("tr");
     if (!d.claimed) {
@@ -313,7 +345,7 @@ function render(){
       tr.querySelector(".claimbtn").onclick = ()=>claim(d.id, d.pairing_code||d.id);
     } else {
       tr.innerHTML = `<td class="dev">${d.name||d.hostname||d.id} <span class="dim">${code}</span></td>
-        <td>${statusPill(d)}</td>
+        <td>${statusPill(d)}${quar.length ? ` <span class="pill warn" title="Auto-rollback parked ${quar.join(", ")}. This bridge is running its FACTORY script, not the code you deployed. Actions → Restore quarantined override.">deployed code not running</span>` : ""}</td>
         <td>${pinCell(d)}</td>
         <td class="dim">${d.version||"?"}</td>
         <td class="dim">${sessionCell(d)}</td>

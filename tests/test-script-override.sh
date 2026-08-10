@@ -153,5 +153,47 @@ else
 fi
 
 echo
+
+# ============ 10. UNQUARANTINE — the recovery path for D1 ============
+# Auto-rollback parks a suspect override and the device silently runs its baked-in script.
+# Until this existed the ONLY way back was mounting the SD card — so a bridge in another
+# city stayed reverted indefinitely. A recovery path nobody has tested is not a recovery
+# path, which is the whole reason these four cases exist.
+DEPLOY="$(cd "$(dirname "$0")/.." && pwd)/pi/scripts/bridge-deploy-script.sh"
+sed -e "s#^DIR=.*#DIR=\"$T/data/overrides\"#" \
+    -e "s#^PUBKEY=.*#PUBKEY=\"$T/root/script-pubkey.pem\"#" \
+    -e "s#systemctl#true systemctl#g" \
+    "$DEPLOY" > "$T/deploy.sh"
+chmod +x "$T/deploy.sh"
+
+clear_ovr; mkoverride "OVERRIDE"; sign
+r1=$(run); r2=$(run); r3=$(run)            # trip the quarantine
+[ "$r3" = "BAKED" ] && ok "setup: override quarantined, device on baked-in" \
+                    || no "could not set up the quarantine (got '$r3')"
+
+bash "$T/deploy.sh" --unquarantine >/dev/null 2>&1
+[ "$(run)" = "OVERRIDE" ] && ok "unquarantine RESTORES the override (signature re-verified)" \
+                          || no "unquarantine did not restore the override"
+[ -f "$T/data/overrides/.quarantined.json" ] && no "stale .quarantined.json left behind" \
+                                             || ok "quarantine marker cleared"
+# A restored override must behave exactly like a NEWLY DEPLOYED one: starts 1 and 2 run,
+# start 3 trips. (The check above already consumed start 1.) The failure this guards against
+# is the counter surviving the quarantine, which would leave the restored override one start
+# from being parked again — recovery that lasts a single boot is not recovery.
+r2=$(run); r3=$(run)
+[ "$r2" = "OVERRIDE" ] && [ "$r3" = "BAKED" ] \
+  && ok "restored override gets a FRESH trial (runs again, trips only on the 3rd start)" \
+  || no "start counter not reset like a fresh deploy ($r2 then $r3)"
+
+# A file tampered with WHILE quarantined must not come back.
+clear_ovr; mkoverride "OVERRIDE"; sign
+run >/dev/null; run >/dev/null; run >/dev/null
+Q="$T/data/overrides/quarantine"
+for f in "$Q"/demo.sh.*; do case "$f" in *.sig.*) ;; *) echo 'echo EVIL' >> "$f" ;; esac; done
+bash "$T/deploy.sh" --unquarantine >/dev/null 2>&1
+[ "$(run)" = "BAKED" ] && ok "a quarantined file TAMPERED with is refused on restore" \
+                       || no "tampered quarantined code was restored — SECURITY FAILURE"
+clear_ovr
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

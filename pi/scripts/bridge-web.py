@@ -180,6 +180,7 @@ def gather():
     }
     d["return_mismatch"] = _return_mismatch()   # None = healthy; dict = wrong-rate now
     d["return_rate"] = _return_opened_rate()    # what the pipeline is opened at (0=idle)
+    d["quarantined"] = _quarantined()           # [] = none; names = deployed code NOT running
     suspect, detail = clock_verdict()
     d["clock_suspect"] = suspect          # bool (backward compat for the control plane)
     d["clock"] = detail                   # M4: full FFT verdict {verdict,score,reasons,...}
@@ -210,6 +211,19 @@ def _return_mismatch():
         return json.loads(open(RETURN_RUNDIR + "/mismatch").read())
     except Exception:
         return None
+
+def _quarantined():
+    """Overrides auto-rollback has parked, i.e. code the operator deployed that is NOT
+    running. Reported in telemetry because this is the quietest failure the device has:
+    the bridge silently falls back to its baked-in script and keeps working, so nothing
+    looks wrong on the panel while the fix you shipped is simply absent. It stayed
+    invisible for a whole session before anyone thought to read a diagnostics bundle."""
+    try:
+        return sorted(n.split(".")[0] + ".sh"
+                      for n in os.listdir("/data/overrides/quarantine")
+                      if ".sig." not in n)
+    except Exception:
+        return []
 
 def _udc_state():
     udcdir = "/sys/class/udc"
