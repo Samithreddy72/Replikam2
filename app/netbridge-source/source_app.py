@@ -940,6 +940,14 @@ class LegWatch:
     # during a rate change, and a watchdog that cries wolf gets ignored — which is exactly
     # how we ended up not trusting the green lights in the first place.
     STRIKES = 2
+    # Grace after a session goes live, before this is allowed to fire at all.
+    #
+    # SESSION.live flips as soon as ffmpeg is spawned, but the mesh helper binds its legs a
+    # moment later — so for the first few seconds of EVERY healthy session the legs are
+    # legitimately absent. Without this the watchdog fired during startup and tore the new
+    # session down before it finished coming up, which is exactly what happened on the first
+    # live run after it shipped. A watchdog must never be the reason the thing it guards dies.
+    GRACE_S = 20.0
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -947,6 +955,7 @@ class LegWatch:
         self.since = 0.0           # when they went down
         self.strikes = 0
         self.drops = 0             # how many times this session lost a leg
+        self.live_since = 0.0      # when the current session started (0 = not live)
 
     def snapshot(self):
         with self.lock:
@@ -961,8 +970,14 @@ class LegWatch:
     def _tick(self):
         if not SESSION.live or not MESH.proc or MESH.proc.poll() is not None:
             with self.lock:
-                self.missing, self.strikes = [], 0
+                self.missing, self.strikes, self.live_since = [], 0, 0.0
             return
+        with self.lock:
+            if not self.live_since:
+                self.live_since = time.time()          # session just came up
+            young = (time.time() - self.live_since) < self.GRACE_S
+        if young:
+            return                                     # still binding; not our business yet
         gone = [p for p in (RTP_VIDEO, RTP_VOICE, SESSION.return_port) if not _leg_bound(p)]
         with self.lock:
             if gone:
@@ -1474,6 +1489,11 @@ async function repairLegs(){
   if(legRepairDone)return; legRepairDone=true;
   $('m2').textContent='media path lost — reconnecting…';
   await j('/api/stop',{method:'POST'});
+  // setLive(false) is NOT optional here. golive() branches on the BUTTON's label: while it
+  // still reads "End session" it takes the teardown path, stops again and returns. The first
+  // version of this omitted it, so the repair reliably ENDED the session and printed
+  // "session ended" instead of reconnecting — turning a recoverable blip into a dead call.
+  setLive(false);
   await golive();
 }
 async function poll(){
