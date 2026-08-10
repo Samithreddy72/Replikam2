@@ -1135,6 +1135,21 @@ class StreamGuard:
 GUARD = StreamGuard()
 
 
+def _uptime_seconds(s):
+    """Parse the bridge's human uptime ('1 minute', '2 hours 5 minutes') to seconds.
+
+    Only ever used to notice the value going BACKWARDS, which means the bridge rebooted.
+    A wrong parse would at worst miss a reboot, never invent one — so returning None on
+    anything unexpected is the safe failure, and the caller treats None as 'no opinion'."""
+    if not isinstance(s, str):
+        return None
+    total, found = 0, False
+    for n, unit in re.findall(r"(\d+)\s*(second|minute|hour|day)", s):
+        total += int(n) * {"second": 1, "minute": 60, "hour": 3600, "day": 86400}[unit]
+        found = True
+    return total if found else (0 if "less than" in s else None)
+
+
 def _bridge_rec(host, st):
     """Find the bridge record for a UI-supplied host (its tailnet or LAN IP). Falls back
     to a bare {ip:host} so a hand-typed address still works."""
@@ -1261,6 +1276,14 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(r, dict):
                 r["_legs"] = LEGS.snapshot()
                 r["_guard"] = GUARD.snapshot()
+                # Bridge uptime, so the UI can spot a REBOOT. A rebooted bridge leaves the
+                # session dead but green-LOOKING: our ffmpeg keeps sending to a device that
+                # no longer holds the matching state, and the local checks all still pass.
+                # It happened repeatedly tonight and each time cost a manual End -> Go live
+                # that the presenter had to work out for themselves.
+                s2 = api("GET", route["base"] + "/api/status", timeout=6)
+                if isinstance(s2, dict) and not s2.get("_error"):
+                    r["_bridge_uptime_s"] = _uptime_seconds(s2.get("uptime"))
             if isinstance(r, dict) and "voice_arriving" not in r and not r.get("_error"):
                 # Older bridge firmware does not measure the forward-voice leg. Fall back to
                 # what THIS app can see: the mic->bridge ffmpeg leg is alive and sending.
@@ -1614,6 +1637,30 @@ function rescueReturnAudio(v){
 // helper interrupts the session; doing it repeatedly against a fault that rebuilding cannot
 // fix would leave a presenter in a permanent reconnect cycle mid-meeting, which is worse
 // than one honest red line telling them what is wrong.
+// ---- meeting-grade session state -------------------------------------------------
+// Three things a presenter needs that raw checks do not give them:
+//   * a bridge REBOOT is invisible: every local check still passes while the session is
+//     actually dead, because our ffmpeg keeps sending to a device that no longer has the
+//     matching state. Detected by uptime going backwards, then rebuilt automatically —
+//     the session is already dead, so reconnecting cannot make it worse.
+//   * green RIGHT NOW is not green RELIABLY. "Ready to present" waits for a continuous
+//     clean run, so a flapping fault cannot be mistaken for a working setup.
+//   * during a leg repair the meeting sees a brief FREEZE (the bridge pump re-sends its
+//     cached frame), not the status card — so a calm one-line notice is honest.
+let lastBridgeUptime=null, rebootRecovering=false;
+const READY_AFTER_MS=30000;
+let greenSince=null;
+
+async function recoverFromReboot(){
+  if(rebootRecovering)return; rebootRecovering=true;
+  $('m2').textContent='Bridge restarted — reconnecting…';
+  try{
+    await j('/api/stop',{method:'POST'});
+    setLive(false);                    // golive() branches on the button label
+    await golive();
+  } finally { rebootRecovering=false; lastBridgeUptime=null; }
+}
+
 let legRepairDone=false;
 async function repairLegs(){
   if(legRepairDone)return; legRepairDone=true;
@@ -1649,10 +1696,45 @@ async function poll(){
     return;
   }
   legRepairDone=false;   // healthy again: re-arm for the next outage
-  // One instruction at a time — a wall of five red fixes is noise. The first broken link in
-  // the chain is almost always the cause of the ones after it.
-  $('ckfix').textContent=firstBad?FIXES[firstBad]||'':'';
-  $('ckfix').style.display=firstBad?'':'none';}
+
+  // --- did the bridge reboot under us? uptime going BACKWARDS is unambiguous ---
+  const up=c._bridge_uptime_s;
+  if(typeof up==='number'){
+    if(lastBridgeUptime!==null && up < lastBridgeUptime-30){
+      lastBridgeUptime=up; greenSince=null;
+      $('ckfix').textContent='The bridge restarted. Reconnecting your session…';
+      $('ckfix').style.display='';
+      recoverFromReboot();
+      return;
+    }
+    lastBridgeUptime=up;
+  }
+
+  // --- readiness: green for a continuous stretch, not just this instant ---
+  const guard=c._guard||{};
+  const repaired=Object.keys(guard.repairs||{}).length>0;
+  if(firstBad){ greenSince=null; }
+  else if(greenSince===null){ greenSince=Date.now(); }
+
+  if(firstBad){
+    // One instruction at a time — a wall of five red fixes is noise. The first broken link
+    // in the chain is almost always the cause of the ones after it.
+    $('ckfix').textContent=FIXES[firstBad]||'';
+    $('ckfix').style.display='';
+  } else if((guard.abandoned||[]).length){
+    $('ckfix').textContent='The '+guard.abandoned.join(' and ')+' feed keeps failing. '
+      +'End session and go live again to rebuild it.';
+    $('ckfix').style.display='';
+  } else if(Date.now()-greenSince < READY_AFTER_MS){
+    const s=Math.ceil((READY_AFTER_MS-(Date.now()-greenSince))/1000);
+    $('ckfix').textContent='Checking your connection… ready in '+s+'s';
+    $('ckfix').style.display='';
+  } else {
+    $('ckfix').textContent=repaired
+      ? 'Ready to present · recovered automatically from a brief interruption'
+      : 'Ready to present';
+    $('ckfix').style.display='';
+  }}
 boot();
 </script>
 """
