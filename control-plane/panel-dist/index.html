@@ -152,6 +152,7 @@ const ACTIONS = [
   ["mesh-key",     "Return audio going nowhere → re-issue mesh key"],
   ["unquarantine", "Deployed code not running → restore override"],
   ["revert-script","Undo a bad script → revert to factory…"],
+  ["deploy-script","Push a code fix → deploy signed script…"],
 
   ["#Access — no effect on media", null],
   ["set-pin",      "Set / rotate PIN…"],
@@ -310,7 +311,14 @@ async function doAction(devId, devName, value, isLive){
   if (type === "deploy-script"){
     const name = prompt(`Script name to deploy to ${devName}?\n\ne.g. bridge-return-audio.sh`);
     if (!name) return;
-    const source = prompt(`URL base holding ${name} and ${name}.sig?\n\nThe device verifies the signature before installing, and again at every start.`);
+    // Default to the fleet's own payload store. It is the one host a bridge can reach from
+    // anywhere — a laptop cannot be reached from a venue network, which is why the first
+    // attempt at this hung and died with no visible error.
+    const source = prompt(
+      `URL base holding ${name} and ${name}.sig?\n\n` +
+      `Publish it first with:  bash tools/publish-script.sh <path/to/${name}>\n` +
+      `The device verifies the signature before installing, and again at every start.`,
+      location.origin + "/payloads");
     if (!source) return;
     args = {name, source};
   }

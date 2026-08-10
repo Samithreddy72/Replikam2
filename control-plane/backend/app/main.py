@@ -10,7 +10,7 @@ can reach the Pis; only the admin panel is publicly exposed (behind the API key 
 import datetime as dt
 import os
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, desc
 from sqlalchemy.orm import Session
@@ -461,6 +461,69 @@ def set_device_pin(device_id: str, body: dict | None = None,
             "note": "shown once - deliver it to the presenter offline"}
 
 
+# ---------------------------------------------------------------- script payloads
+#
+# WHY THE FLEET HOSTS THESE. deploy-script works by telling the BRIDGE to fetch a signed
+# script from a URL — so that URL has to be somewhere the bridge can actually reach. Serving
+# it from a laptop failed: a bridge on a venue network cannot route to it, the fetch hung,
+# and the command died. But every bridge already talks to this control plane over public
+# HTTPS every 15 seconds, from anywhere in the world. It was the obvious host all along.
+#
+# Unauthenticated on the read side, deliberately, exactly like the presenter-app updates
+# above: the payload is protected by the EC signature the device verifies against a pinned
+# key on its read-only root — twice, once at install and again at every service start. The
+# scripts are not secrets (they ship inside the image), and a bridge fetching a fix must not
+# need a credential to do it. Forging one requires the private signing key, which never
+# leaves Samith's Mac.
+PAYLOAD_DIR = os.environ.get("PAYLOAD_DIR", "/data/payloads")
+
+
+@app.post("/admin/payloads")
+async def upload_payload(request: Request, actor=Depends(auth.require_admin)):
+    """Upload a signed script + its detached signature, ready for a bridge to fetch."""
+    form = await request.form()
+    name = (form.get("name") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]+\.sh", name or "") or name.startswith("."):
+        raise HTTPException(400, "bad script name")
+    script, sig = form.get("script"), form.get("sig")
+    if script is None or sig is None:
+        raise HTTPException(400, "need both 'script' and 'sig'")
+    os.makedirs(PAYLOAD_DIR, exist_ok=True)
+    body = await script.read()
+    sigb = await sig.read()
+    # Cheap sanity so a truncated upload cannot become a "deployable" payload. The real
+    # verification is the device's, against its own pinned key — this only catches accidents.
+    if not body.startswith(b"#!") or len(sigb) < 32:
+        raise HTTPException(400, "that does not look like a signed shell script")
+    with open(os.path.join(PAYLOAD_DIR, name), "wb") as f:
+        f.write(body)
+    with open(os.path.join(PAYLOAD_DIR, name + ".sig"), "wb") as f:
+        f.write(sigb)
+    _audit(next(get_db()), actor, "payload:upload", name)
+    return {"name": name, "bytes": len(body),
+            "sha256": hashlib.sha256(body).hexdigest()[:16],
+            "url_base": (settings.public_base_url or "").rstrip("/") + "/payloads"}
+
+
+@app.get("/admin/payloads")
+def list_payloads(actor=Depends(auth.require_admin)):
+    """What is currently available for a bridge to fetch."""
+    try:
+        names = sorted(n for n in os.listdir(PAYLOAD_DIR) if n.endswith(".sh"))
+    except FileNotFoundError:
+        return []
+    out = []
+    for n in names:
+        pth = os.path.join(PAYLOAD_DIR, n)
+        with open(pth, "rb") as f:
+            b = f.read()
+        out.append({"name": n, "bytes": len(b),
+                    "sha256": hashlib.sha256(b).hexdigest()[:16],
+                    "signed": os.path.exists(pth + ".sig"),
+                    "mtime": int(os.path.getmtime(pth))})
+    return out
+
+
 @app.post("/admin/devices/{device_id}/commands")
 def issue_command(device_id: str, body: IssueCommandIn, actor=Depends(auth.require_admin),
                   db: Session = Depends(get_db)):
@@ -909,6 +972,15 @@ def _mount_app_updates():
               "publishes one" % d)
 
 
+def _mount_payloads():
+    """Serve /payloads/<name> and <name>.sig for a bridge to fetch. Same reasoning as the
+    app-update mount: static, unauthenticated, signature-gated."""
+    d = PAYLOAD_DIR
+    os.makedirs(d, exist_ok=True)
+    print("[payloads] serving signed script payloads from %s" % d)
+    app.mount("/payloads", StaticFiles(directory=d), name="payloads")
+
+
 def _mount_panel():
     # The built panel has lived at control-plane/panel-dist, but an earlier version only
     # looked for backend/static — and os.path.isdir() failing just SKIPS the mount, so "/"
@@ -1188,4 +1260,5 @@ def control_rollout(rollout_id: int, action: str, actor=Depends(auth.require_adm
 # statement that touches `app`. /app (updates) goes first: it is a narrow prefix, but it
 # still has to beat the "/" catch-all.
 _mount_app_updates()
+_mount_payloads()   # narrow prefix, before the "/" catch-all
 _mount_panel()
