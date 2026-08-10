@@ -250,12 +250,43 @@ function agoDays(iso){ if(!iso) return "?";
   const d = (Date.now() - new Date(iso + "Z").getTime()) / 86400000;
   return d < 1 ? "today" : Math.round(d) + " d"; }
 
+// Escape text before it goes into an HTML attribute or body. Device telemetry is not
+// trusted input: it arrives over the wire from a Pi, and a stray quote in a status string
+// would break out of the attribute it is sitting in.
+function esc(s){
+  return String(s == null ? "" : s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
+
+// Power verdict from the device's STICKY throttle bits.
+//
+// This exists because the panel showed a clean green bridge for weeks while the board was
+// browning out. The device's live `throttled` field reads 0x0 on almost every poll even when
+// the sticky history says 0x50000, so nothing on this page could contradict it and the only
+// way to learn the truth was to download a diagnostics bundle and read power.txt by hand.
+//
+// A board that browned out 327 times is not "online". It renders as a fault, and it keeps
+// rendering as one after the episode passes — because that is exactly when you would
+// otherwise go looking for a network problem that does not exist.
+function powerPill(dev){
+  const p = (dev.latest || {}).power;
+  if (!p || p.ok !== false) return "";
+  const live = p.live === true;
+  return `<span class="pill warn" title="${esc(p.summary || "")}">`
+       + (live ? "⚡ browning out now" : "⚡ has browned out") + `</span>`;
+}
+
 function statusPill(dev){
   const t = dev.latest || {}, s = t.streams || {};
   if (!dev.online) return `<span class="pill idle">offline ${agoDays(dev.last_seen)}</span>`;
-  if (dev.alerts && dev.alerts.length) return `<span class="pill warn">${dev.alerts[0].kind.replace("_"," ")}</span>`;
-  if (s.video) return `<span class="pill live">● live</span>`;
-  return `<span class="pill ok">online</span>`;
+  const pwr = powerPill(dev);
+  if (dev.alerts && dev.alerts.length)
+    return `<span class="pill warn">${dev.alerts[0].kind.replace("_"," ")}</span>` + pwr;
+  // Power is shown ALONGSIDE live/online, never instead of it: the stream really is up, and
+  // hiding that would trade one lie for another.
+  if (s.video) return `<span class="pill live">● live</span>` + pwr;
+  return `<span class="pill ok">online</span>` + pwr;
 }
 
 function sessionCell(dev){

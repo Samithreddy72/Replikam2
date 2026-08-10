@@ -1224,10 +1224,12 @@ class BridgeWatch:
         self.repairs = {}
         self.last = None
         self.live_since = 0.0
+        self.power = None
 
     def snapshot(self):
         with self.lock:
             return {"checks": self.last_checks, "reachable": self.reachable,
+                    "power": self.power,
                     "age_s": round(time.time() - self.last_poll, 1) if self.last_poll else None,
                     "repairs": dict(self.repairs), "last": self.last}
 
@@ -1252,6 +1254,23 @@ class BridgeWatch:
             self.strikes, self.repairs = {}, {}
             self.last_checks, self.reachable, self.last_poll = None, None, 0.0
             self.last = None
+            self.power = None
+
+    def _power(self):
+        """The bridge's decoded power verdict, or None if it cannot be read.
+
+        Read separately from /api/checks because a brownout is not a media fault and must
+        not be repaired like one — it changes what the OTHER failures mean.
+        """
+        base = self._control_base()
+        if not base:
+            return None
+        try:
+            req = urllib.request.Request(base + "/api/status")
+            with urllib.request.urlopen(req, timeout=8) as r:
+                return (json.loads(r.read().decode("utf-8", "replace")) or {}).get("power")
+        except Exception:
+            return None
 
     def _repair(self, key, checks):
         """Fix one failing check. Returns a human sentence, or None if nothing was done."""
@@ -1304,6 +1323,33 @@ class BridgeWatch:
         if not checks:
             # Say so, but do not act. The stream may be perfectly fine.
             return
+
+        # A browning-out board changes what every other symptom MEANS.
+        #
+        # Under-voltage throttles the SoC to a crawl. Packets are not lost — they arrive
+        # late, in bursts — so the media legs are healthy and restarting one fixes nothing
+        # while costing a real gap in the meeting. Worse, the repair itself is a CPU spike
+        # on a board that is already short of current, so the supervisor would be feeding
+        # the fault it is trying to fix.
+        #
+        # Proven on this hardware: a flight recording caught 327 separate live brownout
+        # episodes, and the board rebooted mid-session. The audible result was jitter that
+        # looked exactly like a network problem and was chased as one for hours.
+        #
+        # So when the bridge reports a brownout, say so in plain words and stand down. The
+        # honest message is worth more than a repair that cannot work.
+        power = self._power()
+        if isinstance(power, dict) and power.get("live"):
+            with self.lock:
+                self.last = ("the bridge is browning out (under-voltage) — audio will "
+                             "stutter and it may reboot. This is electrical, not the "
+                             "network; not restarting anything.")
+                self.power = power
+            print("[bridge] %s" % self.last, flush=True)
+            return
+
+        with self.lock:
+            self.power = power if isinstance(power, dict) else None
 
         for key, val in checks.items():
             if not isinstance(val, dict) or key not in ("video_arriving", "voice_arriving",

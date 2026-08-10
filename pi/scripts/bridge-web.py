@@ -33,22 +33,81 @@ def soc_temp():
 
 
 def soc_throttled():
-    """Undervoltage / throttling. The firmware sysfs node gives the same bitmask as
-    vcgencmd get_throttled; the hwmon alarm is a coarser 'undervolt right now' flag.
-    Either beats returning an error string - this is how we see a brownout coming."""
+    """The throttle bitmask, INCLUDING the sticky 'has happened' bits.
+
+    This used to read the hwmon in0_lcrit_alarm node BEFORE falling back to vcgencmd, and
+    that ordering hid a hardware fault for weeks. in0_lcrit_alarm is an INSTANTANEOUS flag:
+    it is 1 only while the board is actually browning out, so it answered "0x0" on almost
+    every poll — and because it answered, the authoritative vcgencmd read was never reached.
+
+    The panel therefore showed a healthy `0x0` on a board whose real value was 0x50000
+    (bit16 undervolt-occurred + bit18 throttled-occurred), with 327 separate live brownout
+    episodes in one flight recording. Every diagnosis that trusted the panel looked past the
+    actual cause, and the only way to learn the truth was to pull a full diagnostics bundle.
+
+    Order now goes sticky-first. The instantaneous alarm is still read, but as EXTRA
+    information in power_state(), never as a substitute for the history.
+    """
     try:
         with open("/sys/devices/platform/soc/soc:firmware/get_throttled") as f:
-            return f.read().strip()
+            v = f.read().strip()
+            if v:
+                return v
     except Exception:
         pass
+    return sh("vcgencmd get_throttled").replace("throttled=", "").strip() or "?"
+
+
+def undervolt_now():
+    """The coarse 'browning out at this instant' alarm, or None if unreadable."""
     import glob
     for p_ in glob.glob("/sys/class/hwmon/hwmon*/in0_lcrit_alarm"):
         try:
             with open(p_) as f:
-                return "undervoltage" if f.read().strip() == "1" else "0x0"
+                return f.read().strip() == "1"
         except Exception:
             pass
-    return sh("vcgencmd get_throttled").replace("throttled=", "") or "?"
+    return None
+
+
+# Raspberry Pi firmware throttle bits. The low nibble is "right now"; the 0x1xxxx nibble is
+# "has happened since boot" and is the only part that survives the event you care about.
+_THROTTLE_BITS = ((0x1, "under-voltage NOW"), (0x2, "ARM frequency capped NOW"),
+                  (0x4, "throttled NOW"), (0x8, "soft temperature limit NOW"),
+                  (0x10000, "under-voltage has occurred"),
+                  (0x20000, "ARM frequency capping has occurred"),
+                  (0x40000, "throttling has occurred"),
+                  (0x80000, "soft temperature limit has occurred"))
+
+
+def power_state(raw=None):
+    """Decode the throttle mask into something an operator can act on without a bundle.
+
+    Returns ok=False when the board has EVER browned out, not merely when it is browning out
+    as you look at it. A fault that shows up 1.3% of the time is still the fault.
+    """
+    raw = soc_throttled() if raw is None else raw
+    try:
+        v = int(str(raw), 16)
+    except Exception:
+        return {"raw": raw, "ok": None, "summary": "unreadable", "flags": []}
+    flags = [name for bit, name in _THROTTLE_BITS if v & bit]
+    live = bool(v & 0x1) or bool(v & 0x4) or undervolt_now() is True
+    ever = bool(v & 0x10000) or bool(v & 0x40000)
+    # Thermal is a separate fault with a separate fix; do not fold it into the power verdict,
+    # but never report "clean" while a thermal bit is set — that reads as a contradiction.
+    thermal = bool(v & 0x8) or bool(v & 0x80000)
+    if live:
+        summary = "browning out RIGHT NOW — expect stutter and possible reboots"
+    elif ever:
+        summary = ("this board HAS browned out since boot — audio stutter and spontaneous "
+                   "reboots come from here, not from the network")
+    elif thermal:
+        summary = "power clean, but the SoC has hit its temperature limit — check airflow"
+    else:
+        summary = "power clean since boot"
+    return {"raw": raw, "ok": not (live or ever), "live": live, "ever": ever,
+            "summary": summary, "flags": flags}
 
 
 def read(path):
@@ -142,6 +201,10 @@ def gather():
     d["uac2"] = os.path.isdir("/proc/asound/UAC2Gadget")
     d["temp"] = soc_temp()
     d["throttled"] = soc_throttled()
+    # Decoded power verdict, including the STICKY history. Rides telemetry so the fleet can
+    # show a brownout on the device's row instead of a green light that needs a diagnostics
+    # bundle to contradict.
+    d["power"] = power_state(d["throttled"])
     d["wifi"] = wifi_dbm()
     d["uptime"] = sh("uptime -p").replace("up ", "")
     peer = ""
