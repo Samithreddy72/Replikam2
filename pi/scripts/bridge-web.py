@@ -279,11 +279,23 @@ def checks():
     win = 2.0                       # one shared sampling window for all deltas
     pid, t0 = _feeder_cpu_ticks()
     vpid, vt0 = _voice_feeder_cpu_ticks()
+    # Measure the REAL elapsed time between the two hw_ptr reads, not the sleep.
+    #
+    # This used to divide by `win` (a hardcoded 2.0s) while the numerator spanned the sleep
+    # PLUS two _feeder_cpu_ticks() calls — each of which shells out to pgrep. Those ~60-120ms
+    # sat inside the measurement and outside the divisor, so every reading came back ~6% high:
+    # a healthy 48000Hz stream reported ~50800/s. That is not cosmetic. The rate-mismatch
+    # alarm trips at 12%, so the artifact silently ate half the headroom, and whenever a pgrep
+    # stalled a little longer the computed rate crossed the threshold and the panel showed
+    # "RATE MISMATCH — audio is pitch-shifted" while the audio was perfectly fine. One sample
+    # was observed at 58200/s, implying 2.43s of real elapsed against a 2.0s divisor.
+    m0 = time.monotonic()
     p0 = _return_hw_ptr()
     time.sleep(win)
     _, t1 = _feeder_cpu_ticks()
     _, vt1 = _voice_feeder_cpu_ticks()
     p1 = _return_hw_ptr()
+    elapsed = max(time.monotonic() - m0, 0.001)
 
     if pid is None:
         video_ok, video_detail = False, "video feeder process not running"
@@ -298,7 +310,7 @@ def checks():
         audio_ok, audio_detail = False, "return capture stream not open (client mic path idle)"
     else:
         dp = p1 - p0
-        rate = dp / win
+        rate = dp / elapsed
         opened = _return_opened_rate()
         expect = opened or 48000
         # RATE-AWARE, not hardcoded: the old '>40000/s' threshold marked a perfectly
@@ -316,8 +328,8 @@ def checks():
                             "pitch-shifted; self-heals within ~10s" % (rate, opened))
         else:
             audio_ok = flowing
-            audio_detail = "hw_ptr advanced %d frames in %.0fs (~%d/s @ %s)" % (
-                dp, win, rate, ("%dHz" % opened) if opened else "?")
+            audio_detail = "hw_ptr advanced %d frames in %.2fs (~%d/s @ %s)" % (
+                dp, elapsed, rate, ("%dHz" % opened) if opened else "?")
 
     if vpid is None:
         voice_ok, voice_detail = False, "voice feeder process not running"

@@ -1648,10 +1648,22 @@ const FIXES={
 // above nominal (the sampling window is wall-clock, not sample-clock), and 44.1k and 48k sit
 // only 8.8% apart, so nearest-rate matching mislabels; a floor does not.
 const MIN_OFFERED_RATE=32000;
+// A rate mismatch self-heals in ~10s, so a REAL one persists across at least two polls.
+// A single red sample is far more likely to be the measurement artifact: the bridge divides
+// the hw_ptr delta by a hardcoded 2.0s while the numerator also spans two pgrep calls, so a
+// slow pgrep inflates the computed rate past the 12% alarm threshold and the panel says
+// "audio is pitch-shifted" about audio that is completely fine. Fixed properly on the device,
+// but this guard means an older bridge stops crying wolf too.
+let mismatchStreak = 0;
 function rescueReturnAudio(v){
-  if(!v||v.ok)return v;
+  if(!v||v.ok){ mismatchStreak = 0; return v; }
   const d=v.detail||'';
-  if(/mismatch/i.test(d))return v;                // a real rate mismatch must stay red
+  if(/mismatch/i.test(d)){
+    if(++mismatchStreak < 2)
+      return {ok:true, detail:'checking rate…'};   // one sample is not evidence
+    return v;                                      // persisted: a real mismatch, stay red
+  }
+  mismatchStreak = 0;
   const m=/~\s*(\d+)\s*\/s/.exec(d);
   if(!m)return v;                                 // "stream not open" has no pace: stays red
   const pace=parseInt(m[1],10);
