@@ -342,7 +342,21 @@ async function fix(devId, devName, f, isLive){
 }
 
 let DEVS = [];
+// Never re-render while someone is READING the menu.
+//
+// The 5s live refresh rebuilds every row, which destroys and recreates the <select> — so an
+// open dropdown slammed shut mid-read. With 14 entries in four groups that is not a cosmetic
+// annoyance: it makes the menu genuinely hard to use, and the entries you most need to read
+// carefully are the destructive ones at the bottom. A native <select> has no "is open" flag,
+// but clicking one focuses it, so activeElement is a reliable proxy. The data underneath is
+// only ever a few seconds stale, and it re-renders the moment focus leaves.
+function menuIsOpen(){
+  const a = document.activeElement;
+  return !!(a && a.tagName === "SELECT" && a.classList.contains("act"));
+}
+
 function render(){
+  if (menuIsOpen()) return;
   const rows = $("rows"); rows.innerHTML = "";
   // A bridge that just finished the Wi-Fi portal shows up UNCLAIMED, and that is exactly the
   // moment someone is watching for it. Sort it to the top rather than leaving it wherever the
