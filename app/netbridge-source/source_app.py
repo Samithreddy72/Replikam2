@@ -64,7 +64,7 @@ RTP_VIDEO, RTP_VOICE = 5000, 5002
 # Build stamp. build.py rewrites this line, and it is what the updater compares against
 # the signed manifest — so a build that forgets to bump it simply never updates, rather
 # than update-looping.
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 
 
 # --------------------------------------------------------------------------- state
@@ -427,10 +427,36 @@ def bridge_reachable(host, port=8080, timeout=1.0):
 
 
 # --------------------------------------------------------------------------- session
+def _locked(fn):
+    """Serialise one Session mutation against every other.
+
+    Applied to start/stop/respawn_leg/set_return — the four methods that touch the leg
+    tables. Without it, a request handler and a supervisor tick can interleave and orphan
+    an encoder process that still holds the camera.
+    """
+    def wrap(self, *a, **kw):
+        with self._lock:
+            return fn(self, *a, **kw)
+    wrap.__name__, wrap.__doc__ = fn.__name__, fn.__doc__
+    return wrap
+
+
 class Session:
     """Owns the live ffmpeg legs + the return listener."""
 
     def __init__(self):
+        # ONE lock for every mutation of this object.
+        #
+        # The HTTP server is a ThreadingHTTPServer, and three separate writers touch the
+        # leg tables: the request handler (go live / stop), StreamGuard's 5s tick, and
+        # BridgeWatch's 10s tick. Session had no locking at all, so a double-click on Go
+        # live ran start() twice: both called stop(), both spawned encoders, and the second
+        # overwrote self.leg_proc — leaving the first pair ORPHANED. They keep holding the
+        # camera and sending RTP, invisible to leg_status() and never reaped. An orphaned
+        # encoder holding the camera is exactly what wedged the capture daemons on 10 Aug.
+        #
+        # Reentrant because start() calls stop() on the way in.
+        self._lock = threading.RLock()
         self.procs = []
         self.logs = []
         self.bridge = None
@@ -485,6 +511,7 @@ class Session:
         fallback when the bridge firmware predates the device-side voice_arriving check."""
         return bool(self.voice_proc and self.voice_proc.poll() is None)
 
+    @_locked
     def start(self, pi_host, video_idx, audio_idx, fps=20, mic_gain=8, return_port=5004):
         self.stop()
         self.bridge, self.return_port = pi_host, return_port
@@ -541,6 +568,7 @@ class Session:
 
         self.return_player = self._start_return(return_port) if self.return_on else "off"
 
+    @_locked
     def respawn_leg(self, name):
         """Restart ONE media leg in place. Returns True if it came back.
 
@@ -610,6 +638,7 @@ class Session:
                 "dynamics": self.return_dynamics, "sink_sync": self.return_sink_sync,
                 "conceal": self.return_conceal, "player": self.return_player}
 
+    @_locked
     def set_return(self, on):
         """Toggle 'Play meeting audio here' live, without disturbing the video/voice legs.
         Off stops just the local return player (the bridge keeps sending; you simply don't
@@ -730,6 +759,7 @@ class Session:
         except Exception:
             return "none"
 
+    @_locked
     def stop(self):
         for p in self.procs:
             try:
@@ -1599,9 +1629,55 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(r)
         return self._send({"_error": "not found"}, 404)
 
+    # Origins allowed to make state-changing calls: only this app's own page.
+    _SELF_ORIGINS = ("http://127.0.0.1:%d" % PORT, "http://localhost:%d" % PORT,
+                     "http://[::1]:%d" % PORT)
+
+    def _csrf_ok(self):
+        """Reject state-changing calls that did not come from this app's own page.
+
+        127.0.0.1 is NOT an authorization boundary. Every browser on this machine can reach
+        this server, so any page the presenter has open in any tab could POST here — and
+        until this check existed, that worked. One line on a hostile page:
+
+            fetch('http://127.0.0.1:8765/api/stop', {method:'POST',
+                  headers:{'Content-Type':'text/plain'}, body:'{}', mode:'no-cors'})
+
+        ends a live meeting. text/plain is a CORS-safelisted content type, so the browser
+        sends it with no preflight; the attacker cannot read the reply and does not need to,
+        because the side effect IS the attack. /api/unlock was worse — three forged calls
+        with wrong PINs lock the bridge out for an hour.
+
+        Two gates, either sufficient on its own:
+
+        1. If an Origin (or Referer) header is present it must be ours. Browsers always
+           attach Origin to cross-origin POSTs and cannot be talked out of it.
+        2. The body must be declared application/json, which is NOT CORS-safelisted. That
+           forces a preflight, and this server answers none — so the browser never sends it.
+
+        curl and other non-browser clients send neither header and are unaffected. That is
+        deliberate: the threat is a hostile PAGE, not a local process. Anything already
+        running as this user could reach the app regardless, so blocking curl would cost
+        real usability and buy no security.
+        """
+        origin = self.headers.get("Origin")
+        if origin and origin not in self._SELF_ORIGINS:
+            return False
+        if not origin:
+            ref = self.headers.get("Referer") or ""
+            if ref and not any(ref == o or ref.startswith(o + "/") for o in self._SELF_ORIGINS):
+                return False
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype and ctype != "application/json":
+            return False
+        return True
+
     # ---------------- POST
     def do_POST(self):
         self._body_cache = None      # fresh per request (connections are reused)
+        if not self._csrf_ok():
+            return self._send({"_error": "cross-origin request refused; NetBridge only "
+                                         "accepts calls from its own page"}, 403)
         st, b = load_state(), self._body()
 
         if self.path == "/api/signin-request":
@@ -1700,6 +1776,15 @@ class Handler(BaseHTTPRequestHandler):
             host = b.get("host")
             if not host:
                 return self._send({"_error": "host required"}, 400)
+            # Idempotent for the impatient. A second click while a session is already up
+            # used to run the whole start path again — tearing down working legs and
+            # rebuilding them, which a presenter experiences as the stream dropping for no
+            # reason at the exact moment they were trying to fix something. Answer the
+            # request truthfully instead of doing damage.
+            if SESSION.live and SESSION.bridge:
+                return self._send({"ok": True, "already_live": True,
+                                   "camera": st.get("camera_name"), "mic": st.get("mic_name"),
+                                   "note": "already live — nothing to do"})
             devs = av_devices()
             vidx, vname, _ = resolve_by_name(devs.get("video", []), b.get("camera_name"))
             aidx, aname, _ = resolve_by_name(devs.get("audio", []), b.get("mic_name"), "0")
@@ -1854,7 +1939,7 @@ async function togglePlay(){const on=$('playhere').checked;
   const r=await j('/api/return',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({on})});
   if(r&&typeof r.return_on==='boolean')$('playhere').checked=r.return_on}
-async function signout(){await j('/api/signout',{method:'POST'});location.reload()}
+async function signout(){await j('/api/signout',{method:'POST',headers:{'Content-Type':'application/json'}});location.reload()}
 async function req(){const r=await j('/api/signin-request',{method:'POST',
   headers:{'Content-Type':'application/json'},
   body:JSON.stringify({control_url:$('curl').value,email:$('email').value})});
@@ -1892,7 +1977,7 @@ async function unlock(){const h=host(); if(!h){$('m2').textContent='bridge has n
     body:JSON.stringify({host:h,pin:$('pin').value})});
   $('m2').textContent=r._error||r.detail||r.result||JSON.stringify(r)}
 async function golive(){
-  if($('go').textContent==='End session'){await j('/api/stop',{method:'POST'});setLive(false);
+  if($('go').textContent==='End session'){await j('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'}});setLive(false);
     $('m2').textContent='session ended';return}
   const h=host(); if(!h){$('m2').textContent='bridge has no reachable address';return}
   $('m2').textContent='starting…';
@@ -1978,7 +2063,7 @@ async function recoverFromReboot(){
   if(rebootRecovering)return; rebootRecovering=true;
   $('m2').textContent='Bridge restarted — reconnecting…';
   try{
-    await j('/api/stop',{method:'POST'});
+    await j('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'}});
     setLive(false);                    // golive() branches on the button label
     await golive();
   } finally { rebootRecovering=false; lastBridgeUptime=null; }
@@ -1988,7 +2073,7 @@ let legRepairDone=false;
 async function repairLegs(){
   if(legRepairDone)return; legRepairDone=true;
   $('m2').textContent='media path lost — reconnecting…';
-  await j('/api/stop',{method:'POST'});
+  await j('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'}});
   // setLive(false) is NOT optional here. golive() branches on the BUTTON's label: while it
   // still reads "End session" it takes the teardown path, stops again and returns. The first
   // version of this omitted it, so the repair reliably ENDED the session and printed
