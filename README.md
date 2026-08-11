@@ -140,6 +140,7 @@ Full detail, including what you should see at each step:
 | [AUDIO-TUNING.md](docs/AUDIO-TUNING.md) | The return-audio pipeline and its tunables |
 | [PROVISIONING-V2.md](docs/PROVISIONING-V2.md) | How a card enrols itself |
 | [GOLDEN-RULES.md](docs/GOLDEN-RULES.md) | Hard-won constraints — read before changing the media path |
+| [CHANGELOG.md](CHANGELOG.md) | Verified restore points and released builds |
 | [tools/preflight.sh](tools/preflight.sh) | Run before going live: camera, bridge, power, gates, path jitter |
 | [tools/fix-camera-macos.sh](tools/fix-camera-macos.sh) | Clears a wedged macOS camera (opens but sends no frames) |
 | [control-plane/README.md](control-plane/README.md) | Deploying and extending the fleet server |
