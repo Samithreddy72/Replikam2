@@ -81,7 +81,10 @@ _THROTTLE_BITS = ((0x1, "under-voltage NOW"), (0x2, "ARM frequency capped NOW"),
                   (0x80000, "soft temperature limit has occurred"))
 
 
-FLIGHT = "/home/pi/flight.txt"
+# /home/pi/flight.txt is a symlink onto /data (the root is read-only). Older cards may not
+# have the symlink, so try the real location too rather than silently reporting no data —
+# "no rate available" and "rate is zero" must never look the same.
+FLIGHT_PATHS = ("/home/pi/flight.txt", "/data/flight.txt")
 
 
 def brownout_rate(window=500):
@@ -99,14 +102,19 @@ def brownout_rate(window=500):
     Reads only the tail of the flight recorder, which is a ring of the last ~500 seconds.
     Returns None when unreadable rather than guessing; a missing recorder is not 0%.
     """
-    try:
-        with open(FLIGHT, "rb") as f:
-            try:
-                f.seek(-window * 64, 2)      # ~64 bytes/line, cheap bounded read
-            except OSError:
-                f.seek(0)
-            lines = f.read().decode("utf-8", "replace").splitlines()[-window:]
-    except Exception:
+    lines = None
+    for path in FLIGHT_PATHS:
+        try:
+            with open(path, "rb") as f:
+                try:
+                    f.seek(-window * 64, 2)  # ~64 bytes/line, cheap bounded read
+                except OSError:
+                    f.seek(0)
+                lines = f.read().decode("utf-8", "replace").splitlines()[-window:]
+            break
+        except Exception:
+            continue
+    if lines is None:
         return None
     seen = live = 0
     for ln in lines:
