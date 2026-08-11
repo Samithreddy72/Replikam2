@@ -11,6 +11,10 @@ encrypted mesh, so neither needs a public IP, a port forward, or the same networ
 
 > **New here?** Go straight to the [Setup Guide](docs/SETUP-GUIDE.md) — blank SD card to a
 > working bridge, written for someone who has never touched a Raspberry Pi.
+>
+> **Taking this over from someone?** Read [HANDOVER.md](docs/HANDOVER.md) first — it lists
+> the five credentials that live outside git, what breaks without each, and what you can
+> still do while you wait for them.
 
 ---
 
@@ -139,6 +143,7 @@ Full detail, including what you should see at each step:
 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Deeper diagnostics |
 | [AUDIO-TUNING.md](docs/AUDIO-TUNING.md) | The return-audio pipeline and its tunables |
 | [PROVISIONING-V2.md](docs/PROVISIONING-V2.md) | How a card enrols itself |
+| [HANDOVER.md](docs/HANDOVER.md) | **Inheriting this project?** Credentials to transfer, first week, what will mislead you |
 | [GOLDEN-RULES.md](docs/GOLDEN-RULES.md) | Hard-won constraints — read before changing the media path |
 | [CHANGELOG.md](CHANGELOG.md) | Verified restore points and released builds |
 | [tools/preflight.sh](tools/preflight.sh) | Run before going live: camera, bridge, power, gates, path jitter |
