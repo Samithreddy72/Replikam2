@@ -30,7 +30,7 @@ IP, a port forward, or to be on the same network.
 | microSD card, 16 GB or larger | High-endurance cards last longer. Plus an adapter to plug it into your computer. |
 | Power supply for the Pi | The Pi 4 draws up to ~1.2 A under load. An underpowered supply or a thin cable causes random reboots that look like software faults. See [Troubleshooting](#phase-10--troubleshooting). |
 | **USB-C data cable** | Pi's USB-C port → meeting laptop. ⚠️ Many USB-C cables are charge-only and have no data wires. If the laptop never sees a webcam, suspect the cable first. |
-| A laptop for the presenter | macOS today. Windows support is built but not yet released. |
+| A laptop for the presenter | macOS (Apple Silicon) or Windows 10/11. Both are released. |
 | Wi-Fi at the bridge's location | Any normal network. No port forwarding, no static IP, no router changes. |
 
 ### Accounts and services
@@ -40,14 +40,32 @@ IP, a port forward, or to be on the same network.
 | A NetBridge fleet URL | Where bridges report in and where you manage them | Already deployed for this project: `https://fleet.scine.online` |
 | A sign-in email | You sign in with a magic link — there is no password | Yours |
 
-### On the presenter's Mac
+### On the presenter's machine
+
+**Nothing to install.** The app ships with its own ffmpeg and GStreamer, so the presenter
+downloads one file and runs it.
+
+Get it from the repository's **Releases** page — the `app-v*` release, not the OS image:
+
+| You are on | Download |
+|---|---|
+| macOS (Apple Silicon) | `NetBridgeSource-macos-arm64.zip` |
+| Windows 10/11 | `NetBridgeSource-windows-x64.zip` |
+
+Unzip it and **keep every file in the folder together.** The `netbridge-mesh` helper sitting
+beside the app is what carries the meeting's audio back to the presenter — separate them and
+the meeting will still see and hear you while you hear nothing, with no obvious error.
+
+The builds are not code-signed, so each OS asks once:
 
 ```bash
-brew install ffmpeg gstreamer
+# macOS — clear the download quarantine
+xattr -dr com.apple.quarantine NetBridgeSource
 ```
 
-**What this does:** installs the media tools the presenter app uses to encode video and play
-back the room's audio.
+On Windows, SmartScreen shows "Windows protected your PC" → **More info** → **Run anyway**.
+
+First launch takes about 15 seconds while the bundle unpacks. It is not hung.
 
 ---
 

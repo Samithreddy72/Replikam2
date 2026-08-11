@@ -74,7 +74,9 @@ does not interrupt a live stream.
 Pi 4's peak draw, and a **USB-C data cable** (charge-only cables are the most common setup
 failure).
 
-**Presenter:** macOS, with `brew install ffmpeg gstreamer`. Windows is built but not released.
+**Presenter:** macOS (Apple Silicon) or Windows 10/11. **Nothing to install** — the app
+bundles its own ffmpeg and GStreamer. Download it from
+[Releases](https://github.com/Samithreddy72/Replikam2/releases?q=app-v).
 
 **Network:** ordinary Wi-Fi at both ends. No router changes.
 
@@ -82,13 +84,44 @@ failure).
 
 ## Quick start
 
+**The bridge** (once per device):
+
 ```bash
-# 1. Download the latest netbridge-os-VERSION.img.xz from Releases
-# 2. Flash it with Raspberry Pi Imager (custom image, no settings needed)
-# 3. Boot the Pi, join "BridgeSetup-XXXX" from your phone, give it the venue Wi-Fi
-# 4. It appears at https://fleet.scine.online as Unclaimed — click Claim
-# 5. Plug the Pi into the meeting laptop, pick "NetBridge" as camera/mic/speaker
-# 6. Presenter opens the app, signs in, clicks Go live
+# 1. Download the newest netbridge-os-*.img.xz from Releases
+# 2. Flash it with Raspberry Pi Imager — pick "Use custom image", change no settings
+# 3. Boot the Pi. From a phone, join the "BridgeSetup-XXXX" Wi-Fi network it raises
+#    and hand it the venue's Wi-Fi through the page that opens.
+# 4. It appears at https://fleet.scine.online as "Unclaimed · just joined" — click Claim,
+#    give it a name, and set a 6-digit PIN.
+```
+
+**The meeting room** (each meeting):
+
+```bash
+# 5. Plug the Pi into the meeting laptop with a USB-C DATA cable (not charge-only).
+#    In Zoom/Teams/Meet pick "NetBridge" as camera, microphone AND speaker.
+#    Nothing is installed on that laptop.
+```
+
+**The presenter** (each meeting):
+
+```bash
+# 6. Download the app for your platform from Releases (the app-v* release),
+#    unzip it, and keep every file in the folder together — the mesh helper
+#    beside the app is what carries the meeting's audio back to you.
+#       macOS   : xattr -dr com.apple.quarantine NetBridgeSource   (once, after download)
+#       Windows : SmartScreen -> "More info" -> "Run anyway"       (once)
+# 7. Run it. First launch takes ~15s while it unpacks; a browser tab opens at
+#    http://127.0.0.1:8765/
+# 8. Sign in with your work email, pick the bridge, enter the PIN, Unlock, Go live.
+```
+
+**Before an important session**, run the preflight — it checks the four things that
+actually go wrong (camera not delivering, bridge rebooted, board browning out, media not
+arriving at the far end) and tells you what to do about each:
+
+```bash
+bash tools/preflight.sh
 ```
 
 Full detail, including what you should see at each step:
@@ -107,6 +140,8 @@ Full detail, including what you should see at each step:
 | [AUDIO-TUNING.md](docs/AUDIO-TUNING.md) | The return-audio pipeline and its tunables |
 | [PROVISIONING-V2.md](docs/PROVISIONING-V2.md) | How a card enrols itself |
 | [GOLDEN-RULES.md](docs/GOLDEN-RULES.md) | Hard-won constraints — read before changing the media path |
+| [tools/preflight.sh](tools/preflight.sh) | Run before going live: camera, bridge, power, gates, path jitter |
+| [tools/fix-camera-macos.sh](tools/fix-camera-macos.sh) | Clears a wedged macOS camera (opens but sends no frames) |
 | [control-plane/README.md](control-plane/README.md) | Deploying and extending the fleet server |
 
 ---
@@ -118,7 +153,7 @@ pi/            what runs on the bridge — scripts/ and systemd/ units
 app/           the presenter app (netbridge-source) + its embedded mesh client
 control-plane/ the fleet server: FastAPI backend, web panel, AWS deploy kit
 factory/       CI image build — turns this repo into a flashable OS image
-tools/         operator tooling: sign and publish scripts, card surgery
+tools/         operator tooling: preflight, sign-and-publish, card surgery
 tests/         test suites that run without a Pi
 docs/          the documentation above
 restore/       verified restore points
