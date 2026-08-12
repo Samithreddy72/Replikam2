@@ -1,0 +1,88 @@
+# Curated excerpts from the live diagnostics bundle, 2026-08-13
+# Full bundle is NOT in git (2000 journal lines + a Tailscale logtail id);
+# it lives in the offline kit at ~/Downloads/netbridge-restore-2026-08-13/.
+
+===== gadget-av.txt (the frequencies) =====
+== UAC2 gadget ==
+c_sync = adaptive
+c_srate = 48000,44100,32000
+c_chmask = 1
+req_number = 8
+p_chmask = 3
+fb_max = 5
+
+== v4l2loopback ==
+max_buffers=16 exclusive_caps=N,N,N,N,N,N,N,N
+/dev/video40 openers:
+                     USER        PID ACCESS COMMAND
+/dev/video40:        root      21326 F...m gst-launch-1.0
+                     root      21460 F.... uvc-gadget
+
+== return-audio peer/config ==
+# speaker-return destination (the remote peer)
+RETURN_DEST_IP=<peer>
+RETURN_DEST_PORT=5004
+
+===== power.txt =====
+throttled=0x50000   # 0x0=ok; bit0 undervolt-now, bit16 undervolt-occurred, bit18 throttled-occurred
+temp=54.5'C
+undervolt_alarm=0
+
+===== media-health.txt =====
+== restart counters (climbing = crash-loop) ==
+bridge-feeder-net NRestarts=0
+bridge-return-audio NRestarts=0
+bridge-feeder-audio NRestarts=0
+bridge-uvcd NRestarts=0
+fleet-brain NRestarts=0
+
+== load / mem ==
+1.66 1.37 0.94 1/215 48204
+               total        used        free      shared  buff/cache   available
+Mem:            1898         284        1313           1         356        1613
+
+===== usb-av-state.txt =====
+UDC: configured
+gadget: fe980000.usb
+crw-rw---- 1 root video 81, 2 Jun 18 01:27 /dev/video0
+crw-rw---- 1 root video 81, 0 Jun 18 01:27 /dev/video19
+crw-rw---- 1 root video 81, 1 Jun 18 01:27 /dev/video40
+closed
+closed
+state: RUNNING
+owner_pid   : 21325
+trigger_time: 943.449908137
+tstamp      : 0.000000000
+delay       : 9216
+avail       : 0
+avail_max   : 8192
+-----
+hw_ptr      : 2925456
+appl_ptr    : 2934672
+---
+state: RUNNING
+owner_pid   : 32096
+trigger_time: 1205.396607593
+tstamp      : 1699.973721586
+delay       : 768
+avail       : 768
+avail_max   : 960
+-----
+hw_ptr      : 23739648
+appl_ptr    : 23738880
+
+===== rate-follow events (journal) =====
+Aug 12 20:40:04 raspberrypi bridge-run.sh[21579]: bridge-return-audio: capture @ 48000 Hz -> <peer>:5004
+Aug 12 20:43:44 raspberrypi bridge-run.sh[21599]: bridge-return-audio: mismatch watchdog - device at 32000, pipeline at 48000; re-opening
+Aug 12 20:43:44 raspberrypi bridge-run.sh[21579]: bridge-return-audio: capture @ 32000 Hz -> <peer>:5004
+Aug 12 20:44:04 raspberrypi bridge-run.sh[30676]: bridge-return-audio: mismatch watchdog - device at 44100, pipeline at 32000; re-opening
+Aug 12 20:44:04 raspberrypi bridge-run.sh[21579]: bridge-return-audio: capture @ 44100 Hz -> <peer>:5004
+Aug 12 20:44:24 raspberrypi bridge-run.sh[31462]: bridge-return-audio: mismatch watchdog - device at 48000, pipeline at 44100; re-opening
+Aug 12 20:44:24 raspberrypi bridge-run.sh[21579]: bridge-return-audio: capture @ 48000 Hz -> <peer>:5004
+Aug 12 20:50:50 raspberrypi jitter-sentry[44695]: DEFERRED profile lan (network pristine for 10min) — a session is live; will apply when the stream is idle
+Aug 12 20:51:13 raspberrypi jitter-sentry[45381]: DEFERRED profile lan (network pristine for 10min) — a session is live; will apply when the stream is idle
+
+===== running gst command lines (hosts/IPs redacted) =====
+gst-launch-1.0 udpsrc port=5000 caps=application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 "!" rtpjitterbuffer latency=300 "!" rtph264depay "!" h264parse "!" avdec_h264 "!" videoconvert "!" videoscale "!" videorate "!" video/x-raw,format=YUY2,width=640,height=360,framerate=20/1 "!" v4l2sink device=/dev/video40 sync=false
+gst-launch-1.0 udpsrc port=5002 caps=application/x-rtp,media=audio,encoding-name=OPUS,payload=97,clock-rate=48000 "!" rtpjitterbuffer latency=300 do-lost=true "!" rtpopusdepay "!" opusdec plc=true "!" audioconvert "!" audioresample "!" audio/x-raw,rate=48000,channels=2,format=S16LE "!" webrtcdsp echo-cancel=false high-pass-filter=true noise-suppression=true noise-suppression-level=high gain-control=false limiter=true "!" volume volume=6.0 "!" audiodynamic mode=compressor characteristics=hard-knee ratio=0.05 threshold=0.95 "!" audioconvert "!" tee name=spk spk. "!" queue max-size-time=400000000 max-size-bytes=0 max-size-buffers=0 leaky=downstream "!" alsasink device=plughw:UAC2Gadget sync=false buffer-time=200000 latency-time=40000 spk. "!" queue max-size-time=200000000 leaky=downstream "!" audioconvert "!" audioresample "!" audio/x-raw,rate=48000,channels=2,format=S16BE "!" rtpL16pay "!" udpsink host=<redacted> port=5006 sync=false async=false
+gst-launch-1.0 alsasrc device=hw:UAC2Gadget buffer-time=200000 latency-time=20000 "!" audio/x-raw,rate=48000 "!" queue max-size-time=300000000 leaky=downstream "!" audioconvert "!" audioresample quality=10 "!" audio/x-raw,rate=48000,channels=2,format=S16LE "!" opusenc bitrate=128000 audio-type=generic inband-fec=true packet-loss-percentage=20 "!" rtpopuspay pt=97 "!" udpsink host=<redacted> port=5004 sync=false
