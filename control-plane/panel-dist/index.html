@@ -564,7 +564,7 @@ function render(){
       el.innerHTML = us.length ? "" : "No personal accounts yet — invites replace sharing the org key.";
       for (const u of us){
         const row = document.createElement("div");
-        row.innerHTML = `${u.email} · <b>${u.role}</b>${u.pending_invite ? " · invite pending" : ""} <button class="aact" style="margin-left:6px">revoke</button>`;
+        row.innerHTML = `${u.email} · <b>${u.role}</b>${u.pending_invite ? " · <span title=\"They have not signed in yet. If they never got the email, they can request a sign-in link with this address from the front page.\">not signed in yet</span>" : ""} <button class="aact" style="margin-left:6px">revoke</button>`;
         row.querySelector("button").onclick = async ()=>{
           if (!confirm(`Revoke ${u.email}? Their token stops working immediately.`)) return;
           try{ await api(`/admin/users/${u.id}`, {method:"DELETE"}); toast(`revoked ${u.email}`); refresh(); }
@@ -679,7 +679,9 @@ async function addUser(){
   if (!email) return;
   try {
     const d = await api("/admin/users", {method:"POST", body:JSON.stringify({email, role})});
-    $("invite-out").textContent = `ONE-TIME invite for ${d.email} — copy and send it offline (shown only now): ${d.invite}`;
+    $("invite-out").textContent = (d.emailed
+        ? `Invite EMAILED to ${d.email}. Code (in case it does not arrive, shown only now): ${d.invite}`
+        : `NOT EMAILED${d.mail_error ? " (" + d.mail_error + ")" : ""} — you must send this to ${d.email} yourself. ONE-TIME code, shown only now: ${d.invite}`);
     $("nu-email").value = "";
     toast(`invited ${d.email} as ${d.role}`);
   } catch(e){ toast("invite failed: "+e.message); }

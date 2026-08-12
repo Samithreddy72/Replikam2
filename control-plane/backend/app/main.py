@@ -727,7 +727,42 @@ def add_user(body: dict, actor=Depends(auth.require_admin),
         db.rollback()
         raise HTTPException(409, "user already exists")   # same message, no cross-org leak
     _audit(db, actor, "user:add", "%s (%s)" % (email, role))
-    return {"email": email, "role": role, "invite": invite}
+
+    # EMAIL THE INVITE.
+    #
+    # This endpoint used to create the account, return the code once, and send nothing —
+    # "delivered offline (like PINs)". Defensible for a PIN you read out over a phone, wrong
+    # for an invite: the panel then showed "invite pending", which every admin reads as
+    # "the email is on its way". On 2026-08-11 an admin invited a colleague, saw that label,
+    # and waited for mail that was never going to arrive. Nothing failed; nothing was sent.
+    #
+    # SMTP is already configured here — the magic-link path uses it. Send synchronously,
+    # because unlike sign-in there is no account-enumeration concern (the caller is an
+    # authenticated admin who just created this account and already knows it exists), and
+    # the admin needs to know NOW whether to deliver the code by hand.
+    base = (settings.public_base_url or "").rstrip("/")
+    lines = ["You have been added to NetBridge as %s." % role, ""]
+    if base:
+        lines += ["Open %s and paste this invite code:" % base, ""]
+    else:
+        lines += ["Open the NetBridge fleet page and paste this invite code:", ""]
+    lines += ["    %s" % invite, "",
+              "It can be used once. After that you sign in with a link sent to this address.",
+              "If you were not expecting this, ignore the email."]
+    emailed, mail_error = False, None
+    try:
+        emailed = notifier.send_mail(email, "You have been added to NetBridge",
+                                     "\n".join(lines))
+        if not emailed:
+            mail_error = "SMTP is not configured on the fleet"
+    except Exception as e:
+        mail_error = "%s: %s" % (type(e).__name__, e)
+        print("[invite] send failed for %s — %s" % (email, mail_error), flush=True)
+
+    # The code is ALWAYS returned, emailed or not. If mail is down the admin must still be
+    # able to deliver it by hand, and must be told that is now their job.
+    return {"email": email, "role": role, "invite": invite,
+            "emailed": emailed, "mail_error": mail_error}
 
 
 @app.delete("/admin/users/{uid}")
