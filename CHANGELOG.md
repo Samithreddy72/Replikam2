@@ -4,6 +4,39 @@ Verified restore points and released builds, newest first. Each `netbridge-*` ta
 state that was tested against real hardware; each `app-v*` tag is a published presenter
 build on the [Releases](https://github.com/Samithreddy72/Replikam2/releases) page.
 
+## netbridge-MULTIRATE-VERIFIED-2026-08-13
+*2026-08-13 · `6ed972e`*
+
+**Restore point.** First state that is both multi-rate and audibly clean on a card flashed
+from a published image — no signed override, no card surgery. `c_srate = 48000,44100,32000`
+verified on the running gadget; 48k → 32k → 44.1k → 48k followed live mid-meeting with zero
+errors and zero restarts. Full write-up in `docs/evidence/multirate-verified-2026-08-13.md`.
+
+## Unreleased — jitter, diagnosis and baseline
+*2026-08-13*
+
+**The buffer that matters was on the wrong machine.** Room audio is decoded on the
+presenter's laptop, so every jitter action the fleet had ever offered tuned the direction the
+operator was not listening to. The bridge now publishes desired tuning and the app adopts it
+on its existing 10-second poll — a fleet click that changes the presenter's audio mid-call
+with no video interruption.
+
+- **Diagnose** names the culprit from measured evidence and offers only the treating action.
+  Thirteen culprits, all previously observed here; five of them honestly offer **no** action.
+- **Jitter ladder** — rungs 1 and 2 raise the presenter's buffer without touching video;
+  rung 3 sits under "Interrupts the stream".
+- **Golden Profile** — save a known-good config, see drift, restore the tunable parts.
+  `c_srate` and script hashes are reported as NEEDS DEPLOY, never falsely "restored".
+- **jitter-sentry acts while live**, using only the video-safe rung, and can never overwrite
+  a rung an operator set by hand.
+- **Power readout fixed** — `bridge-web` runs as `pi` and cannot open `/dev/vcio_gencmd`, so
+  vcgencmd's error text was being stored as the reading. Now reads the mask from the flight
+  recorder, which root already writes every second.
+- **Menu reorganised by symptom**, with every interrupting action stating its cost.
+
+Tests: 50 → 156. `test-gst-pipelines.sh` rewritten — it no longer greps source, it runs each
+real script with a stub `gst-launch-1.0` and builds the resulting argv.
+
 ## app-v1.1.4
 *2026-08-11 · `9d86725`*
 

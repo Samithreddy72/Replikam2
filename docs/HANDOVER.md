@@ -96,6 +96,34 @@ rotating enrolment tokens.
 
 ---
 
+## 4b. The subsystems added on 2026-08-13
+
+Three things a successor will meet immediately, none of them obvious from the code alone.
+
+**The two audio directions have opposite fixes.** Room audio is decoded on the presenter's
+laptop through the app's own buffer; the presenter's voice is buffered on the bridge. A fleet
+action that deepens the bridge's buffer cannot improve what the presenter hears — it is the
+wrong end. `docs/FLEET.md` keeps them in separate menu groups for this reason.
+
+**The tuning relay.** There is no inbound route to a laptop behind NAT, so the fleet writes
+the desired tuning on the bridge (`/data/presenter-tuning.json`, served in `/api/checks`) and
+the app adopts it on its existing 10-second poll. The bridge is a courier: the app clamps
+every value (60–1000 ms) before use.
+
+**Golden Profile refuses to lie.** `bridge golden restore` fixes only runtime tunables. The
+gadget's advertised sample rates and the media scripts' hashes are recorded as a fingerprint
+and reported as NEEDS DEPLOY. `c_srate` is rewritten at every boot by `uvc-raw-setup.sh` on
+the read-only root, so writing configfs would be undone on reboot while looking exactly like
+a repair that worked.
+
+**What can be deployed remotely, and what cannot.** The signed-override path only replaces
+scripts launched via `bridge-run.sh` — the four media pipelines. Everything else
+(`bridge-web.py`, `bridge-agent.py`, the sentries, the CLI) is baked-in and needs an image.
+Port 22 is closed and Tailscale SSH is not enabled, so there is no card surgery over the
+network either.
+
+---
+
 ## 5. Things that will mislead you
 
 These are real, documented, and each one has cost somebody hours.
@@ -108,6 +136,9 @@ These are real, documented, and each one has cost somebody hours.
 | Video dead, voice fine | The mesh | The presenter's camera is open but delivering no frames. Check the encoder's CPU delta. |
 | Green "legs ok" while nothing works | Media flowing | On builds before v1.1.3 that only proved a socket was bound. BridgeWatch asks the bridge now. |
 | A bridge suddenly unreachable at a new site | Power | A Wi-Fi **name** mismatch. It raises its setup hotspot; somebody must be on site with a phone. |
+| Services "active since 1 month ago" on a card that just booted | A stale card | The Pi has no RTC. It boots at the image's build date, NTP jumps the clock, and systemd renders every start time as `now − monotonic_age`. Trust `/proc/uptime`. |
+| Audio fine on the bridge, presenter still hears jitter | The bridge | The presenter's own buffer. Fleet → deeper buffer on your side. |
+| `power: unreadable — /dev/vcio_gencmd` | No power data | `bridge-web` runs as `pi`. Fixed 2026-08-13 by reading the mask from the flight recorder; a bridge older than that image still shows it. |
 
 **Under-voltage on the reference hardware is unresolved and is not a software problem.**
 Every software mitigation is applied and measured ineffective. Mitigate audibly by raising

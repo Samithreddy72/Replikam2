@@ -29,44 +29,120 @@ the moment somebody is watching for it.
 
 ---
 
-## Actions, grouped by risk
+## Actions, grouped by symptom
 
-The menu is ordered safe-first, and labelled by **symptom** rather than command name — at
-2am you know what you are hearing, not what it is called.
+You arrive with a **symptom**, never a diagnosis, so the menu is grouped by what you can
+observe. Every entry that interrupts anything says so in its own label (`⚠`) and confirms
+before running — harder when someone is streaming.
 
-### Look first — changes nothing
+### The distinction the whole menu rests on
+
+> **The audio YOU hear from the room is buffered on YOUR machine.**
+> **The audio THE ROOM hears from you is buffered on THE BRIDGE.**
+
+They need opposite actions. The old label *"Network rough → jitter profile WAN"* read as
+though it fixed what you were hearing. It cannot, ever — it tunes the other direction, and
+costs a five-second video freeze to do it. Two groups now keep them apart.
+
+### Not sure what is wrong? Start here
 
 | Action | Use it when |
 |---|---|
-| **Collect diagnostics** | You need the full picture: services, logs, USB state, power history, audio analysis. ~470 KB bundle. |
-| **What code is it running?** | You need to know whether a bridge is on an override or its factory script — with hashes. |
-| **Fetch recent logs** | You want "what just happened", not forensics. Bounded tail, much lighter than a bundle. |
+| **Diagnose it for me** | Anything audio-related. Measures power, path, sample rate, running pipeline, mesh path and config drift, then **names the culprit and offers only the action that treats it**. Changes nothing. |
+| **What code is this bridge running?** | You need to know whether it is on an override or its factory script — with hashes. |
+| **Recent logs** | "What just happened", not forensics. |
+| **Full diagnostics bundle** | The whole picture. ~40 s, ~470 KB. |
 
-These are available on **unclaimed** bridges too, so you can inspect one before adopting it.
+### You cannot hear the ROOM properly
 
-### Repair — fixes a known fault
+| Action | Fixes | Cost |
+|---|---|---|
+| **Choppy → deeper buffer on your side** | Lateness from any cause: network bursts, or a browning-out board | ~1 s of room audio. **Video untouched.** |
+| **Still choppy → deeper still** | The same, more of it | ~1 s of room audio |
+| **Silent — nothing at all → re-issue mesh key** | The presenter's mesh node changed and the bridge points at a stale address | none |
+| **Sounds right again → hand the buffer back** | Returns to the 250 ms default | ~1 s of room audio |
 
-| Action | Fixes |
+The buffer being raised is **on the presenter's laptop**. The fleet cannot reach a laptop
+behind NAT, so the bridge publishes the request and the app adopts it on its next 10-second
+poll. Values are clamped app-side (60–1000 ms): the bridge is a courier, not an authority.
+
+### The ROOM cannot hear YOU properly
+
+**Deepen / shallow the bridge buffer.** ⚠ ~5 s video freeze — it restarts the feeders.
+
+### Robotic, crackling, or devices missing in the meeting
+
+**Reset the audio clock.** ⚠ The meeting laptop's camera, microphone **and** speakers drop
+and must be re-selected there. Right for a degraded UAC2 clock, harmful for anything else —
+so let **Diagnose** confirm `clock_suspect` before reaching for it.
+
+### Nothing is arriving at all
+
+**Restart media** (⚠ ~5 s video freeze) or **reboot** (⚠ ~30 s outage).
+
+### Baseline — what "working" looked like
+
+| Action | Use it when |
 |---|---|
-| **Audio robotic or crackling → reset audio clock** | Capture rate drifted from the pipeline rate |
-| **Return audio going nowhere → re-issue mesh key** | The presenter's mesh node changed and the bridge is pointed at a stale address |
-| **Deployed code not running → restore override** | Auto-rollback parked your code. Re-verifies the signature before restoring, and gives it a fresh trial. |
-| **Undo a bad script → revert to factory…** | A deploy made things worse. Needs no URL. |
-| **Push a code fix → deploy signed script…** | Ship a fix to a bridge anywhere. Publish it first with `tools/publish-script.sh`. |
+| **Sounds good right now → save as known-good** | Immediately after you have verified audio by ear. Snapshots the jitter profile, return tuning, AEC, the gadget's advertised rates and the media scripts' hashes. |
+| **Config drifted → restore known-good** | The **Config** column says `drift N`. ⚠ may briefly freeze video. |
+
+Restore fixes only the **runtime tunables**. The advertised sample rates and script hashes are
+recorded as a fingerprint and **reported, never restored**: `c_srate` is rewritten at every
+boot by `uvc-raw-setup.sh` on the read-only root, so poking configfs would be undone on reboot
+while looking exactly like a repair that worked. Those show as **NEEDS DEPLOY**.
+
+### Code on the bridge
+
+**Restore override**, **revert to factory**, **deploy signed script**. Each ⚠ restarts the
+affected service.
 
 ### Access — no effect on media
 
-Set or rotate a PIN, clear a lockout after three wrong tries, or lock a bridge so it demands
-one. PINs travel offline — the panel never shows one after you set it.
+Set or rotate a PIN, clear a lockout, or lock a bridge. PINs travel offline — the panel never
+shows one after you set it.
 
-### Interrupts the stream
+### Last resort
 
-**Restart media**, **jitter profile LAN/WAN**, **reboot**. Each confirms before running, and
-warns harder when someone is streaming.
+**Max buffer + WAN profile.** ⚠ ~5 s video freeze.
 
-> A jitter-profile change restarts the video and audio pipelines. It belongs in this group —
-> it once tore down a live meeting because a background sentry triggered it automatically
-> when the network had been *good* for ten minutes.
+---
+
+## The culprits, and what treats each one
+
+Every row is a failure this system has actually produced. **Diagnose** detects all of them.
+
+| Culprit | How it presents | Action |
+|---|---|---|
+| Presenter voice path down | The room hears nothing (the 2026-08-12 `S16LE` bug) | Restart media → revert-script if it will not stay up |
+| Room audio path down | You hear nothing (the 2026-08-12 `! !` bug) | Restart media → revert-script |
+| Degraded UAC2 clock | Crackle, clicks | Reset the audio clock |
+| Laptop not playing into NetBridge | Everything green, no frames arriving | **None.** On the meeting laptop, select NetBridge as the **speaker**. Not the microphone. |
+| No USB host | Gadget never reaches `configured` | **None.** Almost always a charge-only cable. |
+| Deployed code not running | Auto-rollback parked your override | Restore override |
+| Opus concealment ON | Sounds like jitter (the 2026-08-03 regression) | Deploy signed script |
+| Sample-rate mismatch | Robotic, ~72 % speed | Restart media |
+| Under-voltage | Stutter with **0 % packet loss** — late, not lost | Deeper buffer. **Masks it; the cure is electrical.** |
+| Network bursts | Spread ≥ 8 ms, no loss | Deeper buffer |
+| Packet loss | ≥ 2 % loss | **None.** A buffer cannot replace packets that never arrived. |
+| Relayed mesh path | Roughly double latency | Re-issue mesh key |
+| Config drift | Differs from the saved baseline | Restore known-good, when restorable |
+
+Ordering matters: **silence outranks jitter** (no buffer improves a dead pipeline), and
+**under-voltage outranks network bursts**, so you are never sent chasing the network for a
+power fault.
+
+---
+
+## The sentry acts while you are live
+
+`jitter-sentry` measures the path every 20 s. It will not switch jitter profiles during a
+session — that freezes video — but it **will** raise the presenter's buffer, which does not.
+Rung 1 after ~1 minute of trouble, rung 2 after ~3.
+
+It can never overwrite a rung **you** set by hand, and it withdraws only its own changes, only
+between sessions. A ping looking healthy is not evidence that you were wrong about what you
+could hear.
 
 ---
 
