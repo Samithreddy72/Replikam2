@@ -7,7 +7,8 @@ Serves:
                     status/telemetry stay instant)
   GET /api/health   tiny liveness JSON
 on http://<pi>:8080"""
-import http.server, socketserver, subprocess, os, time, socket, json, hashlib, re
+import http.server, socketserver, subprocess, os, time, socket, json, hashlib, re, glob
+import importlib.util
 
 PORT = 8080
 VERSION_FILE = "/etc/bridge/version"
@@ -32,36 +33,119 @@ def soc_temp():
     return sh("vcgencmd measure_temp").replace("temp=", "") or "?"
 
 
-def soc_throttled():
-    """The throttle bitmask, INCLUDING the sticky 'has happened' bits.
+def _valid_mask(s):
+    """Normalise a throttle mask, or None if `s` is not one.
 
-    This used to read the hwmon in0_lcrit_alarm node BEFORE falling back to vcgencmd, and
-    that ordering hid a hardware fault for weeks. in0_lcrit_alarm is an INSTANTANEOUS flag:
-    it is 1 only while the board is actually browning out, so it answered "0x0" on almost
-    every poll — and because it answered, the authoritative vcgencmd read was never reached.
-
-    The panel therefore showed a healthy `0x0` on a board whose real value was 0x50000
-    (bit16 undervolt-occurred + bit18 throttled-occurred) while the flight recorder was
-    catching live brownouts in 1.3% of all sampled seconds. Every diagnosis that trusted the
-    panel looked past the actual cause, and the only way to learn the truth was to pull a
-    full diagnostics bundle and read power.txt by hand.
-
-    Order now goes sticky-first. The instantaneous alarm is still read, but as EXTRA
-    information in power_state(), never as a substitute for the history.
+    Every source here can fail by RETURNING TEXT rather than by raising, and unvalidated
+    text propagates as data. `vcgencmd` prints "Can't open device file: /dev/vcio_gencmd"
+    on stdout and exits 0, so the old code stored that sentence in the `raw` field, handed
+    it to int(), got ValueError, and reported "unreadable" with the error message sitting
+    where a number belongs. Anything that is not a plausible mask is not a reading.
     """
+    s = (s or "").strip().replace("throttled=", "").strip()
+    if not re.fullmatch(r"(?:0x)?[0-9a-fA-F]{1,8}", s or ""):
+        return None
     try:
-        with open("/sys/devices/platform/soc/soc:firmware/get_throttled") as f:
-            v = f.read().strip()
-            if v:
-                return v
-    except Exception:
-        pass
-    return sh("vcgencmd get_throttled").replace("throttled=", "").strip() or "?"
+        return "0x%x" % int(s, 16)
+    except ValueError:
+        return None
+
+
+def _flight_tail(window=500):
+    """Last `window` lines of the flight recorder, or None if it cannot be read."""
+    for path in FLIGHT_PATHS:
+        try:
+            with open(path, "rb") as f:
+                try:
+                    f.seek(-window * 64, 2)   # ~64 bytes/line, cheap bounded read
+                except OSError:
+                    f.seek(0)
+                return f.read().decode("utf-8", "replace").splitlines()[-window:]
+        except Exception:
+            continue
+    return None
+
+
+def _flight_masks(lines):
+    """(most recent mask, OR of every mask seen) from flight recorder lines."""
+    last, sticky = None, 0
+    for ln in lines or ():
+        m = re.search(r"thr=0x([0-9a-fA-F]+)", ln)
+        if not m:
+            continue
+        try:
+            v = int(m.group(1), 16)
+        except ValueError:
+            continue
+        last, sticky = v, sticky | v
+    return last, sticky
+
+
+def throttle_sources():
+    """Every readable source of the throttle mask, best first, as (name, mask_int).
+
+    WHY THERE IS MORE THAN ONE
+    --------------------------
+    bridge-web runs as `User=pi`. On the 2026-08-13 image `vcgencmd` needs /dev/vcio_gencmd,
+    which `pi` cannot open, so the live power verdict went blind on a board that genuinely
+    was browning out — while the fleet's brownout PERCENTAGE stayed correct, because that
+    number is computed from flight.txt. Two views of one board disagreeing, with the more
+    prominent one wrong.
+
+    The flight recorder runs as root and writes `thr=0x…` to disk every second, so the mask
+    this process cannot ask the firmware for is already sitting in a file it can read. That
+    makes the fix a privilege-free one: no udev rule, no group change, no setuid helper, and
+    nothing that has to be granted again on the next image.
+
+    Ordering is sticky-first for the reason recorded in power_state(): the hwmon
+    in0_lcrit_alarm node is INSTANTANEOUS, so it answers 0x0 on almost every poll. It used
+    to be read first, it always answered, and the authoritative read was therefore never
+    reached — the panel showed a healthy 0x0 on a board whose real value was 0x50000 while
+    the recorder was catching live brownouts in 1.3% of sampled seconds. It is still read,
+    but only as EXTRA information, never as a substitute for the history.
+    """
+    out = []
+    # 1. sysfs — world-readable, no privileges, no subprocess. Globbed because the firmware
+    #    node has moved between kernel versions and a hardcoded path silently yields nothing.
+    seen_paths = set()
+    for pat in ("/sys/devices/platform/soc/soc:firmware/get_throttled",
+                "/sys/devices/platform/soc/*firmware*/get_throttled",
+                "/sys/devices/platform/*firmware*/get_throttled"):
+        for p_ in sorted(glob.glob(pat)):
+            if p_ in seen_paths:
+                continue
+            seen_paths.add(p_)
+            try:
+                with open(p_) as f:
+                    m = _valid_mask(f.read())
+                if m is not None:
+                    out.append(("sysfs", int(m, 16)))
+                    break
+            except Exception:
+                pass
+        if out:
+            break
+    # 2. the flight recorder — written by root every second, readable by anyone.
+    last, sticky = _flight_masks(_flight_tail())
+    if last is not None:
+        out.append(("flight", last))
+        if sticky != last:
+            out.append(("flight-sticky", sticky))
+    # 3. vcgencmd — authoritative when it works, but needs a device node `pi` may not have.
+    m = _valid_mask(sh("vcgencmd get_throttled"))
+    if m is not None:
+        out.append(("vcgencmd", int(m, 16)))
+    return out
+
+
+def soc_throttled():
+    """The throttle bitmask as a '0x…' string, or '?' if no source could be read."""
+    src = throttle_sources()
+    return ("0x%x" % src[0][1]) if src else "?"
 
 
 def undervolt_now():
     """The coarse 'browning out at this instant' alarm, or None if unreadable."""
-    import glob
     for p_ in glob.glob("/sys/class/hwmon/hwmon*/in0_lcrit_alarm"):
         try:
             with open(p_) as f:
@@ -102,18 +186,7 @@ def brownout_rate(window=500):
     Reads only the tail of the flight recorder, which is a ring of the last ~500 seconds.
     Returns None when unreadable rather than guessing; a missing recorder is not 0%.
     """
-    lines = None
-    for path in FLIGHT_PATHS:
-        try:
-            with open(path, "rb") as f:
-                try:
-                    f.seek(-window * 64, 2)  # ~64 bytes/line, cheap bounded read
-                except OSError:
-                    f.seek(0)
-                lines = f.read().decode("utf-8", "replace").splitlines()[-window:]
-            break
-        except Exception:
-            continue
+    lines = _flight_tail(window)
     if lines is None:
         return None
     seen = live = 0
@@ -138,11 +211,28 @@ def power_state(raw=None):
     Returns ok=False when the board has EVER browned out, not merely when it is browning out
     as you look at it. A fault that shows up 1.3% of the time is still the fault.
     """
-    raw = soc_throttled() if raw is None else raw
-    try:
-        v = int(str(raw), 16)
-    except Exception:
-        return {"raw": raw, "ok": None, "summary": "unreadable", "flags": []}
+    srcs = throttle_sources()
+    if raw is None:
+        raw = ("0x%x" % srcs[0][1]) if srcs else None
+    v = int(raw, 16) if _valid_mask(raw) else None
+    if v is None and not srcs:
+        # No source answered. Say so as an absence, and never echo a command's error text
+        # back as if it were a reading — that is what made this field unreadable-looking
+        # rather than obviously broken.
+        return {"raw": None, "ok": None, "live": None, "ever": None,
+                "rate": brownout_rate(), "source": None,
+                "summary": "unreadable — no throttle source available", "flags": []}
+    if v is None:
+        v = srcs[0][1]
+        raw = "0x%x" % v
+    # The sticky "has occurred" bits cannot be wrong in the false-positive direction: no
+    # source invents a brownout. So OR them across every source that answered. This is what
+    # stops one blind reader (vcgencmd without its device node) from reporting a clean board
+    # while another source on the same machine is holding the evidence.
+    sticky_all = 0
+    for _name, mv in srcs:
+        sticky_all |= mv & 0xF0000
+    v |= sticky_all
     flags = [name for bit, name in _THROTTLE_BITS if v & bit]
     live = bool(v & 0x1) or bool(v & 0x4) or undervolt_now() is True
     ever = bool(v & 0x10000) or bool(v & 0x40000)
@@ -156,6 +246,7 @@ def power_state(raw=None):
         summary = ("browning out %.1f%% of the time — enough to be audible; raise the "
                    "return buffer and expect possible reboots" % rate["pct"])
         return {"raw": raw, "ok": False, "live": live, "ever": True, "rate": rate,
+                "source": srcs[0][0] if srcs else None,
                 "summary": summary, "flags": flags}
     if live:
         summary = "browning out RIGHT NOW — expect stutter and possible reboots"
@@ -167,7 +258,41 @@ def power_state(raw=None):
     else:
         summary = "power clean since boot"
     return {"raw": raw, "ok": not (live or ever), "live": live, "ever": ever,
-            "rate": rate, "summary": summary, "flags": flags}
+            "rate": rate, "source": srcs[0][0] if srcs else None,
+            "summary": summary, "flags": flags}
+
+
+_GOLDEN_PY = "/usr/local/bin/bridge-golden.py"
+_golden_mod = None
+
+
+def golden_state():
+    """A compact 'has this bridge drifted from its known-good config?' for the fleet row.
+
+    Loaded once and called in-process: /api/status is polled every few seconds by both the
+    panel and the fleet agent, and spawning a Python interpreter per poll to answer a
+    question about four small files would be a silly cost to pay forever.
+
+    Any failure is reported as "unknown" with the reason. It must never raise — a missing or
+    broken baseline is a nice-to-have going absent, and taking the whole status endpoint down
+    with it would turn a cosmetic gap into an outage.
+    """
+    global _golden_mod
+    try:
+        if _golden_mod is None:
+            if not os.path.exists(_GOLDEN_PY):
+                return {"state": "unavailable"}
+            spec = importlib.util.spec_from_file_location("bridge_golden", _GOLDEN_PY)
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            _golden_mod = m
+        d = _golden_mod.diff()
+        return {"state": d.get("state"), "drift": len(d.get("drift") or []),
+                "restorable": d.get("restorable_count", 0),
+                "needs_deploy": d.get("needs_deploy_count", 0),
+                "saved_at": d.get("saved_at"), "note": d.get("note")}
+    except Exception as e:
+        return {"state": "unknown", "error": str(e)[:120]}
 
 
 def read(path):
@@ -261,6 +386,7 @@ def gather():
     d["uac2"] = os.path.isdir("/proc/asound/UAC2Gadget")
     d["temp"] = soc_temp()
     d["throttled"] = soc_throttled()
+    d["config"] = golden_state()
     # Decoded power verdict, including the STICKY history. Rides telemetry so the fleet can
     # show a brownout on the device's row instead of a green light that needs a diagnostics
     # bundle to contradict.

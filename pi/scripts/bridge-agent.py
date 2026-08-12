@@ -43,6 +43,13 @@ ALLOWED = {
                                 _script_name(a.get("name")), _src(a.get("source"))],
     "revert-script": lambda a: ["sudo", "/usr/local/bin/bridge-deploy-script.sh",
                                 "--revert", _script_name(a.get("name"))],
+    # Known-good configuration baseline (Golden Profile). 'save' stamps the current config as
+    # the reference; 'restore' puts the RESTORABLE fields back and reports what it could not
+    # fix. Neither touches the USB gadget, and restore is a no-op when nothing has drifted,
+    # so clicking it on a healthy bridge costs nothing.
+    "golden-save":    lambda a: ["sudo", "/usr/local/bin/bridge-golden.py", "save"]
+                                + (["--note", _note(a["note"])] if a.get("note") else []),
+    "golden-restore": lambda a: ["sudo", "/usr/local/bin/bridge-golden.py", "restore", "--json"],
     "set-pin":     lambda a: ["sudo", "bridge-pin", "set", _pin(a.get("pin"))],
     "unlock":      lambda a: ["sudo", "bridge-pin", "unlock", _pin(a.get("pin"))],
     "lock":        lambda a: ["sudo", "bridge-pin", "lock"],
@@ -110,6 +117,21 @@ def _script_name(v):
     if not re.fullmatch(r"[a-zA-Z0-9._-]+\.sh", v) or v.startswith("."):
         raise ValueError("bad script name")
     return v
+
+def _note(v):
+    """A human label stored alongside a golden profile ("verified good 13 Aug, clear at all
+    three rates"). Bounded and charset-limited: it is written into a JSON file that is read
+    back and rendered in the fleet panel, so keep it plain text and keep it short. Argv, not
+    a shell, so this is blast-radius rather than a quoting boundary."""
+    v = str(v or "").strip()
+    if not v:
+        raise ValueError("empty note")
+    if len(v) > 120:
+        raise ValueError("note too long (max 120)")
+    if not re.fullmatch(r"[A-Za-z0-9 ,.:;()/_+-]{1,120}", v):
+        raise ValueError("note has unsupported characters")
+    return v
+
 
 def _enum(v, allowed):
     if v not in allowed:

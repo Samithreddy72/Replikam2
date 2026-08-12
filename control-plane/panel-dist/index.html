@@ -108,7 +108,7 @@
         <div class="ph3">Fleet <span class="mono" id="fleetmeta">—</span></div>
         <div style="overflow-x:auto">
           <table class="fleet">
-            <thead><tr><th>Bridge</th><th>Status</th><th>PIN</th><th>Version</th><th>Session</th><th></th></tr></thead>
+            <thead><tr><th>Bridge</th><th>Status</th><th>PIN</th><th>Config</th><th>Version</th><th>Session</th><th></th></tr></thead>
             <tbody id="rows"><tr><td colspan="5" class="dim">loading…</td></tr></tbody>
           </table>
         </div>
@@ -146,6 +146,10 @@ const ACTIONS = [
   ["diagnose",     "Collect diagnostics"],
   ["running",      "What code is it running?"],
   ["logs",         "Fetch recent logs"],
+
+  ["#Baseline — what 'working' looked like", null],
+  ["golden-save",    "Sounds good right now → save as known-good…"],
+  ["golden-restore", "Config drifted → restore known-good"],
 
   ["#Repair — fixes a known fault", null],
   ["reset-clock",  "Audio robotic or crackling → reset audio clock"],
@@ -294,6 +298,30 @@ function statusPill(dev){
   return `<span class="pill ok">online</span>` + pwr;
 }
 
+function cfgState(dev){ return ((dev.latest || {}).config || {}).state || null; }
+
+function configCell(dev){
+  // "What changed?" is the first question when audio goes wrong, and until this column it
+  // was unanswerable. Deliberately says nothing when the answer is not useful: a bridge with
+  // no baseline is not drifted, and one running an older image simply has no opinion.
+  const c = (dev.latest || {}).config || {};
+  const s = c.state;
+  if (!dev.online || !s || s === "unavailable") return `<span class="dim">—</span>`;
+  if (s === "no baseline")
+    return `<span class="pill idle" title="No known-good baseline saved yet. Save one from the Actions menu while the audio is verified good.">no baseline</span>`;
+  if (s === "known-good"){
+    const when = c.saved_at ? new Date(c.saved_at * 1000).toLocaleString() : "";
+    return `<span class="pill ok" title="${esc("Matches the baseline saved " + when + (c.note ? " — " + c.note : ""))}">known-good</span>`;
+  }
+  if (s === "unknown")
+    return `<span class="pill idle" title="${esc(c.error || "baseline could not be read")}">config ?</span>`;
+  // Drifted. The count that matters to an operator is how much of it a button can fix.
+  const tip = `${c.drift} field(s) differ from the baseline — ${c.restorable} restorable from here, `
+            + `${c.needs_deploy} need a code deploy or reflash.`;
+  return `<span class="pill warn" title="${esc(tip)}">drift ${c.drift}`
+       + (c.needs_deploy ? ` (${c.needs_deploy}⚑)` : "") + `</span>`;
+}
+
 function sessionCell(dev){
   const s = (dev.latest||{}).streams || {};
   if (dev.online && s.video) return "presenter streaming";
@@ -332,6 +360,28 @@ async function doAction(devId, devName, value, isLive){
     if (pin === null) return;
     if (!/^\d{6}$/.test(pin)) { toast("PIN must be exactly 6 digits"); return; }
     args = {pin};
+  }
+  if (type === "golden-save"){
+    // Overwriting a baseline is quiet and irreversible — the old one is simply gone — and
+    // the whole value of the feature is that the baseline was taken when things were GOOD.
+    // So confirm against the state the operator can actually see, and make the note
+    // mandatory in spirit by defaulting it to something dated and useful.
+    const cur = cfgState(DEVS.find(x=>x.id===devId) || {});
+    if (cur && cur !== "no baseline" &&
+        !confirm(`${devName} already has a baseline (currently: ${cur}).\n\nSaving replaces it with the CURRENT config. Only do this when you have just confirmed the audio is good.\n\nReplace it?`)) return;
+    const note = prompt(
+      `Label this known-good state for ${devName}:\n\nSomething you will recognise later — what you verified, and how.`,
+      `verified good ${new Date().toISOString().slice(0,10)}`);
+    if (note === null) return;
+    args = note ? {note} : {};
+  }
+  if (type === "golden-restore"){
+    const cur = cfgState(DEVS.find(x=>x.id===devId) || {});
+    if (cur === "no baseline"){
+      toast(`${devName} has no baseline yet — save one first, while it is working`);
+      return;
+    }
+    if (!confirm(`Restore ${devName} to its known-good config?\n\nThis rewrites only the tunable settings (jitter profile, return-audio tuning) and restarts just the services that changed. Anything that needs a code deploy is reported, not silently "fixed".\n\nIf the jitter profile drifted, video will freeze for a few seconds.`)) return;
   }
   if (type === "unlock"){
     const pin = prompt(`PIN for ${devName}?\n\nClears a lockout after three wrong tries.`);
@@ -442,7 +492,7 @@ function render(){
     const tr = document.createElement("tr");
     if (!d.claimed) {
       tr.innerHTML = `<td class="dev dim">🆕 Unclaimed · ${d.pairing_code||d.id}</td>
-        <td>${statusPill(d)}</td><td class="dim">—</td><td class="dim">${d.version||"?"}</td>
+        <td>${statusPill(d)}</td><td class="dim">—</td><td class="dim">—</td><td class="dim">${d.version||"?"}</td>
         <td class="dim">just joined</td>
         <td style="text-align:right"><button class="claimbtn">Claim</button> <select class="act"></select></td>`;
       // Read-only only. Repairing or rebooting a device you have not adopted is somebody
@@ -458,6 +508,7 @@ function render(){
       tr.innerHTML = `<td class="dev">${d.name||d.hostname||d.id} <span class="dim">${code}</span></td>
         <td>${statusPill(d)}${pathPill}${quar.length ? ` <span class="pill warn" title="Auto-rollback parked ${quar.join(", ")}. This bridge is running its FACTORY script, not the code you deployed. Actions → Restore quarantined override.">deployed code not running</span>` : ""}</td>
         <td>${pinCell(d)}</td>
+        <td>${configCell(d)}</td>
         <td class="dim">${d.version||"?"}</td>
         <td class="dim">${sessionCell(d)}</td>
         <td style="text-align:right"></td>`;

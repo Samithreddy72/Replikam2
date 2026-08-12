@@ -150,6 +150,24 @@ case "$1" in
     line "Wi-Fi"    "BridgeSetup-${PC:-Pi}"
     line "password" "$(sudo cat "$PF")"
     line "pairing"  "${PC:-unknown}" ;;
+  golden )
+    # Known-good configuration baseline. The JSON work lives in bridge-golden.py; this is
+    # only the front door.
+    #
+    # 'restore' deliberately fixes only the runtime tunables. The gadget's advertised sample
+    # rates and the media scripts' hashes are recorded as a FINGERPRINT and reported, never
+    # restored: c_srate is rewritten at every boot by uvc-raw-setup.sh on the read-only root,
+    # so poking configfs would be undone at the next reboot while looking, to whoever clicked
+    # it, exactly like a repair that worked.
+    G=/usr/local/bin/bridge-golden.py
+    [ -x "$G" ] || { echo "bridge-golden.py not installed"; exit 1; }
+    case "$2" in
+      save )    n="$3"; sudo "$G" save ${n:+--note "$n"} ;;
+      restore ) sudo "$G" restore ;;
+      show )    "$G" show ;;
+      ""|diff ) "$G" diff ;;
+      * ) echo "usage: bridge golden <save|diff|show|restore>"; exit 1 ;;
+    esac ;;
   logs )
     svc="${2:-bridge-uvcd}"; case "$svc" in bridge-*) :;; *) svc="bridge-$svc";; esac
     echo "=== last 40 log lines of $svc (Ctrl-C to exit follow) ==="
@@ -166,7 +184,10 @@ bridge - NetBridge control
   bridge heal              run the self-heal watchdog once
   bridge set-peer <ip> [port]   set speaker-return destination (default port 5004)
   bridge return-tune "<props>" ["<pre>"]  pipeline experiment knobs (clear: bridge return-tune clear)
-  bridge profile <lan|wan> set jitterbuffer latency profile (lan=100/120, wan=200/200ms)
+  bridge profile <lan|wan> set jitterbuffer latency profile (lan=200/200, wan=300/300ms)
+  bridge golden <save|diff|show|restore>
+                           known-good config baseline: save it when the audio is verified,
+                           diff to see what drifted, restore the tunable parts
   bridge setup-pass        print the setup-label details (AP name, random password, pairing code)
   bridge logs [service]    tail+follow logs (e.g. bridge logs feeder-net)
   bridge help              this help
