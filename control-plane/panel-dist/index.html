@@ -129,7 +129,7 @@ let KEY = localStorage.getItem("nb_admin_key") || "";
 // and RESTARTS uvcd + feeder-net + feeder-audio. It was missing, and on 10 Aug the device
 // side did exactly that to a live meeting on its own — the two most dangerous entries in
 // this menu were the two that were unguarded.
-const DISRUPTIVE = new Set(["restart","reset-clock","reboot","lock","stop","profile","update","unquarantine"]);
+const DISRUPTIVE = new Set(["restart","reset-clock","reboot","lock","stop","profile","update","unquarantine","jitter-fix:3"]);
 // Every entry here maps to a failure this fleet has ACTUALLY produced. Two candidates were
 // deliberately left out rather than padding the list:
 //   * "Install OS update" — the OTA path has never been proven end to end, and a failed
@@ -146,6 +146,12 @@ const ACTIONS = [
   ["diagnose",     "Collect diagnostics"],
   ["running",      "What code is it running?"],
   ["logs",         "Fetch recent logs"],
+
+  ["#Jitter — start here when audio is rough", null],
+  ["jitter-diagnose", "Which culprit is it? (measures, changes nothing)"],
+  ["jitter-fix:1",    "Fix it now — bigger buffer, video untouched"],
+  ["jitter-fix:2",    "Still rough → more buffer"],
+  ["jitter-reset",    "All good → hand the buffer back to default"],
 
   ["#Baseline — what 'working' looked like", null],
   ["golden-save",    "Sounds good right now → save as known-good…"],
@@ -165,6 +171,7 @@ const ACTIONS = [
 
   ["#Interrupts the stream", null],
   ["restart",      "Nothing arriving at the bridge → restart media"],
+  ["jitter-fix:3", "Jitter, last resort → max buffer + WAN profile"],
   ["profile:wan",  "Network rough → jitter profile WAN"],
   ["profile:lan",  "Network good → jitter profile LAN"],
   ["reboot",       "Bridge wedged → reboot"],
@@ -343,7 +350,10 @@ function pinCell(dev){
 async function doAction(devId, devName, value, isLive){
   if (!value) return;
   let [type, mode] = value.split(":");
-  let args = mode ? {mode} : {};
+  // `profile:wan` carries a MODE; `jitter-fix:2` carries a RUNG. They share the colon syntax
+  // and nothing else — sending {mode:"2"} to jitter-fix is refused by the agent's validator,
+  // which would present as a button that queues successfully and then does nothing at all.
+  let args = mode ? (type === "jitter-fix" ? {rung: parseInt(mode, 10)} : {mode}) : {};
   if (type === "mesh-key"){
     // Not a device command — a control-plane action. Mints a fresh tailnet key the bridge
     // picks up on its next check-in. Needed when its ephemeral node was garbage-collected
@@ -415,7 +425,87 @@ async function doAction(devId, devName, value, isLive){
   try {
     const r = await api(`/admin/devices/${devId}/commands`, {method:"POST", body:JSON.stringify({type, args})});
     toast(`queued ${type} on ${devName} — command #${r.id}`);
+    // A diagnosis nobody reads is not a diagnosis. Everything else here is an ACTION whose
+    // effect the operator can see in the fleet row, but jitter-diagnose exists purely to
+    // produce an answer, so it has to be fetched back and shown.
+    if (type === "jitter-diagnose") showDiagnosis(devId, devName, r.id);
   } catch(e){ if(e.message!=="auth") toast("failed: "+e.message); }
+}
+
+async function awaitCommand(devId, cmdId, tries = 24){
+  // The agent runs on a timer, so a result is not instant. Poll rather than guess a delay.
+  for (let i = 0; i < tries; i++){
+    await new Promise(r => setTimeout(r, 2500));
+    let list;
+    try { list = await api(`/admin/devices/${devId}/commands`); } catch(e){ return null; }
+    const c = (list || []).find(x => x.id === cmdId);
+    if (c && c.status !== "queued" && c.status !== "sent") return c;
+  }
+  return null;
+}
+
+function diagPanel(){
+  let el = $("diagout");
+  if (!el){
+    el = document.createElement("div");
+    el.id = "diagout"; el.className = "pcard alert";
+    el.style.cssText = "position:fixed;right:18px;bottom:18px;max-width:min(560px,92vw);"
+                     + "max-height:70vh;overflow:auto;z-index:60;box-shadow:0 8px 32px rgba(0,0,0,.28)";
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+async function showDiagnosis(devId, devName, cmdId){
+  const el = diagPanel();
+  el.innerHTML = `<span class="atitle"><span class="adot"></span> Diagnosing ${esc(devName)}…</span>
+    <span class="abody">Measuring power, path, rates and config on the bridge. ~20 s.</span>`;
+  const c = await awaitCommand(devId, cmdId);
+  if (!c){
+    el.innerHTML = `<span class="atitle"><span class="adot"></span> ${esc(devName)}</span>
+      <span class="abody">No result yet — the bridge may be busy. Try again shortly.</span>`;
+    return;
+  }
+  let d = null;
+  try { d = JSON.parse(c.output || "{}"); } catch(e){}
+  if (!d || !d.findings){
+    el.innerHTML = `<span class="atitle"><span class="adot"></span> ${esc(devName)} — diagnose</span>
+      <pre class="abody" style="white-space:pre-wrap">${esc((c.output||"no output").slice(0,1200))}</pre>`;
+    return;
+  }
+  const ev = d.evidence || {}, pw = ev.power || {}, path = ev.path || {};
+  const rate = pw.rate || {};
+  let html = `<span class="atitle"><span class="adot"></span> ${esc(devName)} — most likely cause</span>`;
+  d.findings.forEach((f, i) => {
+    // The action is the point. A finding with no action still gets stated plainly rather
+    // than quietly dropped — "no fleet button can fix this" is itself the useful answer,
+    // and pretending otherwise is how a USB gadget gets rebuilt to fix a Wi-Fi problem.
+    html += `<div style="margin:10px 0;padding-left:10px;border-left:3px solid ${i===0?"#c0392b":"#bbb"}">
+      <b>${esc(f.culprit)}</b> <span class="dim">(${esc(f.confidence)} confidence)</span>
+      <div class="abody">${esc(f.detail)}</div>`;
+    if (f.action){
+      const label = f.rung ? `${f.action} (rung ${f.rung})` : f.action;
+      html += `<button class="aact" data-act="${esc(f.action)}" data-rung="${f.rung||""}">Apply: ${esc(label)} →</button>`;
+    } else {
+      html += `<div class="abody"><i>No fleet action can fix this one.</i></div>`;
+    }
+    if (f.note) html += `<div class="abody dim">${esc(f.note)}</div>`;
+    html += `</div>`;
+  });
+  html += `<div class="abody dim" style="margin-top:8px">measured — `
+        + `power ${esc(pw.summary || "?")}`
+        + (rate.pct !== undefined && rate.pct !== null ? ` (${rate.pct}% of last ${rate.samples}s)` : "")
+        + (path.reachable ? ` · path spread ${path.mdev_ms}ms, loss ${path.loss_pct}%` : ` · path not measured`)
+        + ` · pipeline ${esc(String(ev.pipeline_rate))} · config ${esc((ev.config||{}).state || "?")}</div>`;
+  html += `<button class="aact" id="diagclose">Close</button>`;
+  el.innerHTML = html;
+  $("diagclose").onclick = ()=> el.remove();
+  el.querySelectorAll("button[data-act]").forEach(b => {
+    b.onclick = ()=>{
+      const act = b.getAttribute("data-act"), rung = b.getAttribute("data-rung");
+      doAction(devId, devName, rung ? `${act}:${rung}` : act, false);
+    };
+  });
 }
 
 async function claim(devId, code){

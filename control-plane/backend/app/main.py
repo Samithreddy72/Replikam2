@@ -37,7 +37,9 @@ ALLOWED_COMMANDS = {"restart", "reset-clock", "profile", "set-peer", "update", "
                     # remote recovery for a bridge nobody can physically reach
                     "unquarantine", "running", "logs",
                     # known-good configuration baseline (Golden Profile)
-                    "golden-save", "golden-restore"}
+                    "golden-save", "golden-restore",
+                    # jitter: diagnose the culprit, apply a ladder rung, or hand back
+                    "jitter-diagnose", "jitter-fix", "jitter-reset"}
 # Commands whose args contain a secret. Their args are scrubbed once the device confirms
 # execution, so a PIN never lives in the fleet database beyond its delivery window.
 PIN_BEARING_COMMANDS = {"set-pin", "unlock"}

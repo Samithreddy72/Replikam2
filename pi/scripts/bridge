@@ -150,6 +150,18 @@ case "$1" in
     line "Wi-Fi"    "BridgeSetup-${PC:-Pi}"
     line "password" "$(sudo cat "$PF")"
     line "pairing"  "${PC:-unknown}" ;;
+  jitter )
+    # Find the culprit, then apply the smallest thing that fixes it. See bridge-jitter.py
+    # for why this is not simply another button: most of this system's jitter causes have
+    # DIFFERENT fixes, and several of those fixes are harmful applied to the wrong cause.
+    J=/usr/local/bin/bridge-jitter.py
+    [ -x "$J" ] || { echo "bridge-jitter.py not installed"; exit 1; }
+    case "$2" in
+      ""|diagnose ) "$J" diagnose ;;
+      fix )         sudo "$J" fix --rung "${3:-1}" ;;
+      reset )       sudo "$J" reset ;;
+      * ) echo "usage: bridge jitter <diagnose|fix [rung]|reset>"; exit 1 ;;
+    esac ;;
   golden )
     # Known-good configuration baseline. The JSON work lives in bridge-golden.py; this is
     # only the front door.
@@ -185,6 +197,9 @@ bridge - NetBridge control
   bridge set-peer <ip> [port]   set speaker-return destination (default port 5004)
   bridge return-tune "<props>" ["<pre>"]  pipeline experiment knobs (clear: bridge return-tune clear)
   bridge profile <lan|wan> set jitterbuffer latency profile (lan=200/200, wan=300/300ms)
+  bridge jitter <diagnose|fix [1-3]|reset>
+                           diagnose names the culprit and the one action that treats it;
+                           fix rung 1 raises the presenter's buffer WITHOUT touching video
   bridge golden <save|diff|show|restore>
                            known-good config baseline: save it when the audio is verified,
                            diff to see what drifted, restore the tunable parts

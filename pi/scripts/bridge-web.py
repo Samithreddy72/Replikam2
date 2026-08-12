@@ -262,6 +262,50 @@ def power_state(raw=None):
             "summary": summary, "flags": flags}
 
 
+PRESENTER_TUNE_FILE = "/data/presenter-tuning.json"
+
+
+def presenter_tuning():
+    """What the fleet wants the PRESENTER APP to apply, or None.
+
+    WHY THIS EXISTS — the knob is on the wrong machine
+    --------------------------------------------------
+    Room audio is decoded on the presenter's laptop, through the APP's own jitter buffer
+    (source_app.py: return_jitter_ms, default 250ms). The bridge's rtpjitterbuffer is the
+    other direction entirely — the presenter's voice arriving here, which is what the room
+    hears.
+
+    So when an operator says "I can hear jitter", the buffer that would absorb it is on
+    their Mac, and every action in the fleet menu tunes the direction they are not hearing.
+    `profile:wan` cannot help, and clicking it costs a five-second video freeze to change
+    nothing they will notice.
+
+    There is no inbound path to a laptop behind NAT, so the fleet cannot push to it. But the
+    app already POLLS /api/checks every 10s (BridgeWatch). Publishing the desired tuning in
+    that response turns a fleet click into a change on the presenter's machine within one
+    poll, with no restart of anything on the bridge and no interruption to video.
+
+    The bridge is a courier here and nothing more. It does not interpret these values, and
+    the app clamps them (60-1000ms) before use — a bridge should not be able to make a
+    laptop do something unbounded just because it was asked to carry a number.
+    """
+    txt = None
+    for p in (PRESENTER_TUNE_FILE, "/home/pi/presenter-tuning.json"):
+        try:
+            with open(p) as f:
+                txt = f.read()
+            break
+        except Exception:
+            continue
+    if not txt:
+        return None
+    try:
+        d = json.loads(txt)
+    except Exception:
+        return None
+    return d if isinstance(d, dict) else None
+
+
 _GOLDEN_PY = "/usr/local/bin/bridge-golden.py"
 _golden_mod = None
 
@@ -636,6 +680,9 @@ def checks():
         "client_sees_camera": {"ok": udc == "configured",
                                "detail": "usb gadget state: %s" % (udc or "?")},
         "return_audio": {"ok": audio_ok, "detail": audio_detail},
+        # Tuning the fleet wants the PRESENTER APP to apply. Carried here because /api/checks
+        # is the one thing the app already polls on a timer; see presenter_tuning().
+        "presenter_tuning": presenter_tuning(),
         "ts": int(time.time()),
     }
 

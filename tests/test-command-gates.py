@@ -103,6 +103,29 @@ for cmd in ("golden-save", "golden-restore"):
     else:
         no("%s only present in: %s" % (cmd, ", ".join(where) or "nowhere"))
 
+print("\n  ---- every referenced script is actually shipped ----")
+# The image installs `for f in pi/scripts/*` into /usr/local/bin, so a script referenced by
+# an absolute path only works if a file of that exact name exists in pi/scripts. A typo or a
+# rename here produces a command that passes all three gates and then fails on the device
+# with "not installed" — visible only to whoever reads the command output.
+import re as _re
+shipped = {p_.name for p_ in (ROOT / "pi" / "scripts").iterdir() if p_.is_file()}
+refs = set()
+for f in (AGENT, ROOT / "pi" / "scripts" / "bridge",
+          ROOT / "pi" / "scripts" / "bridge-web.py",
+          ROOT / "pi" / "scripts" / "bridge-jitter.py"):
+    refs |= set(_re.findall(r"/usr/local/bin/([A-Za-z0-9._-]+)", f.read_text()))
+missing = sorted(r for r in refs if r not in shipped and r != "bridge")
+if not missing:
+    ok("all %d referenced /usr/local/bin scripts exist in pi/scripts" % len(refs))
+else:
+    no("referenced but NOT shipped — the command will fail on the device", missing)
+for need in ("bridge-golden.py", "bridge-jitter.py"):
+    if need in shipped:
+        ok("%s is in pi/scripts, so the image installs it" % need)
+    else:
+        no("%s would never reach the card" % need)
+
 print("\n  ---- negative control: the check must be able to fail ----")
 if "definitely-not-a-real-command" not in backend:
     ok("a made-up command is correctly absent from the backend")

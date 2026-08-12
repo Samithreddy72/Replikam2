@@ -43,6 +43,13 @@ ALLOWED = {
                                 _script_name(a.get("name")), _src(a.get("source"))],
     "revert-script": lambda a: ["sudo", "/usr/local/bin/bridge-deploy-script.sh",
                                 "--revert", _script_name(a.get("name"))],
+    # Jitter: diagnose names the culprit; fix applies a ladder rung. Rung 1 writes a tuning
+    # file the PRESENTER APP picks up on its next poll — the buffer that matters lives on the
+    # presenter's laptop, not here, so this is the only path a fleet click has to it.
+    "jitter-diagnose": lambda a: ["sudo", "/usr/local/bin/bridge-jitter.py", "diagnose", "--json"],
+    "jitter-fix":      lambda a: ["sudo", "/usr/local/bin/bridge-jitter.py", "fix",
+                                  "--rung", _rung(a.get("rung", 1)), "--json"],
+    "jitter-reset":    lambda a: ["sudo", "/usr/local/bin/bridge-jitter.py", "reset", "--json"],
     # Known-good configuration baseline (Golden Profile). 'save' stamps the current config as
     # the reference; 'restore' puts the RESTORABLE fields back and reports what it could not
     # fix. Neither touches the USB gadget, and restore is a no-op when nothing has drifted,
@@ -117,6 +124,15 @@ def _script_name(v):
     if not re.fullmatch(r"[a-zA-Z0-9._-]+\.sh", v) or v.startswith("."):
         raise ValueError("bad script name")
     return v
+
+def _rung(v):
+    """Which step of the jitter ladder. Bounded because the rungs differ in DAMAGE, not just
+    in strength: rung 3 restarts the bridge's feeders and freezes video."""
+    n = int(v or 1)
+    if n not in (1, 2, 3):
+        raise ValueError("rung must be 1, 2 or 3")
+    return str(n)
+
 
 def _note(v):
     """A human label stored alongside a golden profile ("verified good 13 Aug, clear at all

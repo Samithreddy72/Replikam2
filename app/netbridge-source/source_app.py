@@ -1303,6 +1303,54 @@ class BridgeWatch:
         except Exception:
             return None
 
+    def _apply_fleet_tuning(self, want):
+        """Adopt return-audio tuning published by the fleet via the bridge.
+
+        THE KNOB IS ON THIS MACHINE, NOT ON THE BRIDGE
+        ----------------------------------------------
+        Room audio is decoded here, through SESSION.return_jitter_ms. The bridge's
+        rtpjitterbuffer is the opposite direction — the presenter's voice arriving there.
+        So when an operator hears jitter, the buffer that absorbs it is local, and no fleet
+        action could previously reach it: there is no inbound path to a laptop behind NAT.
+
+        The bridge cannot push, but this class already polls it every 10 seconds. So the
+        fleet writes the desired tuning on the bridge and it is picked up here within one
+        poll — a fleet click that changes the presenter's audio mid-call, with nothing
+        restarted on the bridge and no interruption to video.
+
+        Applied at most once per (ts, values) change. Re-applying rebuilds the return
+        pipeline, which costs about a second of room audio; doing that every 10s because a
+        file merely exists would be its own fault. The bridge is a courier, so the values are
+        treated as untrusted input and clamped by set_return_tuning (60-1000ms) — a bridge
+        must not be able to make this machine do something unbounded.
+        """
+        if not isinstance(want, dict):
+            return
+        try:
+            stamp = (want.get("ts"), want.get("jitter_ms"), want.get("conceal"),
+                     want.get("gain"))
+        except Exception:
+            return
+        if stamp == getattr(self, "_tuning_stamp", None):
+            return
+        jitter = want.get("jitter_ms")
+        if jitter is None and want.get("conceal") is None and want.get("gain") is None:
+            self._tuning_stamp = stamp
+            return
+        try:
+            applied = SESSION.set_return_tuning(gain=want.get("gain"),
+                                                jitter_ms=jitter,
+                                                conceal=want.get("conceal"))
+        except Exception as e:
+            print("[fleet-tune] could not apply %r: %s" % (want, e), flush=True)
+            return
+        self._tuning_stamp = stamp
+        why = want.get("reason") or "fleet request"
+        with self.lock:
+            self.last = "fleet tuning applied: return buffer %sms (%s)" % (
+                applied.get("jitter_ms"), why)
+        print("[fleet-tune] %s" % self.last, flush=True)
+
     def _repair(self, key, checks):
         """Fix one failing check. Returns a human sentence, or None if nothing was done."""
         leg = self.LEG_FOR.get(key)
@@ -1368,6 +1416,10 @@ class BridgeWatch:
         if not checks:
             # Say so, but do not act. The stream may be perfectly fine.
             return
+
+        # Adopt any tuning the fleet has asked this machine for. Runs BEFORE the repair logic
+        # below so a deliberate operator change is never mistaken for a symptom.
+        self._apply_fleet_tuning(checks.get("presenter_tuning"))
 
         # A browning-out board changes what every other symptom MEANS.
         #
