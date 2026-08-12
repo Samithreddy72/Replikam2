@@ -178,13 +178,35 @@ case "$1" in
 	# the driver was zero-filling them; opus then encoded the damage faithfully, which is
 	# why every transport measurement (0 packet loss, perfect RTP timestamps) looked clean.
 	#
-	# Advertising several rates changes the descriptor and the gadget's isochronous handling
-	# REGARDLESS of which rate the host selects — so testing at 48 kHz does NOT clear it.
-	# Phase 6 needs a different mechanism than multi-rate advertisement on this controller.
-	echo 48000 > functions/uac2.usb0/c_srate
+	# THAT CONCLUSION WAS OVERTURNED — restored to multi-rate 2026-08-12.
+	#
+	# The measurement above was taken with the v1 rate-following SUPERVISOR in place, and the
+	# same commit's own first conclusion was that the supervisor is the dominant fault: a
+	# shell loop stopping and restarting gst underneath a live ALSA capture, 100x worse than
+	# not having it (21.6 vs 0.2 zero-runs/sec). Multi-rate was NEVER measured without it, so
+	# "multi-rate is also worse" (1.4/sec) was never isolated from the supervisor's damage.
+	#
+	# Phase 6 v2 replaced that supervisor with the kernel's own Capture Rate control — rate
+	# following INSIDE the pipeline, which is exactly what the revert said it had to be — and
+	# the multi-rate descriptor was then deployed to Samith's working card by card surgery.
+	# It has run there since, and he confirmed clean audio at 32k, 44.1k and 48k by ear.
+	#
+	# PROOF, from that card's own diagnostics bundle on 2026-08-12 (gadget-av.txt):
+	#     c_sync = adaptive
+	#     c_srate = 48000,44100,32000
+	#
+	# The work was never committed, so every image built since has silently regressed to a
+	# single rate — and flashing one overwrites a working multi-rate card. Windows then offers
+	# no choice of format, because the device is advertising that it has none. This restores
+	# the configuration that is proven on hardware.
+	#
+	# If audio ever degrades after a change here, measure it the way the revert did: capture
+	# the return stream to a file and count runs of EXACT ZEROS. 0.2/sec is clean, 21.6/sec is
+	# broken. Transport metrics cannot see this damage — it happens at the gadget, before opus.
+	echo 48000,44100,32000 > functions/uac2.usb0/c_srate
 	echo 2 > functions/uac2.usb0/c_ssize
 	echo 3 > functions/uac2.usb0/p_chmask
-	echo 48000 > functions/uac2.usb0/p_srate
+	echo 48000,44100,32000 > functions/uac2.usb0/p_srate
 	echo 2 > functions/uac2.usb0/p_ssize
 	ln -s functions/uac2.usb0 configs/c.1/
 	echo "OK"

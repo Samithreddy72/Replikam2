@@ -1,0 +1,19 @@
+== UAC2 gadget ==
+c_sync = adaptive
+c_srate = 48000,44100,32000
+c_chmask = 1
+req_number = 8
+p_chmask = 3
+fb_max = 5
+
+== v4l2loopback ==
+max_buffers=16 exclusive_caps=N,N,N,N,N,N,N,N
+/dev/video40 openers:
+                     USER        PID ACCESS COMMAND
+/dev/video40:        root        676 F.... gst-launch-1.0
+                     root        912 F.... uvc-gadget
+
+== return-audio peer/config ==
+# speaker-return destination (the remote peer)
+RETURN_DEST_IP=100.115.18.22
+RETURN_DEST_PORT=5004
