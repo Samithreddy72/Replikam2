@@ -1,30 +1,44 @@
 #!/bin/bash
-# NetBridge Source — double-click to launch. Your browser opens at http://127.0.0.1:8765 .
-# Keep this window open while you present; close it to quit.
+# NetBridge presenter — double-click this.
 #
-# Runs via Terminal on purpose: macOS grants camera/mic permission to THIS window, so the
-# app inherits it. Launching the same code from anywhere else gets a black camera.
-#
-# WHY THIS RUNS FROM SOURCE INSTEAD OF THE PACKAGED BINARY
-# --------------------------------------------------------
-# The PyInstaller one-file build (./NetBridgeSource) is SIGKILLed by macOS on Apple Silicon:
-#     EXC_BAD_ACCESS  SIGKILL (Code Signature Invalid)
-#     termination: namespace CODESIGNING, code 2, "Invalid Page"
-# The outer binary's ad-hoc signature verifies fine on disk — the failure is on the images
-# it UNPACKS to a temp dir at runtime. So it starts, serves the UI, answers the API, and is
-# then killed the moment it loads its bundled media libraries, i.e. exactly when you press
-# Go live. SIGKILL cannot be caught, which is why the window just died with no traceback.
-# Proper fix is a signed/notarised build (needs the Apple Developer account); until then
-# running from source sidesteps packaging entirely and uses the ffmpeg/GStreamer already on
-# this machine. It also means you always run the CURRENT code with no rebuild step.
-set -u
-REPO="$HOME/netbridge/replikam2-ci"
-APP="$REPO/app/netbridge-source/source_app.py"
-PY="$REPO/.venv/bin/python3"
-[ -x "$PY" ] || PY="$(command -v python3)"
+# IMPORTANT: this must be double-clicked (or run from Terminal), never started by another
+# tool. macOS attributes a camera request to the RESPONSIBLE process — whatever launched
+# the app — not to the app itself. Launched from Terminal you inherit Terminal's camera
+# grant; launched by something without one you get microphone but NO camera, with no error
+# and no prompt: voice reaches the bridge, video never does, and the green webcam LED
+# stays off.
 
-[ -f "$APP" ] || { echo "Cannot find $APP"; echo "Press any key to close."; read -r -n1; exit 1; }
+cd "$(dirname "$0")"
+URL=http://127.0.0.1:8765/
 
-echo "Starting NetBridge Source…  (leave this window open; close it to quit)"
-echo
-exec "$PY" "$APP"
+up(){ curl -s -m 2 "$URL"api/state >/dev/null 2>&1; }
+
+# Already running: just bring it up. The app is not started again, so it will not open a
+# second tab of its own.
+if up; then
+  echo "NetBridge is already running — opening it."
+  open "$URL"; sleep 1; exit 0
+fi
+
+echo "Starting NetBridge…  (first launch takes ~15s while it unpacks)"
+if [ -x ./NetBridgeSource ]; then
+  ./NetBridgeSource >/tmp/netbridge-app.log 2>&1 &
+else
+  python3 "$HOME/netbridge/replikam2-ci/app/netbridge-source/source_app.py" \
+    >/tmp/netbridge-app.log 2>&1 &
+fi
+
+for i in $(seq 1 40); do up && break; sleep 1; done
+
+if up; then
+  # Deliberately NO `open` here. The app opens the browser itself once it is serving
+  # (_open_browser in source_app.py). Opening it here as well is what produced TWO tabs
+  # on every launch.
+  echo
+  echo "NetBridge is running.   $URL"
+  echo "(You can close this window — NetBridge keeps running.)"
+else
+  echo; echo "NetBridge did not start. Last lines of its log:"
+  tail -20 /tmp/netbridge-app.log
+  echo; echo "Press return to close."; read -r _
+fi
