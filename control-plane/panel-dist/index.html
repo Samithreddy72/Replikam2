@@ -102,7 +102,7 @@
 
   <div id="panel" class="hidden">
     <h1>Every bridge on one screen.</h1>
-    <p class="sub">Live fleet state, refreshed every 5&nbsp;s · <span class="mono">alerts carry their known fix</span></p>
+    <p class="sub">Live fleet state · <span class="mono">polled every 5&nbsp;s · redrawn only when something changes · alerts carry their known fix</span></p>
     <div class="panelgrid">
       <div class="pcard">
         <div class="ph3">Fleet <span class="mono" id="fleetmeta">—</span></div>
@@ -383,20 +383,34 @@ async function fix(devId, devName, f, isLive){
 let DEVS = [];
 // Never re-render while someone is READING the menu.
 //
-// The 5s live refresh rebuilds every row, which destroys and recreates the <select> — so an
-// open dropdown slammed shut mid-read. With 14 entries in four groups that is not a cosmetic
-// annoyance: it makes the menu genuinely hard to use, and the entries you most need to read
-// carefully are the destructive ones at the bottom. A native <select> has no "is open" flag,
-// but clicking one focuses it, so activeElement is a reliable proxy. The data underneath is
-// only ever a few seconds stale, and it re-renders the moment focus leaves.
+// Rebuilding a row destroys and recreates its <select>, so an open dropdown slammed shut
+// mid-read. With 14 entries in four groups that is not cosmetic: it makes the menu hard to
+// use, and the entries you most need to read carefully are the destructive ones at the
+// bottom. render() now only touches the DOM when the data actually changed, which removes
+// most of the churn — but a genuine change during a live session would still close the
+// menu, so the guard stays. A native <select> has no "is open" flag; clicking one focuses
+// it, so activeElement is a reliable proxy. The data underneath is only ever a few seconds
+// stale, and it redraws the moment focus leaves.
 function menuIsOpen(){
   const a = document.activeElement;
   return !!(a && a.tagName === "SELECT" && a.classList.contains("act"));
 }
 
 function render(){
-  if (menuIsOpen()) return;
-  const rows = $("rows"); rows.innerHTML = "";
+  // Returns true when the page actually changed, so the caller can avoid repainting a
+  // timestamp on an idle fleet.
+  if (menuIsOpen()) return false;
+  // Build OFF-SCREEN, then swap only if the markup actually changed.
+  //
+  // This used to write straight into the live table every 5 seconds, whether or not
+  // anything had moved. Rebuilding the DOM on a timer destroys whatever the operator was
+  // doing: a half-made text selection disappears, focus is lost, and an open <select>
+  // snaps shut. The page LOOKED busy and felt unstable while reporting identical data.
+  //
+  // The polling itself stays on the 5s tick - that is how the browser learns anything -
+  // but the page now only moves when the fleet does.
+  const rowsLive = $("rows");
+  const rows = document.createElement("tbody");
   // A bridge that just finished the Wi-Fi portal shows up UNCLAIMED, and that is exactly the
   // moment someone is watching for it. Sort it to the top rather than leaving it wherever the
   // API returned it; on a fleet of any size that is the difference between "there it is" and
@@ -406,7 +420,8 @@ function render(){
     (a.online?1:0) - (b.online?1:0) ||
     String(a.name||a.pairing_code||"").localeCompare(String(b.name||b.pairing_code||"")));
   const online = DEVS.filter(d=>d.online).length;
-  $("fleetmeta").textContent = `${DEVS.length} bridge${DEVS.length===1?"":"s"} · ${online} online · live refresh`;
+  const meta = `${DEVS.length} bridge${DEVS.length===1?"":"s"} · ${online} online`;
+  if ($("fleetmeta").textContent !== meta) $("fleetmeta").textContent = meta;
   for (const d of DEVS){
     const t = d.latest || {};
     const isLive = !!(d.online && (t.streams||{}).video);
@@ -459,7 +474,8 @@ function render(){
     rows.appendChild(tr);
   }
   // side: alerts (with their attached fix), then the phase-4 rollout placeholder
-  const side = $("side"); side.innerHTML = "";
+  const sideLive = $("side");
+  const side = document.createElement("div");
   let anyAlert = false;
   for (const d of DEVS){
     const isLive = !!(d.online && ((d.latest||{}).streams||{}).video);
@@ -634,6 +650,23 @@ function render(){
     }
     b.appendChild(row);
   }).catch(()=>{ const b=$("rolloutbody"); if(b) b.textContent="rollouts unavailable"; });
+
+  // ---- swap in ONLY what changed -------------------------------------------------
+  // Moving the nodes (not re-parsing HTML) keeps every event handler already bound to
+  // them, so the Actions menus and Claim buttons keep working.
+  //
+  // #rolloutbody is filled by an async fetch AFTER this function returns, so the freshly
+  // built copy always lacks it. Blank it on both sides before comparing, or the side panel
+  // would look "changed" on every single tick and we would clobber the fetched content.
+  const sig = el => {
+    const c = el.cloneNode(true);
+    const rb = c.querySelector("#rolloutbody"); if (rb) rb.innerHTML = "";
+    return c.innerHTML;
+  };
+  let moved = false;
+  if (rows.innerHTML !== rowsLive.innerHTML) { rowsLive.replaceChildren(...rows.childNodes); moved = true; }
+  if (sig(side) !== sig(sideLive))          { sideLive.replaceChildren(...side.childNodes); moved = true; }
+  return moved;
 }
 
 // Launch a staged rollout. Uses prompt() (like set-pin/claim) so a 5s panel refresh
@@ -693,11 +726,15 @@ async function refresh(first){
     if (first || !ROLE) await syncWho();
     DEVS = await api("/admin/devices");
     $("panel").classList.remove("hidden"); $("gate").classList.add("hidden");
-    render();
-    $("whoami").textContent = WHO === "bootstrap-key"
+    const changed = render();
+    const who = WHO === "bootstrap-key"
       ? "bootstrap key · add an admin account to retire it"
       : `${WHO} · ${ROLE}`;
-    $("tick").textContent = "updated " + new Date().toLocaleTimeString();
+    if ($("whoami").textContent !== who) $("whoami").textContent = who;
+    // Timestamp the last CHANGE, not the last poll. A clock ticking every 5 seconds reads as
+    // "something just happened" when nothing did, and it would be the one element still
+    // repainting on a completely idle fleet.
+    if (changed || first) $("tick").textContent = "changed " + new Date().toLocaleTimeString();
   } catch(e){ if (e.message!=="auth" && first) toast("control plane unreachable"); }
 }
 // If we arrived from an emailed sign-in link (/signin?code=…), redeem it first.
