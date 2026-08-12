@@ -73,6 +73,41 @@ while true; do
     if [ "${loss:-0}" -gt 2 ] || [ "${mdev:-0}" -gt 25 ] || [ "${avg:-0}" -gt "$rtt_bad" ] || [ "${mx:-0}" -gt $((rtt_bad*2)) ]; then bad=$((bad+1)); good=0
     else good=$((good+1)); bad=0; fi
   fi
+  # ------------------------------------------------------------------ live-safe response
+  #
+  # THE GAP THIS CLOSES. Every profile switch below is DEFERRED while media is flowing, and
+  # correctly so — a switch restarts the feeders and freezes video. But it also means that
+  # during the exact meeting where the network goes bad, this sentry does nothing at all.
+  # Observed in the field on 2026-08-12, twice in one session:
+  #
+  #   DEFERRED profile lan (network pristine for 10min) — a session is live
+  #
+  # There IS something safe to do while live. The audio the presenter hears is decoded on
+  # THEIR laptop, through the app's own buffer, so raising that buffer costs about a second
+  # of room audio and touches neither video, nor the USB gadget, nor any service here. The
+  # bridge publishes the request and the app adopts it on its next poll (bridge-jitter.py).
+  #
+  # Marked --auto so it can never overwrite a rung an operator chose by hand, and so only its
+  # OWN changes are withdrawn later. A ping looking healthy is not evidence that a human was
+  # wrong about what they could hear.
+  if [ $bad -ge 3 ] && media_live; then
+    # Escalate only after trouble persists: 3 bad samples is ~1 minute, 9 is ~3. A deeper
+    # buffer costs real delay in hearing the room, so this must not race upward.
+    want=1; [ $bad -ge 9 ] && want=2
+    out=$(/usr/local/bin/bridge-jitter.py fix --rung "$want" --auto \
+            --why "loss=${loss:-?}% jitter=${mdev:-?}ms rtt=${avg:-?}ms" --json 2>&1)
+    case "$out" in
+      *'"skipped"'*) : ;;     # already there, or an operator owns it. Do not say so every 20s.
+      *) LOG "live: raised presenter buffer to rung $want (loss=${loss:-?}% mdev=${mdev:-?}ms)" ;;
+    esac
+  fi
+  if [ $good -ge 30 ] && ! media_live; then
+    # Withdraw only BETWEEN sessions. Changing the buffer mid-call to make things better
+    # still costs a gap in the room audio, and nobody thanks a machine for that.
+    out=$(/usr/local/bin/bridge-jitter.py reset --auto --json 2>&1)
+    case "$out" in *'"skipped"'*) : ;; *) LOG "idle: handed the presenter buffer back" ;; esac
+  fi
+
   if [ $bad -ge 3 ] && [ "${cur:-200}" -lt 300 ]; then
     switch_profile wan "network degraded (loss=$loss% jitter=${mdev}ms rtt=${avg}ms)" && bad=0
   elif [ $good -ge 30 ] && [ "${cur:-200}" -ge 300 ]; then

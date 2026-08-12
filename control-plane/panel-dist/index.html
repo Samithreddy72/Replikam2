@@ -129,7 +129,8 @@ let KEY = localStorage.getItem("nb_admin_key") || "";
 // and RESTARTS uvcd + feeder-net + feeder-audio. It was missing, and on 10 Aug the device
 // side did exactly that to a live meeting on its own — the two most dangerous entries in
 // this menu were the two that were unguarded.
-const DISRUPTIVE = new Set(["restart","reset-clock","reboot","lock","stop","profile","update","unquarantine","jitter-fix:3"]);
+const DISRUPTIVE = new Set(["restart","reset-clock","reboot","lock","stop","profile","update",
+  "unquarantine","jitter-fix:3","deploy-script","revert-script","golden-restore"]);
 // Every entry here maps to a failure this fleet has ACTUALLY produced. Two candidates were
 // deliberately left out rather than padding the list:
 //   * "Install OS update" — the OTA path has never been proven end to end, and a failed
@@ -142,39 +143,59 @@ const DISRUPTIVE = new Set(["restart","reset-clock","reboot","lock","stop","prof
 const ACTIONS = [
   ["", "Actions…"],
 
-  ["#Look first — safe, changes nothing", null],
-  ["diagnose",     "Collect diagnostics"],
-  ["running",      "What code is it running?"],
-  ["logs",         "Fetch recent logs"],
+  // ORGANISED BY WHAT THE ADMIN CAN SEE, NOT BY WHAT THE CODE DOES.
+  //
+  // An admin arrives with a SYMPTOM ("it sounds choppy"), never with a diagnosis, and the
+  // previous grouping — Look / Repair / Access / Interrupts — required knowing the mechanism
+  // before you could find the fix. Worse, it hid the single most important distinction in
+  // this system:
+  //
+  //   the audio YOU hear from the room is buffered on YOUR machine
+  //   the audio THE ROOM hears from you is buffered on THE BRIDGE
+  //
+  // Those need opposite actions. "Network rough → jitter profile WAN" reads like it fixes
+  // what you are hearing; it cannot, ever. It tunes the other direction, and costs a
+  // five-second video freeze to do it. Every label below therefore names the DIRECTION and
+  // carries its real COST, because a cost discovered after clicking is a cost paid twice.
+  ["#Not sure what is wrong? Start here", null],
+  ["jitter-diagnose", "Diagnose it for me — names the cause (changes nothing)"],
+  ["running",         "What code is this bridge running?"],
+  ["logs",            "Recent logs"],
+  ["diagnose",        "Full diagnostics bundle (~40 s)"],
 
-  ["#Jitter — start here when audio is rough", null],
-  ["jitter-diagnose", "Which culprit is it? (measures, changes nothing)"],
-  ["jitter-fix:1",    "Fix it now — bigger buffer, video untouched"],
-  ["jitter-fix:2",    "Still rough → more buffer"],
-  ["jitter-reset",    "All good → hand the buffer back to default"],
+  ["#You cannot hear the ROOM properly", null],
+  ["jitter-fix:1",    "Choppy or breaking up → deeper buffer on your side"],
+  ["jitter-fix:2",    "Still choppy → deeper still"],
+  ["mesh-key",        "Silent — nothing at all → re-issue mesh key"],
+  ["jitter-reset",    "Sounds right again → hand the buffer back"],
+
+  ["#The ROOM cannot hear YOU properly", null],
+  ["profile:wan",     "Choppy for them → deepen the bridge buffer ⚠ ~5 s video freeze"],
+  ["profile:lan",     "Their network is good → shallower, less delay ⚠ ~5 s video freeze"],
+
+  ["#Robotic, crackling, or devices missing in the meeting", null],
+  ["reset-clock",     "Reset the audio clock ⚠ their camera+mic+speakers re-enumerate"],
+
+  ["#Nothing is arriving at all", null],
+  ["restart",         "Restart media ⚠ ~5 s video freeze"],
+  ["reboot",          "Bridge wedged → reboot ⚠ ~30 s outage"],
 
   ["#Baseline — what 'working' looked like", null],
-  ["golden-save",    "Sounds good right now → save as known-good…"],
-  ["golden-restore", "Config drifted → restore known-good"],
+  ["golden-save",     "Sounds good right now → save as known-good…"],
+  ["golden-restore",  "Config drifted → restore known-good ⚠ may briefly freeze video"],
 
-  ["#Repair — fixes a known fault", null],
-  ["reset-clock",  "Audio robotic or crackling → reset audio clock"],
-  ["mesh-key",     "Return audio going nowhere → re-issue mesh key"],
-  ["unquarantine", "Deployed code not running → restore override"],
-  ["revert-script","Undo a bad script → revert to factory…"],
-  ["deploy-script","Push a code fix → deploy signed script…"],
+  ["#Code on the bridge", null],
+  ["unquarantine",    "Deployed code not running → restore override ⚠ restarts that service"],
+  ["revert-script",   "Undo a bad script → revert to factory… ⚠ restarts that service"],
+  ["deploy-script",   "Push a code fix → deploy signed script… ⚠ restarts that service"],
 
   ["#Access — no effect on media", null],
-  ["set-pin",      "Set / rotate PIN…"],
-  ["unlock",       "Presenter locked out → clear lockout…"],
-  ["lock",         "Lock (require PIN)"],
+  ["set-pin",         "Set / rotate PIN…"],
+  ["unlock",          "Presenter locked out → clear lockout…"],
+  ["lock",            "Lock (require PIN) ⚠ next go-live needs the PIN"],
 
-  ["#Interrupts the stream", null],
-  ["restart",      "Nothing arriving at the bridge → restart media"],
-  ["jitter-fix:3", "Jitter, last resort → max buffer + WAN profile"],
-  ["profile:wan",  "Network rough → jitter profile WAN"],
-  ["profile:lan",  "Network good → jitter profile LAN"],
-  ["reboot",       "Bridge wedged → reboot"],
+  ["#Last resort", null],
+  ["jitter-fix:3",    "Nothing above worked → max buffer + WAN ⚠ ~5 s video freeze"],
 ];
 
 function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("show");
@@ -418,7 +439,11 @@ async function doAction(devId, devName, value, isLive){
     if (!source) return;
     args = {name, source};
   }
-  if (DISRUPTIVE.has(type)) {
+  // Match BOTH forms. The set is consulted with the bare command, but rung 3 is the only
+  // disruptive member of the jitter-fix family — rungs 1 and 2 must not nag — so it is listed
+  // by its full "jitter-fix:3" value and would otherwise never match, silently freezing video
+  // on a live call with no confirmation at all.
+  if (DISRUPTIVE.has(type) || DISRUPTIVE.has(value)) {
     if (isLive && !confirm(`⚠ ${devName} is LIVE — someone is streaming through it right now.\n\n"${type}" will interrupt them. Really proceed?`)) return;
     if (!isLive && !confirm(`Run "${type}" on ${devName}?`)) return;
   }

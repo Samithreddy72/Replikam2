@@ -126,6 +126,45 @@ for need in ("bridge-golden.py", "bridge-jitter.py"):
     else:
         no("%s would never reach the card" % need)
 
+print("\n  ---- the menu tells the truth about what it costs ----")
+# An admin arrives with a symptom and picks the entry that matches it. Two failures make
+# that dangerous, and both were present before this check:
+#   * an action that interrupts a live meeting without saying so in its label
+#   * an action listed as disruptive that never actually asks for confirmation
+# The second is subtler: DISRUPTIVE is consulted with the BARE command, so listing
+# "jitter-fix:3" alone silently matched nothing and rung 3 would have frozen video on a live
+# call with no prompt at all.
+_p = PANEL.read_text()
+_dis = set(re.findall(r'"([^"]+)"',
+           re.search(r"const DISRUPTIVE = new Set\(\[(.*?)\]\)", _p, re.S).group(1)))
+_acts = [(v, l) for v, l in re.findall(r'\["([^"]*)",\s*(?:"([^"]*)"|null)\]',
+         re.search(r"const ACTIONS = \[(.*?)\n\];", _p, re.S).group(1))
+         if v and not v.startswith("#")]
+_bad = []
+for v, l in _acts:
+    prompts = v.split(":")[0] in _dis or v in _dis
+    warns = "\u26a0" in l
+    if prompts != warns:
+        _bad.append("%s (confirms=%s, warns=%s)" % (v, prompts, warns))
+if not _bad:
+    ok("all %d actions: warning in the label matches confirmation on a live bridge" % len(_acts))
+else:
+    no("label and behaviour disagree — the cost is discovered after clicking", _bad)
+
+# The distinction the whole jitter design rests on. If these ever collapse into one group
+# again, an operator will click the one that tunes the direction they are not listening to.
+_headings = [v[1:] for v, _ in re.findall(r'\["(#[^"]*)",\s*(null)\]',
+             re.search(r"const ACTIONS = \[(.*?)\n\];", _p, re.S).group(1))]
+if any("cannot hear the ROOM" in h for h in _headings) and \
+   any("cannot hear YOU" in h for h in _headings):
+    ok("the menu separates the two audio DIRECTIONS (they need opposite fixes)")
+else:
+    no("the two audio directions are not distinguished", _headings)
+if _headings and all(h.strip() for h in _headings):
+    ok("every action sits under a symptom heading (%d groups)" % len(_headings))
+else:
+    no("ungrouped actions", _headings)
+
 print("\n  ---- negative control: the check must be able to fail ----")
 if "definitely-not-a-real-command" not in backend:
     ok("a made-up command is correctly absent from the backend")

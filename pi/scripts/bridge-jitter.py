@@ -156,6 +156,24 @@ def diagnose():
     except Exception:
         pass
     ev["mesh_path"] = (st.get("mesh_path") or {}).get("via")
+    # Causes that are not about jitter at all but present AS jitter, or that make every other
+    # reading meaningless. Cheap to read from the status we already fetched, and each one has
+    # cost somebody an evening: a dead service looks like a network fault, a quarantined
+    # override means the code being debugged is not the code running, and a USB link that is
+    # not `configured` means the meeting laptop is not connected to anything.
+    ev["services"] = [s for s in (st.get("services") or []) if len(s) == 2 and s[1] != "active"]
+    ev["quarantined"] = st.get("quarantined") or []
+    ev["udc"] = st.get("udc")
+    try:
+        ev["wifi_dbm"] = int(str(st.get("wifi") or "").strip() or 0) or None
+    except Exception:
+        ev["wifi_dbm"] = None
+    ev["temp"] = st.get("temp")
+    ev["clock_suspect"] = st.get("clock_suspect")
+    try:
+        ev["checks"] = json.loads(_sh("curl -s --max-time 8 http://127.0.0.1:8080/api/checks") or "{}")
+    except Exception:
+        ev["checks"] = {}
     gold = _load(GOLDEN_PY, "bridge_golden")
     ev["config"] = gold.diff() if gold else None
     ev["peer"] = peer
@@ -172,6 +190,92 @@ def _rank(ev):
     fix a Wi-Fi problem.
     """
     f = []
+
+    # ---------------------------------------------------------------- AUDIO, FIRST
+    # These come before every jitter cause because they are not jitter: they are SILENCE, and
+    # a buffer cannot improve silence. Each one has actually happened here, and each one
+    # presented as something else at the time.
+    ch = ev.get("checks") or {}
+    dead = {n for n, st in (ev.get("services") or [])}
+
+    # 1. The presenter's voice never reaches the room. This is the 2026-08-12 S16LE bug's
+    #    signature: rtpL16pay refused to link, gst builds all-or-nothing, so an OPTIONAL
+    #    echo-cancel branch killed the live audio path and systemd respawned it every 2s.
+    if "bridge-feeder-audio" in dead:
+        looping = ev.get("restarts", {}).get("feeder_audio")
+        f.append({"culprit": "presenter voice path is DOWN",
+                  "confidence": "high",
+                  "detail": "bridge-feeder-audio is not running%s. The room hears nothing from "
+                            "the presenter — this is silence, not jitter, and no buffer helps."
+                            % (" and is restarting repeatedly" if looping else ""),
+                  "action": "restart", "rung": None,
+                  "note": "If it comes straight back down, the PIPELINE is broken rather than "
+                          "the service — check `running`, then revert-script. A single "
+                          "unlinkable element takes the whole pipeline with it."})
+
+    # 2. The room's audio never reaches the presenter. The 2026-08-12 `! !` bug: an empty
+    #    aec_filter left two adjacent separators and gst refused to build it, while every
+    #    other check stayed green.
+    if "bridge-return-audio" in dead:
+        f.append({"culprit": "room audio path is DOWN",
+                  "confidence": "high",
+                  "detail": "bridge-return-audio is not running. The presenter hears nothing "
+                            "from the room.",
+                  "action": "restart", "rung": None,
+                  "note": "If it will not stay up, the pipeline is broken, not the service: "
+                          "revert-script bridge-return-audio.sh to the factory copy."})
+
+    # 3. Crackle. The ONE case reset-clock is the right answer to — and reset-clock is
+    #    expensive enough (the meeting laptop loses camera, mic and speakers) that it must
+    #    never be recommended on a guess.
+    if ev.get("clock_suspect"):
+        f.append({"culprit": "degraded UAC2 audio clock",
+                  "confidence": "high",
+                  "detail": "the crackle sentry has a bad verdict on the return path — ALSA "
+                            "xruns or a click signature in the captured audio. This is the "
+                            "clock itself, not the network.",
+                  "action": "reset-clock", "rung": None,
+                  "note": "Rebuilds the USB gadget: the meeting laptop's camera, microphone "
+                          "and speakers drop and must be re-selected there. Worth it for this "
+                          "cause and harmful for any other."})
+
+    # 4. Everything on the bridge is healthy and the return stream still is not moving. The
+    #    hardware pointer is the far-end truth, so this is the meeting laptop's own output
+    #    routing — and it is a HUMAN fix, on site, with no fleet button.
+    ra = ch.get("return_audio") or {}
+    if (ra and ra.get("ok") is False and "bridge-return-audio" not in dead
+            and ev.get("udc") == "configured"):
+        f.append({"culprit": "the meeting laptop is not playing into NetBridge",
+                  "confidence": "medium",
+                  "detail": "the return service is running and the USB link is up, but the "
+                            "capture pointer is not advancing: %s. Nothing is being played "
+                            "INTO the bridge to send back."
+                            % (ra.get("detail") or "no frames"),
+                  "action": None, "rung": None,
+                  "note": "On the meeting laptop, select NetBridge as the SPEAKER / output "
+                          "device. Room audio flows because that laptop plays into it — this "
+                          "is not the microphone setting, and no fleet action can change it."})
+
+    # 5. No USB host at all. Most often a charge-only cable, which is invisible from here
+    #    except as a UDC that never reaches `configured`.
+    if ev.get("udc") and ev.get("udc") != "configured":
+        f.append({"culprit": "no USB host attached",
+                  "confidence": "high",
+                  "detail": "the gadget is '%s', not 'configured' — the meeting laptop is not "
+                            "connected to the bridge at all." % ev.get("udc"),
+                  "action": None, "rung": None,
+                  "note": "Almost always a charge-only USB cable, or an unplugged one. "
+                          "Somebody has to be at the bridge; no fleet action can fix it."})
+
+    # 6. The code being debugged is not the code running.
+    if ev.get("quarantined"):
+        f.append({"culprit": "deployed code is not running",
+                  "confidence": "high",
+                  "detail": "auto-rollback has parked %s. This bridge is running its FACTORY "
+                            "script, so any fix you deployed is not in effect."
+                            % ", ".join(ev["quarantined"]),
+                  "action": "unquarantine", "rung": None, "note": None})
+
     p = ev.get("power") or {}
     rate = (p.get("rate") or {})
     pct = rate.get("pct")
@@ -295,12 +399,38 @@ def _write_tuning(d):
     os.chmod(PRESENTER_TUNE, 0o644)      # bridge-web serves it as 'pi'
 
 
-def fix(rung):
+def _is_auto(t):
+    return bool(t) and str(t.get("by", "")) == "auto"
+
+
+def fix(rung, auto=False, why=None):
+    """Apply a ladder rung.
+
+    `auto` marks the change as the sentry's rather than a human's, and that distinction is
+    load-bearing in both directions:
+
+      * the sentry must never overwrite a rung an operator deliberately chose. An operator
+        who escalated to rung 2 because they could HEAR something would otherwise be quietly
+        pulled back to rung 1 by a machine reading a ping.
+      * the sentry may only withdraw its OWN changes (see reset). Handing back a buffer a
+        human asked for, because the network looks fine to a ping, is exactly the class of
+        unhelpful autonomy that made the old sentry tear down a live session for the crime of
+        having a pristine network.
+    """
     if rung not in RUNGS:
         return {"ok": False, "error": "rung must be one of %s" % sorted(RUNGS)}
+    cur = _read_tuning()
+    if auto and cur and not _is_auto(cur) and (cur.get("rung") or 0) > 0:
+        return {"ok": False, "skipped": "an operator set rung %s by hand; not overriding"
+                % cur.get("rung"), "rung": cur.get("rung")}
+    if auto and _is_auto(cur) and (cur.get("rung") or 0) >= rung:
+        return {"ok": True, "skipped": "already at rung %s" % cur.get("rung"),
+                "rung": cur.get("rung"), "video_interrupted": False}
     r = RUNGS[rung]
     _write_tuning({"jitter_ms": r["jitter_ms"], "rung": rung, "ts": int(time.time()),
-                   "reason": "jitter fix rung %d" % rung})
+                   "by": "auto" if auto else "operator",
+                   "reason": ("auto: %s" % (why or "network degraded")) if auto
+                             else "jitter fix rung %d" % rung})
     out = {"ok": True, "rung": rung, "what": r["what"], "cost": r["cost"],
            "applies_in": "up to 10s — the presenter app picks this up on its next poll",
            "video_interrupted": False}
@@ -312,13 +442,26 @@ def fix(rung):
     return out
 
 
-def reset():
+def reset(auto=False):
+    """Hand the buffer back to its default.
+
+    With `auto`, only the sentry's OWN changes are withdrawn. A rung an operator chose stays
+    until they clear it themselves — a ping looking healthy is not evidence that a human was
+    wrong about what they could hear.
+    """
+    cur = _read_tuning()
+    if auto and cur and not _is_auto(cur) and (cur.get("rung") or 0) > 0:
+        return {"ok": True, "skipped": "rung %s was set by an operator; leaving it"
+                % cur.get("rung")}
+    if auto and (not cur or (cur.get("rung") or 0) == 0):
+        return {"ok": True, "skipped": "nothing to withdraw"}
     existed = os.path.exists(PRESENTER_TUNE)
     # Publish an explicit "back to default" rather than deleting the file. A vanished file is
     # indistinguishable from one that was never written, so the app would keep whatever it
     # last applied and the reset would silently not happen.
     _write_tuning({"jitter_ms": 250, "rung": 0, "ts": int(time.time()),
-                   "reason": "reset to default"})
+                   "by": "auto" if auto else "operator",
+                   "reason": "auto: network recovered" if auto else "reset to default"})
     return {"ok": True, "had_override": existed, "jitter_ms": 250,
             "applies_in": "up to 10s",
             "note": "presenter buffer returns to its 250ms default"}
@@ -357,20 +500,31 @@ def _print_diag(d):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("action", choices=("diagnose", "fix", "reset"))
+    ap.add_argument("action", choices=("diagnose", "fix", "reset", "current"))
     ap.add_argument("--rung", type=int, default=1)
+    ap.add_argument("--auto", action="store_true",
+                    help="mark as the sentry's change; will not override an operator")
+    ap.add_argument("--why", default=None)
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
     if a.action == "diagnose":
         d = diagnose()
         print(json.dumps(d, indent=2)) if a.json else _print_diag(d)
     elif a.action == "fix":
-        r = fix(a.rung)
-        print(json.dumps(r, indent=2)) if a.json else print("  %s" % (r.get("what") or r.get("error")))
+        r = fix(a.rung, auto=a.auto, why=a.why)
+        if a.json:
+            print(json.dumps(r, indent=2))
+        else:
+            print("  %s" % (r.get("skipped") or r.get("what") or r.get("error")))
         return 0 if r.get("ok") else 1
+    elif a.action == "current":
+        print(json.dumps(_read_tuning() or {}, indent=2))
     else:
-        r = reset()
-        print(json.dumps(r, indent=2)) if a.json else print("  %s" % r["note"])
+        r = reset(auto=a.auto)
+        if a.json:
+            print(json.dumps(r, indent=2))
+        else:
+            print("  %s" % (r.get("skipped") or r.get("note")))
     return 0
 
 

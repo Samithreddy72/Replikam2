@@ -40,6 +40,9 @@ CLEAN = {
     "concealment": False, "resampling": False, "mesh_path": "direct",
     "config": {"saved": True, "state": "known-good", "drift": [], "restorable_count": 0},
     "peer": "100.0.0.1", "fleet_tuning": None,
+    "services": [], "quarantined": [], "udc": "configured", "wifi_dbm": -41,
+    "temp": "48'C", "clock_suspect": False,
+    "checks": {"return_audio": {"ok": True, "detail": "hw_ptr advancing"}},
 }
 def ev(**over):
     d = json.loads(json.dumps(CLEAN)); d.update(over); return d
@@ -115,6 +118,71 @@ if f["action"] is None and "deploy" in (f["note"] or "").lower():
 else:
     no("offered golden-restore for a drift it cannot fix", f)
 
+print("\n  ---- the AUDIO failures this project actually hit ----")
+# Every case below is a real incident, not a hypothetical. Silence is not jitter, so these
+# must outrank every buffer suggestion: no depth of buffer improves a dead pipeline.
+
+f = top(ev(services=[["bridge-feeder-audio", "failed"]]))
+if "presenter voice path is DOWN" in f["culprit"] and f["action"] == "restart":
+    ok("feeder-audio dead (the S16LE bug) -> the ROOM hears nothing, restart")
+else:
+    no("the 2026-08-12 endianness outage would not be named", f)
+if "no buffer helps" in f["detail"]:
+    ok("says explicitly that this is silence, not jitter")
+else:
+    no("could still be mistaken for a jitter problem", f["detail"])
+if "revert-script" in (f.get("note") or ""):
+    ok("points at revert-script if it will not stay up (a broken pipeline, not a service)")
+else:
+    no("no escalation path for a crash-looping pipeline", f.get("note"))
+
+f = top(ev(services=[["bridge-return-audio", "failed"]]))
+if "room audio path is DOWN" in f["culprit"] and f["action"] == "restart":
+    ok("return-audio dead (the '! !' bug) -> the PRESENTER hears nothing, restart")
+else:
+    no("the 2026-08-12 empty-variable outage would not be named", f)
+
+f = top(ev(clock_suspect=True))
+if f["culprit"] == "degraded UAC2 audio clock" and f["action"] == "reset-clock":
+    ok("crackle -> reset-clock, the ONE cause it is the right answer to")
+else:
+    no("reset-clock is not wired to its actual cause", f)
+if "re-selected" in (f.get("note") or ""):
+    ok("states the real cost: the meeting laptop loses camera, mic and speakers")
+else:
+    no("recommends reset-clock without naming what it breaks", f.get("note"))
+
+f = top(ev(checks={"return_audio": {"ok": False, "detail": "hw_ptr stalled at 0"}}))
+if "not playing into NetBridge" in f["culprit"] and f["action"] is None:
+    ok("services fine but no frames -> the meeting laptop's OUTPUT setting, no button")
+else:
+    no("would send an operator to restart things that are already working", f)
+if "SPEAKER" in (f.get("note") or "") and "not the microphone" in (f.get("note") or ""):
+    ok("names the SPEAKER setting — the direction that was got wrong once before")
+else:
+    no("ambiguous about which device setting is at fault", f.get("note"))
+
+f = top(ev(udc="not attached"))
+if f["culprit"] == "no USB host attached" and f["action"] is None:
+    ok("USB not configured -> charge-only cable, honestly no fleet fix")
+else:
+    no("offered a remote fix for an unplugged cable", f)
+
+f = top(ev(quarantined=["bridge-return-audio.sh"]))
+if f["culprit"] == "deployed code is not running" and f["action"] == "unquarantine":
+    ok("auto-rollback parked the override -> unquarantine")
+else:
+    no("the code being debugged is not the code running, and nothing says so", f)
+
+print("\n  ---- silence outranks jitter ----")
+c = culprits(ev(services=[["bridge-return-audio", "failed"]],
+                path={"reachable": True, "loss_pct": 0.0, "min_ms": 5, "avg_ms": 22,
+                      "max_ms": 95, "mdev_ms": 26.0}))
+if c[0] == "room audio path is DOWN":
+    ok("a dead audio path outranks a noisy network")
+else:
+    no("would tune a buffer while the pipeline is dead", c)
+
 print("\n  ---- ordering: the cause with no software fix comes first ----")
 c = culprits(ev(power={"ok": False, "ever": True, "summary": "browning out",
                        "rate": {"pct": 3.0, "samples": 500, "live": 15}},
@@ -177,6 +245,52 @@ if os.path.exists(bj.PRESENTER_TUNE):
     ok("reset leaves an explicit marker (a vanished file is not an instruction)")
 else:
     no("reset deleted the file; the app would keep the old value")
+
+print("\n  ---- who owns the buffer: the sentry must never overrule a human ----")
+# Plan D lets jitter-sentry act DURING a live session, which is the only time it matters.
+# That is safe only if it can never undo a deliberate choice. The old sentry's worst moment
+# was tearing down a live stream because the network had been pristine for ten minutes —
+# unhelpful autonomy is the specific failure mode being guarded here.
+bj.PRESENTER_TUNE = os.path.join(tempfile.mkdtemp(), "own.json")
+r = bj.fix(1, auto=True, why="loss=0% jitter=30ms")
+if r["ok"] and (bj._read_tuning() or {}).get("by") == "auto":
+    ok("the sentry can apply rung 1 on its own")
+else:
+    no("sentry cannot act", r)
+r = bj.fix(1, auto=True)
+if r.get("skipped"):
+    ok("re-applying the same rung is skipped (no gap in room audio every 20s)")
+else:
+    no("sentry would rebuild the pipeline on every loop", r)
+r = bj.fix(2, auto=True)
+if r["ok"] and (bj._read_tuning() or {}).get("rung") == 2:
+    ok("the sentry may ESCALATE its own rung when trouble persists")
+else:
+    no("sentry cannot escalate", r)
+
+bj.fix(1)                                  # operator takes ownership, deliberately lower
+r = bj.fix(2, auto=True)
+if not r["ok"] and "operator" in (r.get("skipped") or ""):
+    ok("the sentry refuses to override a rung an operator set by hand")
+else:
+    no("a machine reading a ping overrode a human who could HEAR the problem", r)
+r = bj.reset(auto=True)
+if r.get("skipped") and (bj._read_tuning() or {}).get("rung") == 1:
+    ok("the sentry withdraws only its OWN changes, never the operator's")
+else:
+    no("sentry handed back a buffer a human asked for", (r, bj._read_tuning()))
+r = bj.reset()
+if (bj._read_tuning() or {}).get("rung") == 0:
+    ok("the operator can always take it back")
+else:
+    no("operator lost control of their own setting", bj._read_tuning())
+
+bj.fix(1, auto=True)
+r = bj.reset(auto=True)
+if r["ok"] and (bj._read_tuning() or {}).get("rung") == 0:
+    ok("on recovery the sentry does withdraw what it applied itself")
+else:
+    no("auto changes are never cleaned up", r)
 
 print("\n  ---- negative control ----")
 if bj._rank(ev(concealment=False)) and "opus concealment is ON" not in culprits(ev()):
