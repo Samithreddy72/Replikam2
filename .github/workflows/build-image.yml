@@ -90,7 +90,7 @@ jobs:
           # --repo is REQUIRED here: we cd'd out of the checkout, so gh can't infer the
           # repo from git (it errored "not a git repository" otherwise).
           gh release create "v${V}" --repo "$REPO" \
-            --title "netbridge-os ${V}" \
-            --notes "Automated build. Signed: ${{ steps.pkg.outputs.signed }}. Assets: full-disk flashable image (netbridge-os-${V}.img.xz, A/B + /data + read-only root), OTA rootfs (rootfs.tar.zst for bridge-update.sh), signed manifests, and the OTA public key." \
+            --title "NetBridge OS ${V} — FLASHABLE SD-card image (use the .img.xz)" \
+            --notes "FLASH THIS: netbridge-os-${V}.img.xz — the full SD-card image. Raspberry Pi Imager → Choose OS → Use custom → pick that file. Change NO settings; the card configures itself. ⛔ DO NOT FLASH rootfs.tar.zst — it sits next to the image and is nearly the same size, but it is the over-the-air payload bridge-update.sh writes to a standby A/B slot on a RUNNING bridge; flashing it produces a dead card. Verify first: shasum -a 256 must match sha256= in manifest-disk.txt, and the byte size must match size= (a truncated download is the most common failure). Signature: openssl dgst -sha256 -verify ota-pubkey.pem -signature manifest-disk.txt.sig manifest-disk.txt. After flashing: boot, wait ~90s, join BridgeSetup-XXXX from a phone, give it the venue Wi-Fi, then Claim it on the fleet and set a PIN. ⚠️ Test-boot on a SPARE card first — a boot-layout bug in this this project history produced five un-bootable images. ⚠️ This image contains a fleet enrolment token; treat the file as confidential. Signed: ${{ steps.pkg.outputs.signed }}." \
             ./* \
           || gh release upload "v${V}" --repo "$REPO" ./* --clobber
