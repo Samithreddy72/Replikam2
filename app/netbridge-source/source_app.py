@@ -1255,6 +1255,7 @@ class BridgeWatch:
         self.last = None
         self.live_since = 0.0
         self.power = None
+        self.give_up = set()   # symptoms a repair has proven it cannot fix
 
     def snapshot(self):
         with self.lock:
@@ -1281,7 +1282,7 @@ class BridgeWatch:
     def _reset(self):
         with self.lock:
             self.live_since = 0.0
-            self.strikes, self.repairs = {}, {}
+            self.strikes, self.repairs, self.give_up = {}, {}, set()
             self.last_checks, self.reachable, self.last_poll = None, None, 0.0
             self.last = None
             self.power = None
@@ -1325,10 +1326,24 @@ class BridgeWatch:
                     headers={"Content-Type": "application/json"}, method="POST")
                 with urllib.request.urlopen(req, timeout=10) as r:
                     res = json.loads(r.read().decode("utf-8", "replace"))
-                return "room audio was not coming back -> re-pointed the bridge at %s (%s)" % (
-                    me, "changed" if res.get("changed") else "already correct")
             except Exception as e:
                 return "room audio was not coming back -> could not re-point the bridge (%s)" % e
+
+            if not res.get("changed"):
+                # The bridge was ALREADY pointed at us, so this repair changed nothing and
+                # repeating it never will. Observed 2026-08-12: return audio was red because
+                # the client laptop was not capturing its microphone — a fault on the far side
+                # of the USB cable that no peer address can fix — and this loop re-issued
+                # set-peer every tick, logging "(already correct)" each time.
+                #
+                # Stop attempting it and say what is actually wrong. A supervisor that keeps
+                # applying a fix it can see had no effect is just noise, and it hid the real
+                # cause behind its own chatter.
+                self.give_up.add("return_audio")
+                return ("room audio is not coming back, and the bridge is already pointed at "
+                        "%s — so this is not a mesh problem. The meeting laptop is most likely "
+                        "not capturing the NetBridge microphone; select it there." % me)
+            return "room audio was not coming back -> re-pointed the bridge at %s" % me
         return None
 
     def _tick(self):
@@ -1388,7 +1403,11 @@ class BridgeWatch:
             if val.get("ok"):
                 with self.lock:
                     self.strikes[key] = 0
+                    self.give_up.discard(key)      # it recovered; allow repairs again
                 continue
+            with self.lock:
+                if key in self.give_up:
+                    continue                        # proven unfixable from here — stay quiet
 
             with self.lock:
                 self.strikes[key] = self.strikes.get(key, 0) + 1
