@@ -11,6 +11,17 @@ still do in the meantime.
 
 ---
 
+## 0. Your right to use this
+
+This project is **proprietary — © 2026 Samith Reddy, all rights reserved** (see
+[LICENSE](../LICENSE)). Inheriting the repository does not by itself grant you the right to
+use it. You need written authorisation from the owner, and it can be withdrawn.
+
+Treat OS images as confidential: each one carries a fleet enrolment token, so anyone holding
+an image file can add a device to the fleet.
+
+---
+
 ## 1. What must be handed over
 
 | # | Item | Lives at | Without it you lose |

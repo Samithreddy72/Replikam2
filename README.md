@@ -232,3 +232,17 @@ This is a working system, not a finished product. Kept deliberately visible:
   Every available software mitigation is applied and measured ineffective.
 - **Test-boot every new image on a spare card.** A boot-layout bug in this repo's history
   produced several un-bootable images.
+
+---
+
+## Licence
+
+**Proprietary — © 2026 Samith Reddy. All rights reserved.** See [LICENSE](LICENSE).
+
+This is not open source. Access to this repository, to a released binary, or to an OS image
+grants no right to use, copy, modify or distribute it. Use requires written authorisation
+from the owner.
+
+⚠️ **OS images contain a fleet enrolment token.** Anyone holding an image file can add a
+device to the fleet, so image files are confidential — do not share or publish them. Rotate
+`BOOTSTRAP_TOKENS` on the fleet host if one leaks.

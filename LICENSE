@@ -1,0 +1,63 @@
+Copyright (c) 2026 Samith Reddy. All rights reserved.
+
+PROPRIETARY AND CONFIDENTIAL
+
+This software, its source code, documentation, build artifacts, disk images and
+all associated materials (together, "the Software") are the exclusive property
+of Samith Reddy ("the Owner").
+
+The Software is NOT open source and is NOT licensed for public use.
+
+1. NO GRANT OF RIGHTS
+   No licence, right, title or interest in the Software is granted to any
+   person by their receipt or possession of it. Access to this repository, to
+   an image file, or to a released binary does not confer any right to use,
+   copy, modify or distribute the Software.
+
+2. PERMITTED USE
+   Only persons expressly and individually authorised in writing by the Owner
+   may use the Software, and then only for the purpose the Owner has stated.
+   Authorisation may be withdrawn by the Owner at any time, for any reason,
+   with immediate effect.
+
+3. PROHIBITED WITHOUT PRIOR WRITTEN CONSENT
+   Copying, publishing, mirroring, sublicensing, selling, renting, disclosing
+   or otherwise making the Software available to any third party; creating
+   derivative works from it; and reverse engineering, decompiling or
+   disassembling any binary form of it.
+
+4. CONFIDENTIALITY
+   The Software includes non-public technical material. Anyone given access
+   must keep it confidential and must not disclose it, in whole or in part,
+   without the Owner's prior written consent.
+
+   Note in particular that OS images built from this repository contain a
+   fleet enrolment token. Image files must be treated as confidential and
+   must not be shared or published.
+
+5. RETURN OR DESTRUCTION
+   On the Owner's request, or when authorisation ends, an authorised person
+   must stop using the Software and delete every copy in their possession,
+   including images, binaries, backups and credentials.
+
+6. NO WARRANTY
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+7. LIMITATION OF LIABILITY
+   IN NO EVENT SHALL THE OWNER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+   FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+   DEALINGS IN THE SOFTWARE.
+
+8. THIRD-PARTY COMPONENTS
+   The Software incorporates and distributes third-party components that
+   remain under their own licences, including but not limited to Raspberry Pi
+   OS and its packages, the Linux kernel, ffmpeg, GStreamer, Tailscale, Python
+   and its packages, FastAPI, Caddy and uvc-gadget. Nothing in this licence
+   limits any right granted to you by those licences in respect of those
+   components. Those licences govern only their own components, not the
+   Owner's original work.
+
+Contact: samithreddy72@gmail.com
