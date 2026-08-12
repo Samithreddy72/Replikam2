@@ -564,6 +564,29 @@ def list_payloads(actor=Depends(auth.require_admin)):
     return out
 
 
+@app.get("/admin/devices/{device_id}/commands")
+def list_commands(device_id: str, limit: int = 20, actor=Depends(auth.require_admin),
+                  db: Session = Depends(get_db)):
+    """Recent commands for a device, WITH their output.
+
+    The device has always posted results to /v1/commands/{id}/result and they have always
+    been stored — but nothing served them back. "Fetch recent logs" queued a command whose
+    output no operator could ever see; answering "did that action actually work?" meant
+    opening the database over SSH. An action you cannot verify is an action you cannot trust.
+    """
+    dev = db.get(Device, device_id)
+    if not dev or dev.org_id != actor.org:
+        raise HTTPException(404, "no such device")
+    from .models import Command
+    rows = db.scalars(select(Command).where(Command.device_id == device_id)
+                      .order_by(desc(Command.id)).limit(max(1, min(limit, 100)))).all()
+    return [{"id": c.id, "type": c.type, "status": c.status,
+             "args": c.args, "output": c.output,
+             "created_at": c.created_at.isoformat() if c.created_at else None,
+             "completed_at": c.completed_at.isoformat() if c.completed_at else None}
+            for c in rows]
+
+
 @app.post("/admin/devices/{device_id}/commands")
 def issue_command(device_id: str, body: IssueCommandIn, actor=Depends(auth.require_admin),
                   db: Session = Depends(get_db)):

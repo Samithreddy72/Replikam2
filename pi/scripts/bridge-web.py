@@ -468,7 +468,8 @@ def checks():
         video_detail = "feeder pid %s used %d cpu ticks in %.0fs" % (pid, dt, win)
 
     if p0 is None or p1 is None:
-        audio_ok, audio_detail = False, "return capture stream not open (client mic path idle)"
+        audio_ok, audio_detail = False, ("the meeting laptop is not playing audio into NetBridge — "
+                       "select NetBridge as its SPEAKER/output, then play something")
     else:
         dp = p1 - p0
         rate = dp / elapsed
