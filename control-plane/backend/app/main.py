@@ -374,6 +374,44 @@ def claim_device(device_id: str, body: ClaimIn, actor=Depends(auth.require_admin
     return _device_view(dev)
 
 
+@app.delete("/admin/devices/{device_id}")
+def forget_device(device_id: str, actor=Depends(auth.require_admin),
+                  db: Session = Depends(get_db)):
+    """Forget a device so it re-enrols as UNCLAIMED.
+
+    There was no way to do this at all. Device identity comes from the Pi's CPU serial, so
+    reflashing a card does NOT produce a new device — it re-enrols into the existing row and
+    keeps whatever name and claim that row already had. Reassigning hardware to someone else,
+    or testing the first-run flow, therefore had no supported path and meant editing the
+    database by hand.
+
+    The bridge recovers on its own: bridge-agent discards a token the fleet rejects and
+    re-enrols with the bootstrap token, so it reappears within a poll cycle as
+    "Unclaimed - just joined". No reboot, no reflash.
+
+    This DELETES the device's history - telemetry, alerts, commands, diagnostics bundles -
+    because a row that outlives its device is worse than no row: it attributes the last
+    owner's incidents to the next one.
+    """
+    dev = db.get(Device, device_id)
+    if not dev or dev.org_id != actor.org:
+        raise HTTPException(404, "no such device")
+    label = dev.name or dev.pairing_code or device_id
+    from .models import Telemetry, AlertEvent, Command, DiagBundle
+    removed = 0
+    for model in (Telemetry, AlertEvent, Command, DiagBundle):
+        try:
+            removed += db.query(model).filter(model.device_id == device_id).delete(
+                synchronize_session=False)
+        except Exception:
+            pass
+    db.delete(dev)
+    db.commit()
+    _audit(db, actor, "device:forget", "%s (%d history rows)" % (label, removed))
+    return {"ok": True, "forgot": label, "history_rows_removed": removed,
+            "note": "the bridge will re-enrol as Unclaimed within a poll cycle"}
+
+
 @app.post("/admin/devices/{device_id}/mesh-key")
 def reissue_mesh_key(device_id: str, actor=Depends(auth.require_admin),
                      db: Session = Depends(get_db)):
@@ -948,7 +986,13 @@ def alerts_history(actor=Depends(auth.require_admin), db: Session = Depends(get_
     # Filter to the org's devices IN SQL before LIMIT — fetching the newest 200
     # globally then filtering in Python could return an EMPTY history for a quiet
     # org if noisier tenants produced 200 newer events (noisy-neighbor starvation).
-    org_ids = [d.id for d in db.scalars(select(Device.id).where(Device.org_id == actor.org)).all()]
+    # db.scalars(select(Device.id)) already yields the IDs themselves, not Device rows.
+    # Iterating them as objects and reading .id raised
+    #     AttributeError: 'str' object has no attribute 'id'
+    # on every call, so this endpoint had been returning 500 for its entire life and the
+    # panel's alert history was permanently empty — including the flapped-overnight case
+    # this function exists to show.
+    org_ids = list(db.scalars(select(Device.id).where(Device.org_id == actor.org)).all())
     if not org_ids:
         return []
     rows = db.scalars(select(AlertEvent).where(AlertEvent.device_id.in_(org_ids))

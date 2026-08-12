@@ -281,6 +281,11 @@ function statusPill(dev){
   const t = dev.latest || {}, s = t.streams || {};
   if (!dev.online) return `<span class="pill idle">offline ${agoDays(dev.last_seen)}</span>`;
   const pwr = powerPill(dev);
+  // A bridge nobody has claimed yet is NEW before it is anything else. Showing only its
+  // first alert here hid the one thing the operator was waiting for — and a brand-new
+  // bridge almost always has a transient alert while its services finish starting.
+  if (!dev.claimed)
+    return `<span class="pill live">🆕 claim me</span>` + pwr;
   if (dev.alerts && dev.alerts.length)
     return `<span class="pill warn">${dev.alerts[0].kind.replace("_"," ")}</span>` + pwr;
   // Power is shown ALONGSIDE live/online, never instead of it: the stream really is up, and
@@ -439,7 +444,7 @@ function render(){
       tr.innerHTML = `<td class="dev dim">🆕 Unclaimed · ${d.pairing_code||d.id}</td>
         <td>${statusPill(d)}</td><td class="dim">—</td><td class="dim">${d.version||"?"}</td>
         <td class="dim">just joined</td>
-        <td style="text-align:right"><select class="act"></select> <button class="claimbtn">Claim</button></td>`;
+        <td style="text-align:right"><button class="claimbtn">Claim</button> <select class="act"></select></td>`;
       // Read-only only. Repairing or rebooting a device you have not adopted is somebody
       // else's bridge until you claim it — but LOOKING at one is how you decide.
       const usel = tr.querySelector(".act");

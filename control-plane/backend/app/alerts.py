@@ -87,11 +87,38 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
         out.append({"kind": "offline", "detail": "no heartbeat"})
         return out  # offline has no one-click fix; a human must power-cycle it
     t = dev.latest or {}
-    thr = (t.get("throttled") or "").strip()
-    if thr and thr not in ("0x0", "throttled=0x0", ""):
-        out.append({"kind": "throttled", "detail": thr})
+    # POWER. Alert on what is HAPPENING, not on a flag that can never clear.
+    #
+    # The raw throttle word carries STICKY bits: once a board has browned out, bit16 and
+    # bit18 stay set until it reboots. Alerting on "anything but 0x0" therefore re-fires
+    # forever on any board that ever dipped — and it got worse the moment devices started
+    # reporting that value honestly instead of a misleading 0x0.
+    #
+    # Prefer the decoded verdict: alert while it is ACTUALLY browning out, or when the
+    # measured rate is high enough to be audible (2%+; 0.5% was confirmed clean by ear).
+    # Fall back to the raw word only for older bridges that do not send `power` yet.
+    pw = t.get("power") or {}
+    rate = (pw.get("rate") or {}).get("pct")
+    if pw:
+        if pw.get("live"):
+            out.append({"kind": "throttled", "detail": "browning out now (%s)" % pw.get("raw")})
+        elif rate is not None and rate >= 2.0:
+            out.append({"kind": "throttled",
+                        "detail": "browning out %.1f%% of recent seconds" % rate})
+    else:
+        thr = (t.get("throttled") or "").strip()
+        if thr and thr not in ("0x0", "throttled=0x0", ""):
+            out.append({"kind": "throttled", "detail": thr})
+
+    # SERVICES. systemd's transitional states are not failures.
+    #
+    # This alerted on anything that was not exactly "active", so a service in `activating`
+    # — i.e. starting normally — raised service_down. bridge-feeder-audio cycles routinely,
+    # and on 2026-08-12 that produced 18 alerts in 20 minutes, every one emailed. Real
+    # failure is `failed` or `inactive`; `activating`, `deactivating` and `reloading` mean
+    # systemd is mid-transition and will settle without anyone being told.
     for name, st in (t.get("services") or []):
-        if st != "active":
+        if st in ("failed", "inactive", "dead"):
             out.append({"kind": "service_down", "detail": "%s=%s" % (name, st)})
     temp = (t.get("temp") or "").replace("'C", "").replace("C", "")
     try:
