@@ -99,9 +99,20 @@ fi
 for f in pi/scripts/bridge-feeder-audio.sh pi/scripts/bridge-return-audio.sh \
          pi/scripts/bridge-feeder-net.sh; do
   [ -f "$f" ] || continue
-  pipe=$(tr '\n' ' ' < "$f" | grep -oE 'gst-launch-1\.0 .*' | head -1)
-  [ -n "$pipe" ] || { echo "  SKIP  $(basename "$f") (no gst-launch line found)"; SKIP=$((SKIP+1)); continue; }
-  pipe=${pipe#gst-launch-1.0 }
+  # Some scripts invoke gst through a variable ("$GST"), so grepping for the literal
+  # gst-launch-1.0 misses them. bridge-return-audio.sh does exactly that — and it was the ONE
+  # script with a broken pipeline: `! ${aec_filter}` expanded to "! !" whenever echo
+  # cancellation was off, so gst refused to build it and the presenter heard nothing from the
+  # room. The test SKIPPED it with "no gst-launch line found" and that skip read as harmless.
+  #
+  # A SKIP on the file you were trying to check is a FAILURE of the check. Match the variable
+  # form too, and treat an unextractable pipeline as a hard error rather than a shrug.
+  pipe=$(tr '\n' ' ' < "$f" | grep -oE '(gst-launch-1\.0|"\$GST"|\$GST) [^&]*' | head -1)
+  if [ -z "$pipe" ]; then
+    echo "  FAIL  $(basename "$f") — could not extract a pipeline; this check is BLIND to it"
+    FAIL=$((FAIL+1)); continue
+  fi
+  pipe=${pipe#gst-launch-1.0 }; pipe=${pipe#\"\$GST\" }; pipe=${pipe#\$GST }
   pipe=$(sed -E \
       -e 's#alsasink[^!]*#fakesink #g' \
       -e 's#alsasrc[^!]*#audiotestsrc num-buffers=1 #g' \
@@ -110,6 +121,12 @@ for f in pi/scripts/bridge-feeder-audio.sh pi/scripts/bridge-return-audio.sh \
       -e 's#osxaudiosink[^!]*#fakesink #g' \
       -e 's#\$\{[A-Z_]+:-([^}]*)\}#\1#g' \
       -e 's#\$\{[A-Z_]+\}##g' <<<"$pipe")
+  # An unset shell variable between two pipeline separators yields "! !", which gst reports
+  # only as a vague "syntax error". Catch it here, where the message can name the cause.
+  if grep -qE '![[:space:]]*!' <<<"$(sed -E 's#\$\{[A-Za-z_]+:-[^}]*\}##g; s#\$\{[A-Za-z_]+\}##g' <<<"$pipe")"; then
+    echo "  FAIL  $(basename "$f") — empty variable leaves '! !' in the pipeline"
+    FAIL=$((FAIL+1)); continue
+  fi
   # shellcheck disable=SC2086
   check "$(basename "$f")" $pipe
 done

@@ -126,8 +126,7 @@ start_pipeline() {
     ! queue max-size-time=300000000 leaky=downstream \
     ! audioconvert $pre! audioresample quality=10 \
     ! audio/x-raw,rate=48000,channels=2,format=S16LE \
-    ! ${aec_filter}\
-    ! opusenc bitrate=128000 audio-type=generic inband-fec=true packet-loss-percentage=20 \
+    ! ${aec_filter}opusenc bitrate=128000 audio-type=generic inband-fec=true packet-loss-percentage=20 \
     ! rtpopuspay pt=97 \
     ! udpsink host="$DEST_IP" port="$DEST_PORT" sync=false &
   GST_PID=$!
