@@ -13,6 +13,47 @@ PRODUCT="UVC Gadget"
 BOARD=$(strings /proc/device-tree/model)
 UDC=$(ls /sys/class/udc) # will identify the 'first' UDC
 
+# ---------------------------------------------------------------- audio tuning overrides
+# /data/gadget-tuning.conf lets the two USB-audio parameters that actually matter be changed
+# WITHOUT rebuilding and reflashing an image. They can only be set here, at boot, before the
+# function is linked into a configuration — configfs refuses them afterwards, and trying it on
+# a running bridge took this bridge down twice on 2026-08-13. So the file is read here, once,
+# and applied before anything is linked.
+#
+# Format, one KEY=VALUE per line:
+#     UAC2_C_SYNC=async          # or adaptive
+#     UAC2_REQ_NUMBER=32         # 2..64
+#
+# The file is NOT sourced. It is running as root at boot, and sourcing a writable file would
+# make /data a place where anyone able to write it could execute arbitrary code. Only known
+# keys are read, and only values that pass validation are used — anything else falls back to
+# the built-in default and says so in the log, because a typo must never leave the bridge
+# without working audio.
+TUNE_FILE=/data/gadget-tuning.conf
+tune_get() {   # tune_get <KEY> <default>
+	_v=""
+	if [ -f "$TUNE_FILE" ]; then
+		_v=$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$TUNE_FILE" 2>/dev/null \
+		     | tail -1 | cut -d= -f2- | tr -d ' \t"'"'"'')
+	fi
+	[ -n "$_v" ] && echo "$_v" || echo "$2"
+}
+tune_sync() {
+	_s=$(tune_get UAC2_C_SYNC "${UAC2_C_SYNC:-adaptive}")
+	case "$_s" in
+		async|adaptive) echo "$_s" ;;
+		*) echo "  tuning: ignoring c_sync='$_s' (expected async|adaptive)" >&2; echo adaptive ;;
+	esac
+}
+tune_reqnum() {
+	_r=$(tune_get UAC2_REQ_NUMBER "${UAC2_REQ_NUMBER:-32}")
+	case "$_r" in
+		''|*[!0-9]*) echo "  tuning: ignoring req_number='$_r' (not a number)" >&2; echo 32 ;;
+		*) if [ "$_r" -ge 2 ] && [ "$_r" -le 64 ]; then echo "$_r"
+		   else echo "  tuning: ignoring req_number='$_r' (expected 2..64)" >&2; echo 32; fi ;;
+	esac
+}
+
 echo "Detecting platform:"
 echo "  board : $BOARD"
 echo "  udc   : $UDC"
@@ -165,7 +206,9 @@ case "$1" in
 	# a documented source of drift -> stutter-burst -> multi-second stream resets
 	# on continuous audio (music), while pause-laden speech self-heals. Adaptive
 	# is what real USB soundcards use: no feedback dance, host streams steadily.
-	echo adaptive > functions/uac2.usb0/c_sync || true
+	C_SYNC=$(tune_sync)
+	echo "  tuning: c_sync=$C_SYNC  req_number=$(tune_reqnum)  (edit $TUNE_FILE to change)"
+	echo "$C_SYNC" > functions/uac2.usb0/c_sync || true
 	# Deeper URB queue (default 2) rides out dwc2 scheduling latency.
 	# IN-FLIGHT USB REQUESTS. At a 1ms service interval this is literally how many
 	# milliseconds the gadget can absorb the driver being late before audio is LOST — not
@@ -184,7 +227,7 @@ case "$1" in
 	# 32 = 32ms of tolerance for ~96-byte mono packets: a few KB of memory, no latency cost
 	# (these are queued requests, not added buffering in the audio path).
 	# See raspberrypi/linux#5188 and the CM4 gadget interrupt-load thread.
-	echo "${UAC2_REQ_NUMBER:-32}" > functions/uac2.usb0/req_number || true
+	echo "$(tune_reqnum)" > functions/uac2.usb0/req_number || true
 	echo 1 > functions/uac2.usb0/c_chmask
 	# Return path (the "Speakers/Source" the client plays into): SINGLE 48 kHz rate.
 	#

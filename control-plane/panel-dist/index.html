@@ -181,6 +181,12 @@ const ACTIONS = [
   ["restart",         "Restart media ⚠ ~5 s video freeze"],
   ["reboot",          "Bridge wedged → reboot ⚠ ~30 s outage"],
 
+  ["#Audio experiments — take effect on the NEXT REBOOT", null],
+  ["gadget-tune-show",  "What audio settings are set?"],
+  ["gadget-tune:async", "Try ASYNC sync mode (then reboot)"],
+  ["gadget-tune:adaptive", "Back to ADAPTIVE sync mode (then reboot)"],
+  ["gadget-tune-clear", "Clear experiments — built-in defaults (then reboot)"],
+
   ["#Baseline — what 'working' looked like", null],
   ["golden-save",     "Sounds good right now → save as known-good…"],
   ["golden-restore",  "Config drifted → restore known-good ⚠ may briefly freeze video"],
@@ -434,6 +440,13 @@ async function doAction(devId, devName, value, isLive){
     if (pin === null) return;
     if (!/^\d{6}$/.test(pin)) { toast("PIN must be exactly 6 digits"); return; }
     args = {pin};
+  }
+  if (type === "gadget-tune"){
+    // These cannot be applied to a running gadget — configfs refuses, and forcing it took a
+    // live bridge down twice. The file is written now and read at the next boot, so the
+    // action itself is harmless and the reboot is a separate, deliberate click.
+    args = {key: "UAC2_C_SYNC", value: mode};
+    if (!confirm(`Set the audio sync mode on ${devName} to "${mode}"?\n\nThis writes a setting; it does NOT change anything yet. Reboot the bridge when you are ready for it to take effect.`)) return;
   }
   if (type === "golden-save"){
     // Overwriting a baseline is quiet and irreversible — the old one is simply gone — and

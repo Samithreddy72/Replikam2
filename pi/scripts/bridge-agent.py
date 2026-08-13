@@ -43,6 +43,13 @@ ALLOWED = {
                                 _script_name(a.get("name")), _src(a.get("source"))],
     "revert-script": lambda a: ["sudo", "/usr/local/bin/bridge-deploy-script.sh",
                                 "--revert", _script_name(a.get("name"))],
+    # Audio parameters that can only be applied at boot. The command WRITES the file; a
+    # separate reboot applies it. Deliberately two steps — an action that silently reboots a
+    # bridge is not something anyone should discover by clicking.
+    "gadget-tune":  lambda a: ["sudo", "/usr/local/bin/bridge", "gadget-tune", "set",
+                               _tunekey(a.get("key")), _tuneval(a.get("key"), a.get("value"))],
+    "gadget-tune-show":  lambda a: ["/usr/local/bin/bridge", "gadget-tune", "show"],
+    "gadget-tune-clear": lambda a: ["sudo", "/usr/local/bin/bridge", "gadget-tune", "clear"],
     # Jitter: diagnose names the culprit; fix applies a ladder rung. Rung 1 writes a tuning
     # file the PRESENTER APP picks up on its next poll — the buffer that matters lives on the
     # presenter's laptop, not here, so this is the only path a fleet click has to it.
@@ -124,6 +131,29 @@ def _script_name(v):
     if not re.fullmatch(r"[a-zA-Z0-9._-]+\.sh", v) or v.startswith("."):
         raise ValueError("bad script name")
     return v
+
+def _tunekey(v):
+    """Only the two boot-time audio parameters. Not a shell boundary (argv), but a
+    blast-radius one: this value selects which knob a remote party may turn."""
+    v = str(v or "")
+    if v not in ("UAC2_C_SYNC", "UAC2_REQ_NUMBER"):
+        raise ValueError("key must be UAC2_C_SYNC or UAC2_REQ_NUMBER")
+    return v
+
+
+def _tuneval(key, v):
+    """Validate per key. The device validates again — this is the first of two gates, not
+    the only one."""
+    v = str(v or "")
+    if key == "UAC2_C_SYNC":
+        if v not in ("async", "adaptive"):
+            raise ValueError("c_sync must be async or adaptive")
+        return v
+    n = int(v)
+    if not (2 <= n <= 64):
+        raise ValueError("req_number must be 2..64")
+    return str(n)
+
 
 def _rung(v):
     """Which step of the jitter ladder. Bounded because the rungs differ in DAMAGE, not just
