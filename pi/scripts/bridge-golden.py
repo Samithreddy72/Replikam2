@@ -35,6 +35,16 @@ Usage:
 import argparse, glob, hashlib, json, os, re, subprocess, sys, time
 
 GOLDEN = "/data/golden-profile.json"
+# The FACTORY baseline, written into the image at build time and living on the read-only
+# root, so it survives a /data wipe.
+#
+# WHY IT EXISTS: a freshly flashed card had no baseline at all. The Config column read
+# "no baseline" and "restore known-good" had nothing to restore TO — on the very card where
+# drift is most likely, because everything on it is new. Now every bridge has a floor from
+# first boot: the configuration that was verified by ear on this hardware.
+#
+# Precedence: an operator's own save always wins. The factory copy is a floor, not a ceiling.
+FACTORY = "/etc/bridge/golden-default.json"
 NET_DEF = "/etc/default/bridge-net"
 TUNE_DEF = "/etc/default/bridge-return-tune"
 PEER_DEF = "/etc/default/bridge-return-audio"
@@ -149,25 +159,40 @@ def diff():
 
 
 def load():
-    txt = _read(GOLDEN)
-    if not txt:
-        return None
-    try:
-        return json.loads(txt)
-    except Exception:
-        return None
+    """The active baseline: the operator's if they have saved one, else the factory floor.
+
+    Returns the profile with `source` set to "operator" or "factory" so every caller can say
+    WHICH baseline it is comparing against. "Matches the factory default" and "matches the
+    state you verified last Tuesday" are different claims and must not read the same.
+    """
+    for path, src in ((GOLDEN, "operator"), (FACTORY, "factory")):
+        txt = _read(path)
+        if not txt:
+            continue
+        try:
+            prof = json.loads(txt)
+        except Exception:
+            continue                      # a corrupt operator file must fall through, not win
+        if isinstance(prof, dict) and prof.get("state"):
+            prof["source"] = src
+            return prof
+    return None
 
 
-def save(note=None):
-    prof = {"saved_at": int(time.time()), "note": note or "", "state": collect()}
-    tmp = GOLDEN + ".tmp"
-    os.makedirs(os.path.dirname(GOLDEN), exist_ok=True)
+def save(note=None, factory=False, state=None):
+    """Write a baseline. `factory` targets the read-only root and is only writable at image
+    build time; `state` lets the builder supply values it cannot measure on a build host."""
+    target = FACTORY if factory else GOLDEN
+    prof = {"saved_at": int(time.time()), "note": note or "",
+            "state": state if state is not None else collect()}
+    tmp = target + ".tmp"
+    os.makedirs(os.path.dirname(target), exist_ok=True)
     with open(tmp, "w") as f:
         json.dump(prof, f, indent=2, sort_keys=True)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, GOLDEN)          # atomic: a half-written baseline is worse than none
-    os.chmod(GOLDEN, 0o644)          # bridge-web runs as 'pi' and must be able to read it
+    os.replace(tmp, target)          # atomic: a half-written baseline is worse than none
+    os.chmod(target, 0o644)          # bridge-web runs as 'pi' and must be able to read it
     return prof
 
 

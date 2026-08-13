@@ -8,6 +8,18 @@ D=/tmp/diag-$TS; mkdir -p $D /home/pi/diagnostics
 journalctl -b --no-pager -n 2000 > $D/journal-tail.txt 2>/dev/null
 dmesg 2>/dev/null | tail -300 > $D/dmesg.txt
 cp /home/pi/flight.txt /home/pi/netlog.txt $D/ 2>/dev/null
+# INTERRUPT LOAD — the number that settles whether the audio gaps come from the USB
+# controller. dwc2 has no hardware (u)frame tracking, so any periodic endpoint forces the
+# driver to unmask SOF interrupts; on other people's hardware that has measured 250-300k/sec
+# and it is host-dependent, which is why it looks intermittent. Two samples a second apart so
+# the RATE is readable, not just a since-boot total that means nothing on its own.
+{ echo "== /proc/interrupts (sample 1) =="; cat /proc/interrupts
+  echo; echo "== 1 second =="; sleep 1
+  echo "== /proc/interrupts (sample 2) =="; cat /proc/interrupts
+  echo; echo "== softirqs =="; cat /proc/softirqs
+  echo; echo "== load =="; cat /proc/loadavg; uptime
+} > $D/interrupts.txt 2>/dev/null
+
 { echo "UDC: $(cat /sys/class/udc/*/state 2>/dev/null)"; echo "gadget: $(cat /sys/kernel/config/usb_gadget/g1/UDC 2>/dev/null)"; ls -la /dev/video* 2>/dev/null; cat /proc/asound/card*/pcm0p/sub0/status 2>/dev/null; echo ---; cat /proc/asound/card*/pcm0c/sub0/status 2>/dev/null; } > $D/usb-av-state.txt
 { nmcli con show --active; /usr/sbin/iw dev wlan0 link; ip -4 addr; } > $D/network.txt 2>&1
 { echo "$(vcgencmd get_throttled 2>/dev/null)   # 0x0=ok; bit0 undervolt-now, bit16 undervolt-occurred, bit18 throttled-occurred"; vcgencmd measure_temp 2>/dev/null; echo "undervolt_alarm=$(cat /sys/class/hwmon/hwmon*/in0_lcrit_alarm 2>/dev/null | head -1)"; journalctl --since -86400s --no-pager 2>/dev/null | grep -i voltage | tail -20; } > $D/power.txt
