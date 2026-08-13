@@ -220,7 +220,7 @@ for u in bridge-gadget bridge-feeder-net bridge-uvcd bridge-feeder-audio bridge-
          bridge-watchdog.timer bridge-web bridge-wifi-portal bridge-idle-frame \
          bridge-idle-frame.timer gadget-clean-detach bridge-agent.timer \
          bridge-ab-healthcheck bridge-wifi-unblock bridge-firstdiag \
-         bridge-firstboot bridge-regen-hostkeys; do
+         bridge-firstboot bridge-regen-hostkeys bridge-pitch bridge-crackle-sentry; do
   systemctl enable "$u" 2>/dev/null || echo "WARN: could not enable $u"
 done
 systemctl disable bridge-testpattern 2>/dev/null || true

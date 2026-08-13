@@ -1,0 +1,24 @@
+[Unit]
+# Closes the USB audio rate loop the kernel leaves open. See bridge-pitch.py for why:
+# the feedback endpoint exists but nothing updates its value, so both gadget sync modes
+# let the host and the bridge drift apart until the capture ring dumps a chunk.
+#
+# Harmless in adaptive mode: the control does not exist there, so it exits immediately.
+Description=NetBridge USB audio pitch controller (feedback loop for the UAC2 capture)
+After=bridge-gadget.service
+Wants=bridge-gadget.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/bridge-pitch.py
+# on-failure, NOT always: in adaptive mode this exits 0 by design, and `always`
+# would restart-loop it every 5s forever for no reason.
+Restart=on-failure
+RestartSec=5
+# It only ever writes one bounded ALSA control, but there is no reason for it to have
+# anything else.
+NoNewPrivileges=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
