@@ -43,6 +43,16 @@ import argparse, json, re, statistics, sys, time, urllib.request
 CTRL = "http://127.0.0.1:18080"
 
 
+def ring(base, timeout=10):
+    """Capture-ring pointers, so we can tell WHICH kind of loss this is."""
+    try:
+        req = urllib.request.Request(base + "/api/status")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return (json.loads(r.read().decode("utf-8", "replace")) or {}).get("pcm")
+    except Exception:
+        return None
+
+
 def sample(base, timeout=20):
     """One (frames, seconds, nominal_rate) reading, or None."""
     try:
@@ -70,7 +80,7 @@ def run(secs, base, label):
             expected = nominal * dt
             ppm = (frames - expected) / expected * 1e6
             deficit_ms = max(0.0, (expected - frames)) / nominal * 1000.0
-            rows.append((ppm, deficit_ms, dt))
+            rows.append((ppm, deficit_ms, dt, ring(base)))
             sys.stdout.write("    %s %+8.0f ppm\n"
                              % ("!" if deficit_ms > 1.0 else " ", ppm))
             sys.stdout.flush()
@@ -98,6 +108,18 @@ def report(rows, label):
     print("  spread (sd)        %.0f ppm" % statistics.pstdev(ppms))
     print("  measurement floor  +/-%.0f ppm  (one sample period on this window)" % floor_ppm)
     print()
+    r = rows[-1][3] if len(rows[0]) > 3 else None
+    if r:
+        print("  RING               avail=%s  avail_max=%s  (one period is ~960 frames)"
+              % (r.get("avail"), r.get("avail_max")))
+        am = r.get("avail_max") or 0
+        if am > 2000:
+            print("    -> the ring FILLS: the host is outrunning us. A rate mismatch, which")
+            print("       the pitch controller is designed to fix.")
+        else:
+            print("    -> the ring never fills past a period. Frames are missing BEFORE the")
+            print("       ring — missed USB transfers, which a feedback loop cannot repair.")
+        print()
     print("  DEFICIT            %.1f ms of audio never captured" % total_deficit)
     print("    per second       %.3f ms/s          <-- COMPARE THIS NUMBER" % (total_deficit / total_wall))
     print("    beyond the floor %d of %d samples" % (len(outliers), len(rows)))

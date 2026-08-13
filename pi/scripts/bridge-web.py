@@ -431,6 +431,7 @@ def gather():
     d["temp"] = soc_temp()
     d["throttled"] = soc_throttled()
     d["config"] = golden_state()
+    d["pcm"] = _return_pcm()
     # Decoded power verdict, including the STICKY history. Rides telemetry so the fleet can
     # show a brownout on the device's row instead of a green light that needs a diagnostics
     # bundle to contradict.
@@ -591,6 +592,34 @@ def _voice_feeder_cpu_ticks():
         return pids[0], int(f[11]) + int(f[12])
     except Exception:
         return pids[0], None
+
+
+def _return_pcm():
+    """The capture ring's pointers — the measurement that separates the two candidate causes
+    of our missing audio, and which nothing currently exposes.
+
+        avail / avail_max   how full the ring gets. If the host outruns us, this CLIMBS
+                            toward the buffer size and the overflow is discarded: a rate
+                            mismatch, which the pitch controller fixes.
+        hw_ptr              frames the host actually delivered. If this falls behind wall
+                            clock while avail stays at one period, frames never arrived at
+                            all: missed USB transfers (raspberrypi/linux#5188), which no
+                            feedback loop can repair.
+
+    Both produce "missing audio, ALSA silent". They need opposite work, so the numbers have
+    to be visible over minutes, not inferred from a two-second snapshot.
+    """
+    st = read(PCM_RETURN_STATUS)
+    if not st or st.startswith("closed"):
+        return None
+    out = {}
+    for ln in st.splitlines():
+        for key in ("state", "avail_max", "avail", "hw_ptr", "appl_ptr", "delay"):
+            if ln.startswith(key):
+                v = ln.split(":", 1)[1].strip() if ":" in ln else ""
+                out[key] = v if key == "state" else (int(v.split()[0]) if v.split() and v.split()[0].isdigit() else None)
+                break
+    return out or None
 
 
 def _return_hw_ptr():
