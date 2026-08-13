@@ -90,7 +90,23 @@ while true; do
   # Marked --auto so it can never overwrite a rung an operator chose by hand, and so only its
   # OWN changes are withdrawn later. A ping looking healthy is not evidence that a human was
   # wrong about what they could hear.
-  if [ $bad -ge 3 ] && media_live; then
+  # DEFAULT OFF as of 2026-08-13, and the reason matters more than the switch.
+  #
+  # This was written believing the audible fault was LATE audio, which a deeper buffer
+  # absorbs. Measurement then showed the opposite: the bridge is losing ~0.7ms of audio per
+  # second of stream at the CAPTURE, before anything is sent (0.710 ms/s, 24 of 67 windows
+  # short, mean centred at -224ppm so it is episodic loss and not drift). Buffer depth was
+  # moved 250 -> 400 -> 600ms by hand and changed nothing audible, which is exactly what you
+  # would expect: a jitter buffer repairs audio that arrived late and cannot repair audio
+  # that was never recorded.
+  #
+  # So acting automatically here would add up to 350ms of delay to what the presenter hears,
+  # every time the path looks rough, in exchange for nothing. An automatic action that cannot
+  # help is worse than none: it moves a number, looks like a fix, and hides the real fault.
+  #
+  # Turn it on with JITTER_SENTRY_LIVE_RUNG=1 if a link is ever genuinely losing packets in
+  # transit — that IS the case buffers are for.
+  if [ "${JITTER_SENTRY_LIVE_RUNG:-0}" = "1" ] && [ $bad -ge 3 ] && media_live; then
     # Escalate only after trouble persists: 3 bad samples is ~1 minute, 9 is ~3. A deeper
     # buffer costs real delay in hearing the room, so this must not race upward.
     want=1; [ $bad -ge 9 ] && want=2
@@ -101,7 +117,7 @@ while true; do
       *) LOG "live: raised presenter buffer to rung $want (loss=${loss:-?}% mdev=${mdev:-?}ms)" ;;
     esac
   fi
-  if [ $good -ge 30 ] && ! media_live; then
+  if [ "${JITTER_SENTRY_LIVE_RUNG:-0}" = "1" ] && [ $good -ge 30 ] && ! media_live; then
     # Withdraw only BETWEEN sessions. Changing the buffer mid-call to make things better
     # still costs a gap in the room audio, and nobody thanks a machine for that.
     out=$(/usr/local/bin/bridge-jitter.py reset --auto --json 2>&1)
