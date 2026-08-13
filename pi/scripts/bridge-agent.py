@@ -75,6 +75,14 @@ ALLOWED = {
     "unquarantine": lambda a: ["sudo", "/usr/local/bin/bridge-deploy-script.sh",
                                "--unquarantine"] + ([_script_name(a["name"])] if a.get("name") else []),
     # What code is each service ACTUALLY running — override or baked-in, with hashes.
+    # READ ONLY. The device re-validates the path against its own allow-listed roots,
+    # refuses anything resolving outside them, refuses credential files, and redacts
+    # token-shaped values. Reading is the thing that was missing: every question that
+    # mattered on 2026-08-13 was a read, and answering one cost an image rebuild.
+    "read-file":   lambda a: ["sudo", "/usr/local/bin/bridge-read.py", _readpath(a.get("path"))]
+                             + (["--list"] if a.get("list") else [])
+                             + (["--lines", _lines(a["lines"])] if a.get("lines") else [])
+                             + (["--tail"] if a.get("tail") else []),
     "running":     lambda a: ["sudo", "/usr/local/bin/bridge-deploy-script.sh", "--running"],
     # A light log tail. The diagnostics bundle is right for forensics and wrong for "what
     # just happened"; at ~470KB it is also a poor fit for a slow venue uplink.
@@ -131,6 +139,19 @@ def _script_name(v):
     if not re.fullmatch(r"[a-zA-Z0-9._-]+\.sh", v) or v.startswith("."):
         raise ValueError("bad script name")
     return v
+
+def _readpath(v):
+    """Shape only — the DEVICE enforces the roots, the credential refusals and the redaction.
+    Two gates, because this one is reachable by anyone holding an admin token."""
+    v = str(v or "")
+    if not v.startswith("/"):
+        raise ValueError("path must be absolute")
+    if len(v) > 256 or "\x00" in v:
+        raise ValueError("bad path")
+    if not re.fullmatch(r"[A-Za-z0-9/._:\-]+", v):
+        raise ValueError("path has unsupported characters")
+    return v
+
 
 def _tunekey(v):
     """Only the two boot-time audio parameters. Not a shell boundary (argv), but a

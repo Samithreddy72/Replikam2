@@ -195,6 +195,7 @@ const ACTIONS = [
   ["running",         "What code is this bridge running?"],
   ["logs",            "Recent logs"],
   ["diagnose",        "Full diagnostics bundle (~40 s)"],
+  ["read-file",       "Read a file on the bridge…"],
 
   ["#Code on the bridge", null],
   ["unquarantine",    "Deployed code not running → restore override ⚠ restarts that service"],
@@ -440,6 +441,13 @@ async function doAction(devId, devName, value, isLive){
     if (pin === null) return;
     if (!/^\d{6}$/.test(pin)) { toast("PIN must be exactly 6 digits"); return; }
     args = {pin};
+  }
+  if (type === "read-file"){
+    const path = prompt(
+      `Read which file on ${devName}?\n\nRead-only. The device refuses anything outside its own\nallow-listed roots and redacts anything that looks like a credential.\n\ne.g. /proc/asound/UAC2Gadget/pcm0c/sub0/status`,
+      "/proc/asound/UAC2Gadget/pcm0c/sub0/status");
+    if (!path) return;
+    args = {path};
   }
   if (type === "gadget-tune"){
     // These cannot be applied to a running gadget — configfs refuses, and forcing it took a
