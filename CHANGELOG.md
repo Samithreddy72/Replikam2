@@ -4,6 +4,20 @@ Verified restore points and released builds, newest first. Each `netbridge-*` ta
 state that was tested against real hardware; each `app-v*` tag is a published presenter
 build on the [Releases](https://github.com/Samithreddy72/Replikam2/releases) page.
 
+## netbridge-os-2.0.0-3359b3e — image, audited, not yet flashed
+*2026-08-13 · `3359b3e`*
+
+First image carrying the jitter diagnosis, Golden Profile, the presenter-tuning relay, the
+live-acting sentry and the power readout fix. `sha256 6127c8ed…`, manifest signature
+Verified OK, 22 content checks read out of the image's own filesystem — see
+`docs/evidence/image-audit-3359b3e.md`.
+
+Control plane deployed the same day; presenter app 1.1.6 built. **Nothing in this image has
+executed on hardware yet.**
+
+Worth knowing: `gh release download` exited 0 having written 262 MB of a 1342 MB asset. Only
+the manifest size/hash check caught it.
+
 ## netbridge-MULTIRATE-VERIFIED-2026-08-13
 *2026-08-13 · `6ed972e`*
 
