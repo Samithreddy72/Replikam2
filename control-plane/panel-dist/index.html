@@ -145,29 +145,30 @@ const ACTIONS = [
 
   // ORGANISED BY WHAT THE ADMIN CAN SEE, NOT BY WHAT THE CODE DOES.
   //
-  // An admin arrives with a SYMPTOM ("it sounds choppy"), never with a diagnosis, and the
-  // previous grouping — Look / Repair / Access / Interrupts — required knowing the mechanism
-  // before you could find the fix. Worse, it hid the single most important distinction in
-  // this system:
+  // An admin arrives with a SYMPTOM ("it sounds choppy"), never with a diagnosis, so the
+  // headings are symptoms. Every entry that interrupts anything says so in its own label
+  // (⚠) and confirms before running — a cost discovered after clicking is paid twice.
+  //
+  // The single most important distinction here:
   //
   //   the audio YOU hear from the room is buffered on YOUR machine
   //   the audio THE ROOM hears from you is buffered on THE BRIDGE
   //
-  // Those need opposite actions. "Network rough → jitter profile WAN" reads like it fixes
-  // what you are hearing; it cannot, ever. It tunes the other direction, and costs a
-  // five-second video freeze to do it. Every label below therefore names the DIRECTION and
-  // carries its real COST, because a cost discovered after clicking is a cost paid twice.
-  ["#Not sure what is wrong? Start here", null],
+  // Those need opposite actions, so they are separate groups and must stay separate.
+  //
+  // SHOWN BY DEFAULT: only the entries in COMMON below. The full list ran to 22 items over
+  // nine headings, which is a wall of text at the exact moment someone is under pressure —
+  // and most of it was redundant, because "Diagnose it for me" already names the cause and
+  // offers the matching button. What remains in the short menu is what you would reach for
+  // DELIBERATELY; everything else is one click away under "Show all actions".
+  ["#Start here", null],
   ["jitter-diagnose", "Diagnose it for me — names the cause (changes nothing)"],
-  ["running",         "What code is this bridge running?"],
-  ["logs",            "Recent logs"],
-  ["diagnose",        "Full diagnostics bundle (~40 s)"],
 
   ["#You cannot hear the ROOM properly", null],
   ["jitter-fix:1",    "Choppy or breaking up → deeper buffer on your side"],
   ["jitter-fix:2",    "Still choppy → deeper still"],
-  ["mesh-key",        "Silent — nothing at all → re-issue mesh key"],
   ["jitter-reset",    "Sounds right again → hand the buffer back"],
+  ["mesh-key",        "Silent — nothing at all → re-issue mesh key"],
 
   ["#The ROOM cannot hear YOU properly", null],
   ["profile:wan",     "Choppy for them → deepen the bridge buffer ⚠ ~5 s video freeze"],
@@ -184,6 +185,11 @@ const ACTIONS = [
   ["golden-save",     "Sounds good right now → save as known-good…"],
   ["golden-restore",  "Config drifted → restore known-good ⚠ may briefly freeze video"],
 
+  ["#Look at it — changes nothing", null],
+  ["running",         "What code is this bridge running?"],
+  ["logs",            "Recent logs"],
+  ["diagnose",        "Full diagnostics bundle (~40 s)"],
+
   ["#Code on the bridge", null],
   ["unquarantine",    "Deployed code not running → restore override ⚠ restarts that service"],
   ["revert-script",   "Undo a bad script → revert to factory… ⚠ restarts that service"],
@@ -197,6 +203,43 @@ const ACTIONS = [
   ["#Last resort", null],
   ["jitter-fix:3",    "Nothing above worked → max buffer + WAN ⚠ ~5 s video freeze"],
 ];
+
+// The short menu. Chosen so the first thing you read covers the common case and the rest is
+// reachable, not so the list looks tidy: diagnose (which answers "which one do I click?"),
+// one action per audio direction, the two that fix "nothing is arriving", and the baseline
+// pair. Nine lines instead of twenty-two.
+const COMMON = new Set(["jitter-diagnose", "jitter-fix:1", "jitter-reset",
+                        "profile:wan", "reset-clock", "restart",
+                        "golden-save", "golden-restore"]);
+let SHOW_ALL = false;
+
+function fillActions(sel){
+  // Build the <select>. In short mode only COMMON entries are listed, and a heading is
+  // emitted only if something under it survived the filter — an empty optgroup renders as a
+  // stray grey label with nothing beneath it, which reads like a bug.
+  sel.replaceChildren();
+  let grp = null, pendingHeading = null;
+  for (const [v, l] of ACTIONS){
+    if (v === ""){                                   // the placeholder
+      const o = document.createElement("option"); o.value = ""; o.textContent = l;
+      sel.appendChild(o); continue;
+    }
+    if (v.startsWith("#")){ pendingHeading = v.slice(1); grp = null; continue; }
+    if (!SHOW_ALL && !COMMON.has(v)) continue;
+    if (pendingHeading !== null){
+      grp = document.createElement("optgroup"); grp.label = pendingHeading;
+      sel.appendChild(grp); pendingHeading = null;
+    }
+    const o = document.createElement("option"); o.value = v; o.textContent = l;
+    (grp || sel).appendChild(o);
+  }
+  const t = document.createElement("optgroup"); t.label = "\u00A0";
+  const o = document.createElement("option");
+  o.value = SHOW_ALL ? "__less" : "__more";
+  const hidden = ACTIONS.filter(([v]) => v && !v.startsWith("#") && !COMMON.has(v)).length;
+  o.textContent = SHOW_ALL ? "Show fewer" : `Show all actions (${hidden} more)…`;
+  t.appendChild(o); sel.appendChild(t);
+}
 
 function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("show");
   clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"), 3500); }
@@ -629,16 +672,19 @@ function render(){
         <td style="text-align:right"></td>`;
       if (isAdmin()){   // presenters see the fleet; only admins can act on it
         const sel = document.createElement("select"); sel.className = "act";
-        let grp = null;
-        for (const [v,l] of ACTIONS){
-          if (v.startsWith("#")){                       // a heading, not a command
-            grp = document.createElement("optgroup"); grp.label = v.slice(1); sel.appendChild(grp);
-            continue;
-          }
-          const o=document.createElement("option"); o.value=v; o.textContent=l;
-          (grp || sel).appendChild(o);
-        }
-        sel.onchange = ()=>{ doAction(d.id, d.name||d.id, sel.value, isLive); sel.value=""; };
+          fillActions(sel);
+          sel.onchange = ()=>{
+            // The two toggles are menu state, not commands. Rebuild THIS select in place
+            // rather than re-rendering the table: a full render destroys and recreates the
+            // element, slamming the dropdown shut on the click that opened it.
+            if (sel.value === "__more" || sel.value === "__less"){
+              SHOW_ALL = (sel.value === "__more");
+              fillActions(sel);
+              sel.value = "";
+              return;
+            }
+            doAction(d.id, d.name||d.id, sel.value, isLive); sel.value="";
+          };
         tr.lastElementChild.appendChild(sel);
       }
     }

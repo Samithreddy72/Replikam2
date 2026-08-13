@@ -165,6 +165,34 @@ if _headings and all(h.strip() for h in _headings):
 else:
     no("ungrouped actions", _headings)
 
+print("\n  ---- the short menu still covers every symptom ----")
+# The dropdown shows COMMON by default and hides the rest behind "Show all actions". That is
+# only safe if the short list still answers each symptom an admin can arrive with. A quiet
+# drop here would leave someone with a problem and no visible action for it.
+_common = set(re.findall(r'"([^"]+)"',
+              re.search(r"const COMMON = new Set\(\[(.*?)\]\)", _p, re.S).group(1)))
+_all = {v for v, _ in _acts}
+for need, why in (("jitter-diagnose", "the entry that answers 'which one do I click?'"),
+                  ("jitter-fix:1",    "you cannot hear the room"),
+                  ("profile:wan",     "the room cannot hear you"),
+                  ("reset-clock",     "robotic / crackling"),
+                  ("restart",         "nothing is arriving"),
+                  ("jitter-reset",    "putting the buffer back"),
+                  ("golden-save",     "recording a known-good state"),
+                  ("golden-restore",  "config drifted")):
+    if need in _common:
+        ok("short menu keeps %-16s (%s)" % (need, why))
+    else:
+        no("short menu dropped %s — %s has no visible action" % (need, why))
+if _common <= _all:
+    ok("every COMMON entry actually exists in ACTIONS")
+else:
+    no("COMMON names something not in the menu", sorted(_common - _all))
+if len(_common) < len(_all):
+    ok("short menu is genuinely shorter (%d of %d shown)" % (len(_common), len(_all)))
+else:
+    no("the short menu hides nothing — the toggle is pointless")
+
 print("\n  ---- negative control: the check must be able to fail ----")
 if "definitely-not-a-real-command" not in backend:
     ok("a made-up command is correctly absent from the backend")
