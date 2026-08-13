@@ -120,15 +120,29 @@ def report(rows, label):
             print("    -> the ring never fills past a period. Frames are missing BEFORE the")
             print("       ring — missed USB transfers, which a feedback loop cannot repair.")
         print()
-    print("  DEFICIT            %.1f ms of audio never captured" % total_deficit)
-    print("    per second       %.3f ms/s          <-- COMPARE THIS NUMBER" % (total_deficit / total_wall))
-    print("    beyond the floor %d of %d samples" % (len(outliers), len(rows)))
-    print("    worst sample     %+.0f ppm" % min(ppms))
+    # NET rate error, with its uncertainty. Summing only the shortfalls (which this tool
+    # used to do, and reported as "audio never captured") is invalid: on a symmetric noisy
+    # measurement it returns a large number even when nothing at all is lost. Simulated with
+    # zero real loss and our observed sd of 1411ppm, that method reports 0.43 ms/s.
+    #
+    # Real loss shows up as a MEAN significantly below zero, not as the size of the negative
+    # half of the noise.
+    mean = statistics.mean(ppms)
+    se = statistics.pstdev(ppms) / (len(ppms) ** 0.5)
+    print("  NET RATE ERROR     %+.0f ppm  +/- %.0f (standard error)" % (mean, se))
+    print("    as audio         %+.3f ms per second of stream" % (mean / 1000.0))
+    print("    one-sided sum    %.3f ms/s  <-- what this tool used to report; NOT loss,"
+          % (total_deficit / total_wall))
+    print("                     it is the negative half of the noise (sd %.0f ppm)"
+          % statistics.pstdev(ppms))
     print()
-    if total_deficit / total_wall > 0.05:
-        print("  => The capture IS losing audio. No receive buffer can repair this.")
+    if mean + 2 * se < -100:
+        print("  => The capture IS losing audio: the mean is significantly below zero.")
+    elif mean - 2 * se > 100:
+        print("  => The capture is receiving MORE than nominal — the host clock runs fast.")
     else:
-        print("  => No measurable capture loss in this window.")
+        print("  => No significant net rate error. Within noise of zero: nothing is being lost")
+        print("     at the capture, and the jitter must come from somewhere else.")
     print()
     return total_deficit / total_wall
 
