@@ -34,17 +34,25 @@ Both lose audio, for the same reason: the loop is open. That is what this daemon
 
 HOW
 ---
-`avail` in the PCM status file is the number of frames the hardware has delivered that the
-application has not read yet — the fill level of the ring, and therefore the direct measure
-of whether the host is outrunning us. Hold it near a target and nothing accumulates:
+The documented mechanism is feed-FORWARD, not a servo: "userspace calculates the real
+sampling frequency at which it consumes samples, then tells the real sampling frequency to
+the UAC2 gadget driver, which notifies the host". So that is what this measures.
 
-    avail above target  -> host is too fast -> pitch below 1000000 -> host slows down
-    avail below target  -> host is too slow -> pitch above 1000000 -> host speeds up
+`appl_ptr` counts frames THIS SIDE has read. Its slope over a long window IS our true
+consumption rate. Report that as a ratio of nominal and the host matches it:
 
-The kernel clamps to (1000 - 250)*1000 .. (1000 + fb_max)*1000, i.e. 750000..1005000 with
-fb_max=5. Deliberately asymmetric: the host can be slowed a long way and sped up barely at
-all, because overrun (audio thrown away) is the failure that matters and underrun merely
-costs a little latency. The controller is biased to sit slightly slow for the same reason.
+    pitch = 1000000 * (measured_consumption_rate / nominal_rate)
+
+An earlier version of this file servoed on `avail` (ring fill) instead, and real data from
+the card killed that design before it ever ran:
+
+    avail : 864      avail_max : 960
+
+`avail` never exceeds one period, because alsasrc drains a period at a time — it sawtooths
+between 0 and 960 rather than settling anywhere. A fill-level target of 1920 was therefore
+UNREACHABLE, the error would have stayed permanently negative, and the controller would have
+pinned the host at +0.5% forever while believing it was correcting. Measuring a slope over
+30 seconds is immune to that sawtooth; a fill target is not.
 
 SAFETY
 ------
@@ -60,33 +68,35 @@ CARD = os.environ.get("PITCH_CARD", "UAC2Gadget")
 STATUS = "/proc/asound/%s/pcm0c/sub0/status" % CARD
 CTL = "Capture Pitch 1000000"
 
-NOMINAL = 1000000
+NOMINAL = 1000000                       # the pitch control is a ratio x 1e6
+NOMINAL_RATE = int(os.environ.get("PITCH_NOMINAL_RATE", "48000"))
 PITCH_MIN = 750000          # (1000 - FBACK_SLOW_MAX) * 1000, FBACK_SLOW_MAX = 250
 PITCH_MAX = 1005000         # (1000 + fb_max) * 1000, fb_max = 5
 
-# Target ring fill. alsasrc opens with buffer-time=200000 (200ms) and latency-time=20000
-# (20ms period) => ~9600 frames of buffer, ~960 per period. Two periods of headroom keeps us
-# clear of underrun without sitting so full that a burst overruns.
-TARGET_FRAMES = int(os.environ.get("PITCH_TARGET_FRAMES", "1920"))
-GAIN = float(os.environ.get("PITCH_GAIN", "3.0"))       # ppm-ish per frame of error
-MAX_STEP = int(os.environ.get("PITCH_MAX_STEP", "2000"))  # per update, out of 1000000
+# Averaging window. Real clock drift is tens of ppm and changes slowly, so measure over a
+# long window: the longer it is, the less the per-period sawtooth and scheduling noise matter.
+# 30s of 48kHz is 1.44M frames, so a one-frame miscount is 0.7ppm.
+WINDOW_S = float(os.environ.get("PITCH_WINDOW_S", "30"))
 PERIOD_S = float(os.environ.get("PITCH_PERIOD_S", "1.0"))
-
+# Never move the host by more than this from nominal. Crystals drift by tens of ppm, not
+# thousands; anything larger is a measurement fault, not a clock, and must not be obeyed.
+MAX_PPM = int(os.environ.get("PITCH_MAX_PPM", "1000"))
+MAX_STEP = int(os.environ.get("PITCH_MAX_STEP", "200"))   # ppm per update
 
 def log(*a):
     print("bridge-pitch:", *a, file=sys.stderr, flush=True)
 
 
 def read_status():
-    """(state, avail, hw_ptr) or (None, None, None) when the stream is not open."""
+    """(state, avail, hw_ptr, appl_ptr), or Nones when the stream is not open."""
     try:
         with open(STATUS) as f:
             txt = f.read()
     except Exception:
-        return None, None, None
+        return None, None, None, None
     if not txt or txt.startswith("closed"):
-        return None, None, None
-    state = avail = hw = None
+        return None, None, None, None
+    state = avail = hw = appl = None
     for ln in txt.splitlines():
         if ln.startswith("state:"):
             state = ln.split(":", 1)[1].strip()
@@ -98,7 +108,11 @@ def read_status():
             m = re.search(r"(\d+)", ln)
             if m:
                 hw = int(m.group(1))
-    return state, avail, hw
+        elif ln.startswith("appl_ptr"):
+            m = re.search(r"(\d+)", ln)
+            if m:
+                appl = int(m.group(1))
+    return state, avail, hw, appl
 
 
 def ctl_exists():
@@ -148,13 +162,17 @@ def main():
 
     pitch = NOMINAL
     set_pitch(pitch)
-    settled = 0
+    hist = []          # (monotonic, appl_ptr)
+    last_log = 0.0
 
     while True:
-        state, avail, hw = read_status()
-        if state != "RUNNING" or avail is None:
-            # Stream closed or idle. Reset to nominal so the next session starts from a known
-            # place rather than inheriting a correction computed for a different clock.
+        state, avail, hw, appl = read_status()
+        now = time.monotonic()
+
+        if state != "RUNNING" or appl is None:
+            # Idle or closed. Forget the history and return to nominal: a correction computed
+            # for the last session's clock is meaningless for the next one.
+            hist.clear()
             if pitch != NOMINAL:
                 pitch = NOMINAL
                 set_pitch(pitch)
@@ -164,28 +182,43 @@ def main():
             time.sleep(PERIOD_S)
             continue
 
-        err = avail - TARGET_FRAMES          # >0 means the host is outrunning us
-        want = NOMINAL - int(GAIN * err)
-        want = max(PITCH_MIN, min(PITCH_MAX, want))
-        # Slew limit. A single odd reading — a scheduling hiccup, a stat that landed mid
-        # update — must not yank the host's clock.
-        if want > pitch + MAX_STEP:
-            want = pitch + MAX_STEP
-        elif want < pitch - MAX_STEP:
-            want = pitch - MAX_STEP
+        # A pointer going backwards means the stream restarted underneath us (a rate change,
+        # a service restart). Everything measured before that belongs to a different stream.
+        if hist and appl < hist[-1][1]:
+            log("appl_ptr went backwards — stream restarted, discarding history")
+            hist.clear()
 
-        if a.once:
-            print("avail=%s err=%+d pitch=%d (%+d ppm)" % (avail, err, want, want - NOMINAL))
-            return 0
+        hist.append((now, appl))
+        while len(hist) > 2 and (now - hist[0][0]) > WINDOW_S:
+            hist.pop(0)
 
-        if want != pitch:
-            pitch = want
-            set_pitch(pitch)
-            settled = 0
-        else:
-            settled += 1
-            if settled == 30:
-                log("holding at %d (%+d ppm), avail=%d" % (pitch, pitch - NOMINAL, avail))
+        span = now - hist[0][0]
+        if span >= WINDOW_S * 0.8:
+            frames = appl - hist[0][1]
+            rate = frames / span
+            ppm = int(round((rate / NOMINAL_RATE - 1.0) * 1e6))
+            ppm = max(-MAX_PPM, min(MAX_PPM, ppm))
+            want = NOMINAL + ppm
+            want = max(PITCH_MIN, min(PITCH_MAX, want))
+            if want > pitch + MAX_STEP:
+                want = pitch + MAX_STEP
+            elif want < pitch - MAX_STEP:
+                want = pitch - MAX_STEP
+
+            if a.once:
+                print("rate=%.1f Hz over %.0fs -> %+d ppm (pitch %d), avail=%s"
+                      % (rate, span, ppm, want, avail))
+                return 0
+
+            if want != pitch:
+                pitch = want
+                set_pitch(pitch)
+            if now - last_log > 60:
+                last_log = now
+                log("consuming %.1f Hz (%+d ppm), pitch=%d, avail=%s"
+                    % (rate, ppm, pitch, avail))
+        elif a.once:
+            print("need %.0fs of history, have %.0fs" % (WINDOW_S, span)); return 1
 
         time.sleep(PERIOD_S)
 
