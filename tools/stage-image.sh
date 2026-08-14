@@ -60,12 +60,22 @@ print(t.astimezone().strftime('%Y-%m-%d_%H%M'))" "$PUB")
 
 say "5/5  rotating the folder"
 mkdir -p "$DEST/Archive"
-# old 2 -> Archive, keeping its name (it already carries its own date)
+# Two working images stay visible at all times. One rollback is not enough: if slot 2 shares
+# whatever is wrong with slot 1, there has to be somewhere else to go without digging through
+# Archive at a venue. So the chain is 1 -> 2 -> 3 -> Archive.
+for f in "$DEST"/3--ROLLBACK-OLDER--*.img.xz; do
+  [ -e "$f" ] || continue
+  b=$(basename "$f"); mv -f "$f" "$DEST/Archive/${b#3--ROLLBACK-OLDER--}"
+  echo "  archived  ${b#3--ROLLBACK-OLDER--}"
+done
 for f in "$DEST"/2--ROLLBACK--*.img.xz; do
   [ -e "$f" ] || continue
-  b=$(basename "$f"); mv -f "$f" "$DEST/Archive/${b#2--ROLLBACK--}"
-  echo "  archived  ${b#2--ROLLBACK--}"
+  b=$(basename "$f"); mv -f "$f" "$DEST/3--ROLLBACK-OLDER--${b#2--ROLLBACK--}"
+  echo "  older     ${b#2--ROLLBACK--}"
 done
+mkdir -p "$DEST/older-good-manifest"
+cp -f "$DEST/known-good-manifest/." "$DEST/older-good-manifest/" 2>/dev/null || \
+  cp -f "$DEST"/known-good-manifest/* "$DEST/older-good-manifest/" 2>/dev/null || true
 # old 1 -> slot 2, and its manifest becomes the known-good manifest
 for f in "$DEST"/1--FLASH-THIS--*.img.xz; do
   [ -e "$f" ] || continue
@@ -90,5 +100,6 @@ sed 's/\x1b\[[0-9;]*m//g' "$WORK/audit.txt" > "$DEST/1--AUDIT.txt"
 echo
 echo "  flash this:  $NEW"
 echo "  roll back:   $(basename "$(ls "$DEST"/2--ROLLBACK--*.img.xz 2>/dev/null | head -1)")"
+echo "  two steps:   $(basename "$(ls "$DEST"/3--ROLLBACK-OLDER--*.img.xz 2>/dev/null | head -1)")"
 echo
 echo "  ROLLBACK.txt and WHATS-IN-THIS-IMAGE.txt are written by hand — update them to match."
