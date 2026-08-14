@@ -131,5 +131,39 @@ if simulate(48000) == 0 and simulate(int(48000*(1+200e-6))) != 0:
 else:
     no("the test cannot distinguish drift — it proves nothing")
 
+print("\n  ---- every name it uses at runtime actually exists ----")
+# The suite above tested the ARITHMETIC and never executed main(), so a stale reference in a
+# code path that only runs in async mode survived a rewrite: TARGET_FRAMES and GAIN were
+# deleted but still named in a log line just past the async check. On a card shipping
+# c_sync=adaptive main() returns before reaching it, so nothing failed — until someone used
+# gadget-tune:async, at which point the daemon would die with NameError on startup.
+#
+# Executing main() here would need a real ALSA card, so check statically instead: every
+# global a function loads must be defined somewhere. That catches the whole class, not just
+# the two names that happened to be wrong.
+import ast, builtins
+tree = ast.parse(SRC.read_text())
+known = set(dir(bp)) | set(dir(builtins))
+undefined = []
+for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+    local = {a.arg for a in fn.args.args}
+    if fn.args.vararg:  local.add(fn.args.vararg.arg)
+    if fn.args.kwarg:   local.add(fn.args.kwarg.arg)
+    for n in ast.walk(fn):
+        if isinstance(n, (ast.Assign, ast.For, ast.With, ast.comprehension)):
+            for t in ast.walk(n):
+                if isinstance(t, ast.Name) and isinstance(t.ctx, ast.Store):
+                    local.add(t.id)
+        if isinstance(n, ast.ExceptHandler) and n.name:
+            local.add(n.name)
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) \
+           and n.id not in known and n.id not in local:
+            undefined.append("%s() line %d: %s" % (fn.name, n.lineno, n.id))
+if undefined:
+    no("names used but never defined — this crashes the moment that path runs", undefined)
+else:
+    ok("no function references a name that does not exist")
+
 print("\n  %d passed, %d failed\n" % (passed, failed))
 sys.exit(1 if failed else 0)

@@ -157,8 +157,13 @@ def main():
             "nothing to drive. Exiting cleanly." % (CTL, CARD))
         return 0
 
-    log("controlling %s: target avail=%d frames, gain=%.1f, clamp %d..%d"
-        % (CTL, TARGET_FRAMES, GAIN, PITCH_MIN, PITCH_MAX))
+    # This line survived the rewrite that removed the ring-fill target and still named
+    # TARGET_FRAMES and GAIN, neither of which exists any more. It sits immediately after the
+    # async-mode check, so it never ran while the image shipped c_sync=adaptive — and would
+    # have raised NameError the first time anyone used gadget-tune:async. Report the
+    # parameters this controller actually has.
+    log("controlling %s: window=%.0fs  max=%dppm  step=%dppm  clamp %d..%d"
+        % (CTL, WINDOW_S, MAX_PPM, MAX_STEP, PITCH_MIN, PITCH_MAX))
 
     pitch = NOMINAL
     set_pitch(pitch)
