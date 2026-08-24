@@ -242,6 +242,32 @@ grepf jitter-sentry.sh 'JITTER_SENTRY_LIVE_RUNG' \
   || warn "sentry may act on live audio unprompted"
 
 
+sec "The fixes from 2026-08-24"
+# Each of these was a fault seen on real hardware the same day. An image that ships without
+# one of them looks identical to one that has it, until the fault happens again.
+grepf bridge-web.py 'def _stream_live' \
+  && ok "stream liveness is a counter DELTA, not 'the service is running'" \
+  || no "liveness is still the old proxy — the fleet will show an idle bridge as LIVE"
+if grepf bridge-web.py '"video": *svc\.get\("bridge-feeder-net"\) == "active" and attached'; then
+  no "the old always-true liveness test is still present"
+else
+  ok "the always-true liveness test is gone"
+fi
+grepf bridge-web.py '_stream_live\("return"' \
+  && ok "return audio liveness comes from the capture pointer moving" \
+  || no "return liveness not measured from hw_ptr"
+# The field that identifies an image must survive first boot. It did not: firstboot wrote
+# "dev" over the baked version on every card, which is why a running bridge had to be
+# identified by fingerprinting an unrelated bug in its status output.
+grepf bridge-firstboot.sh 'if \[ -n "\$\{BRIDGE_VERSION:-\}" \]' \
+  && ok "firstboot only overwrites the version when provisioning supplies one" \
+  || no "firstboot still clobbers the baked version with 'dev' — images become unidentifiable"
+if grepf bridge-firstboot.sh 'echo "\$\{BRIDGE_VERSION:-dev\}" >/etc/bridge/version'; then
+  no "the unconditional 'dev' write is still there"
+else
+  ok "no unconditional 'dev' write remains"
+fi
+
 sec "The new remote-read capability"
 has bridge-read.py && ok "bridge-read.py installed" || no "bridge-read.py MISSING"
 grepf bridge-read.py 'os\.path\.realpath\(r\) for r in _ROOTS' \
