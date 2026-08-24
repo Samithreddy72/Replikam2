@@ -142,7 +142,12 @@ jobs:
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/app-v')
+    # `always()` because `needs:` otherwise requires EVERY matrix leg to succeed, which
+    # silently defeated fail-fast: false above. On 2026-08-24 the macOS app built and smoke-
+    # tested perfectly and shipped nowhere, because Chocolatey's gstreamer package carried a
+    # stale checksum and the Windows leg died. A platform that built should reach the people
+    # waiting for it; a platform that did not must be named, not quietly omitted.
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/app-v') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -153,10 +158,29 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts
+          shopt -s nullglob
+          dirs=(*/)
+          [ ${#dirs[@]} -gt 0 ] || { echo "no platform produced a build - nothing to release"; exit 1; }
           # One zip per platform: a bare .exe/binary download is often blocked by browsers
           # and mail filters, and zipping preserves the executable bit on macOS.
-          for d in */; do (cd "$d" && zip -r "../${d%/}.zip" .); done
+          for d in "${dirs[@]}"; do (cd "$d" && zip -r "../${d%/}.zip" .); done
+
+          have_mac=no; have_win=no
+          [ -e NetBridgeSource-macos-arm64.zip ] && have_mac=yes
+          [ -e NetBridgeSource-windows-x64.zip ] && have_win=yes
+          # macOS is the platform in daily use. Releasing without it would be a release nobody
+          # asked for, so that one is still required.
+          [ "$have_mac" = yes ] || { echo "the macOS build is missing - refusing to publish"; exit 1; }
+
+          notes="Unsigned builds - see app/netbridge-source/README.md for the one-time OS prompt on each platform."
+          notes="$notes"$'\n\n'"**Included:** macOS arm64"
+          if [ "$have_win" = yes ]; then
+            notes="$notes, Windows x64"
+          else
+            notes="$notes"$'\n\n'"> **Windows is NOT in this release.** Its build failed and the binary was never produced - do not assume an older Windows download matches this version."
+          fi
+
           gh release create "${GITHUB_REF_NAME}" ./*.zip \
             --repo "${{ github.repository }}" \
             --title "NetBridge Source ${GITHUB_REF_NAME}" \
-            --notes "Unsigned builds — see app/netbridge-source/README.md for the one-time OS prompt on each platform."
+            --notes "$notes"
