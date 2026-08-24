@@ -265,6 +265,45 @@ def power_state(raw=None):
 PRESENTER_TUNE_FILE = "/data/presenter-tuning.json"
 
 
+# One-shot units that run ONLY on the boot after a flash. Flashing rewrites the whole disk,
+# /data included, so the .expanded guard is wiped too and the filesystem expansion runs again
+# every time - it is not a once-per-card event.
+FIRSTBOOT_UNITS = ("bridge-firstboot", "bridge-regen-hostkeys", "bridge-firstdiag")
+
+
+def settling():
+    """Is the Pi still doing its post-flash work?
+
+    WHY THIS EXISTS
+    ---------------
+    On 2026-08-24 an operator flashed a card, went live immediately, and heard loud periodic
+    bursts that stopped by themselves a few minutes later. Nothing was wrong with the audio
+    path: the Pi was expanding the /data filesystem (resize2fs, heavily IO-bound) and
+    generating a full set of SSH host keys (ssh-keygen -A, CPU-bound) while the media
+    pipeline was trying to keep a real-time deadline on the same four cores.
+
+    Every reading looked healthy throughout, because none of them measured "this machine is
+    busy with something that will finish on its own". So an operator has no way to tell a
+    settling bridge from a broken one, and the natural response to bursts is to start
+    changing settings that were never the problem.
+
+    Cheap by construction: the answer can only be true shortly after a boot, so past that
+    it returns False without spawning anything.
+    """
+    try:
+        up = float(open("/proc/uptime").read().split()[0])
+    except Exception:
+        return False
+    if up > 900:            # 15 minutes; the work above finishes in one or two
+        return False
+    if sh("systemctl is-system-running") == "starting":
+        return True
+    for u in FIRSTBOOT_UNITS:
+        if sh("systemctl is-active %s" % u) == "activating":
+            return True
+    return False
+
+
 def presenter_tuning():
     """What the fleet wants the PRESENTER APP to apply, or None.
 
@@ -467,6 +506,7 @@ def gather():
     _, _vt = _feeder_cpu_ticks()
     _, _at = _voice_feeder_cpu_ticks()
     _rp = _return_hw_ptr()
+    d["settling"] = settling()
     d["streams"] = {
         "video":  attached and svc.get("bridge-feeder-net") == "active"
                   and _stream_live("video", _vt, _now),
@@ -764,7 +804,14 @@ def checks():
 
     udc = _udc_state()
     return {
-        "online": {"ok": True, "detail": "bridge-web serving on :%d" % PORT},
+        # Say so where the operator is actually looking. The app polls /api/checks every 10s
+        # and shows these lines; putting "still settling" only in /api/status would leave the
+        # person hearing the bursts with no explanation for them.
+        "online": {"ok": True, "detail": (
+            "bridge-web serving on :%d — STILL SETTLING after a flash "
+            "(expanding the filesystem and generating host keys). Audio may burst for a "
+            "minute or two; this finishes on its own." % PORT) if settling() else
+            "bridge-web serving on :%d" % PORT},
         "video_arriving": {"ok": video_ok, "detail": video_detail},
         "voice_arriving": {"ok": voice_ok, "detail": voice_detail},
         "client_sees_camera": {"ok": udc == "configured",
