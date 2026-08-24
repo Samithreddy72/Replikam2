@@ -130,57 +130,34 @@ jobs:
       # else looks healthy. build.py therefore also writes an unprocessed sidecar next to the
       # binary, and _mesh_bin() prefers it. Leaving the sidecar out of the artifact meant the
       # only working copies were the ones on the build machine.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset }}
-          path: |
-            app/netbridge-source/dist/${{ matrix.bin }}
-            app/netbridge-source/dist/netbridge-mesh
-            app/netbridge-source/dist/netbridge-mesh.exe
-            app/netbridge-source/dist/app-pubkey.pem
-          if-no-files-found: error
-
-  release:
-    needs: build
-    # `always()` because `needs:` otherwise requires EVERY matrix leg to succeed, which
-    # silently defeated fail-fast: false above. On 2026-08-24 the macOS app built and smoke-
-    # tested perfectly and shipped nowhere, because Chocolatey's gstreamer package carried a
-    # stale checksum and the Windows leg died. A platform that built should reach the people
-    # waiting for it; a platform that did not must be named, not quietly omitted.
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/app-v') }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with: {path: artifacts}
-      - name: Publish
+      # Attach straight to the release. Artifact storage is only a staging area, and it has
+      # now blocked this workflow twice on 2026-08-24 with "Artifact storage quota has been
+      # hit" — a quota GitHub recalculates every 6-12 hours, so deleting old artifacts does
+      # not unblock a build today. A binary that has been built, smoke-tested and TLS-checked
+      # should not be discarded because a staging bucket is full.
+      #
+      # Each platform publishes itself, so one platform failing cannot withhold the other.
+      # The release is created on first touch and appended to afterwards; --clobber makes a
+      # re-run idempotent rather than a duplicate-asset error.
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/app-v')
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          cd artifacts
-          shopt -s nullglob
-          dirs=(*/)
-          [ ${#dirs[@]} -gt 0 ] || { echo "no platform produced a build - nothing to release"; exit 1; }
-          # One zip per platform: a bare .exe/binary download is often blocked by browsers
-          # and mail filters, and zipping preserves the executable bit on macOS.
-          for d in "${dirs[@]}"; do (cd "$d" && zip -r "../${d%/}.zip" .); done
+          cd app/netbridge-source/dist
+          # Zip because a bare .exe or Mach-O download is often blocked by browsers and mail
+          # filters, and zipping preserves the executable bit on macOS.
+          zip -r "../../../${{ matrix.asset }}.zip" \
+            "${{ matrix.bin }}" app-pubkey.pem \
+            $([ -f netbridge-mesh ] && echo netbridge-mesh) \
+            $([ -f netbridge-mesh.exe ] && echo netbridge-mesh.exe)
+          cd ../../..
+          gh release view "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" \
+              --title "NetBridge Source ${GITHUB_REF_NAME}" \
+              --notes "Unsigned builds - see app/netbridge-source/README.md for the one-time OS prompt on each platform. Platforms are attached as their builds finish; if one is missing, its build failed and that binary does not exist for this version."
+          gh release upload "${GITHUB_REF_NAME}" "${{ matrix.asset }}.zip" \
+            --repo "${{ github.repository }}" --clobber
 
-          have_mac=no; have_win=no
-          [ -e NetBridgeSource-macos-arm64.zip ] && have_mac=yes
-          [ -e NetBridgeSource-windows-x64.zip ] && have_win=yes
-          # macOS is the platform in daily use. Releasing without it would be a release nobody
-          # asked for, so that one is still required.
-          [ "$have_mac" = yes ] || { echo "the macOS build is missing - refusing to publish"; exit 1; }
-
-          notes="Unsigned builds - see app/netbridge-source/README.md for the one-time OS prompt on each platform."
-          notes="$notes"$'\n\n'"**Included:** macOS arm64"
-          if [ "$have_win" = yes ]; then
-            notes="$notes, Windows x64"
-          else
-            notes="$notes"$'\n\n'"> **Windows is NOT in this release.** Its build failed and the binary was never produced - do not assume an older Windows download matches this version."
-          fi
-
-          gh release create "${GITHUB_REF_NAME}" ./*.zip \
-            --repo "${{ github.repository }}" \
-            --title "NetBridge Source ${GITHUB_REF_NAME}" \
-            --notes "$notes"
