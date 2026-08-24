@@ -149,10 +149,15 @@ jobs:
           cd app/netbridge-source/dist
           # Zip because a bare .exe or Mach-O download is often blocked by browsers and mail
           # filters, and zipping preserves the executable bit on macOS.
-          zip -r "../../../${{ matrix.asset }}.zip" \
-            "${{ matrix.bin }}" app-pubkey.pem \
-            $([ -f netbridge-mesh ] && echo netbridge-mesh) \
-            $([ -f netbridge-mesh.exe ] && echo netbridge-mesh.exe)
+          # Name only what exists. app-pubkey.pem is written to dist/ ONLY when build.py is
+          # given a signing key, which CI is not - the key that matters is already pinned
+          # INSIDE the binary by --add-data, so its absence here is correct, not a gap. Naming
+          # a missing file made zip warn on every run and would have hidden a real omission.
+          files=("${{ matrix.bin }}")
+          for extra in netbridge-mesh netbridge-mesh.exe app-pubkey.pem; do
+            [ -f "$extra" ] && files+=("$extra")
+          done
+          zip -r "../../../${{ matrix.asset }}.zip" "${files[@]}"
           cd ../../..
           gh release view "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
             gh release create "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" \
