@@ -7,7 +7,7 @@ Serves:
                     status/telemetry stay instant)
   GET /api/health   tiny liveness JSON
 on http://<pi>:8080"""
-import http.server, socketserver, subprocess, os, time, socket, json, hashlib, re, glob
+import http.server, socketserver, subprocess, os, time, socket, json, hashlib, re, glob, shlex
 import importlib.util
 
 PORT = 8080
@@ -15,9 +15,41 @@ VERSION_FILE = "/etc/bridge/version"
 SERVICES = ["bridge-gadget", "bridge-feeder-net", "bridge-uvcd",
             "bridge-feeder-audio", "bridge-return-audio"]
 
-def sh(cmd):
+def _log(msg):
+    """Journal line. Defined before its first use - an undefined name inside sh()'s try block
+    would have been swallowed by the bare except and the refusal would have been silent."""
     try:
-        return subprocess.run(cmd, shell=True, capture_output=True,
+        subprocess.run(["logger", "-t", "bridge-web", str(msg)[:200]], timeout=3)
+    except Exception:
+        pass
+
+
+def sh(cmd):
+    """Run a fixed command and return its stdout.
+
+    Deliberately NOT shell=True. Nothing request-derived reaches this function today - every
+    caller interpolates an internal service name from a constant list - but this is the one
+    process on the bridge that accepts unauthenticated network input, and a shell here is one
+    careless edit away from being a command-injection hole. Splitting to argv removes the
+    possibility rather than relying on every future caller being careful.
+
+    Callers pass a string for readability; shlex.split gives the same words the shell would
+    have produced for these commands, without a shell being involved.
+    """
+    try:
+        if isinstance(cmd, (list, tuple)):
+            argv = list(cmd)
+        else:
+            # Refuse rather than mis-execute. Without this, a future caller writing
+            # "foo | bar" would silently get "|" and "bar" as arguments to foo and an empty
+            # result - a failure that looks exactly like the command returning nothing, which
+            # is the hardest kind to notice. Redirections were removed from every call site
+            # because capture_output already separates stderr.
+            if any(c in cmd for c in ("|", ">", "<", "&&", ";", "$(", "`")):
+                _log("sh(): refusing a command that needs a shell: %s" % cmd[:80])
+                return ""
+            argv = shlex.split(cmd)
+        return subprocess.run(argv, capture_output=True,
                               text=True, timeout=5).stdout.strip()
     except Exception:
         return ""
@@ -271,6 +303,67 @@ PRESENTER_TUNE_FILE = "/data/presenter-tuning.json"
 FIRSTBOOT_UNITS = ("bridge-firstboot", "bridge-regen-hostkeys", "bridge-firstdiag")
 
 
+# ---------------------------------------------------------------------------------------
+# WHO IS ALLOWED TO CHANGE THINGS
+#
+# Until 2026-08-25 this server authenticated nothing. `POST /api/set-peer` takes an IP and
+# repoints the bridge's return audio at it - and the return stream is the meeting room's
+# microphone. Any host that could reach port 8080, which on a venue LAN is every device on the
+# guest network, could redirect a room's audio to itself with no credential and nothing in a
+# log an operator would look at. For a product that sits in other organisations' meeting rooms
+# that was the finding that blocked release.
+#
+# The fix is a trust boundary rather than a new credential system, because the architecture
+# already has one. The presenter app does NOT talk to this port over the LAN: it goes through
+# the mesh helper's local proxy (127.0.0.1:<control_port>) and arrives over tsnet, so it
+# reaches us from a tailnet address. Traffic arriving from the LAN is, by construction, not
+# the app.
+#
+# So: READS stay open (the fleet, the operator and the diagnostics tools depend on them, and
+# they disclose no secret - the setup passphrase is deliberately excluded from /api/status).
+# WRITES require the caller to be on loopback or the tailnet.
+#
+# Source-address enforcement rather than binding to the tailnet interface, deliberately:
+# binding would race tailscaled at boot, would need rebinding whenever the tailnet address
+# changes (it changed twice during testing), and would break read-only LAN diagnostics that
+# are genuinely useful. This is checked per request, so there is nothing to race.
+TAILNET_V4 = ("100.",)            # CGNAT 100.64.0.0/10, which is what tailscale hands out
+LOOPBACK = ("127.", "::1", "localhost")
+
+
+def _mesh_or_local(addr):
+    """Is this caller on the mesh (or the device itself)?"""
+    a = str(addr or "")
+    if a.startswith("::ffff:"):   # IPv4-mapped IPv6, which is what a dual-stack bind reports
+        a = a[7:]
+    if any(a.startswith(p) for p in LOOPBACK):
+        return True
+    if not a.startswith(TAILNET_V4):
+        return False
+    # 100.64.0.0/10 is 100.64.x - 100.127.x. Plain "100." would also accept 100.1.2.3, which is
+    # ordinary public address space and not the tailnet at all.
+    try:
+        second = int(a.split(".")[1])
+    except Exception:
+        return False
+    return 64 <= second <= 127
+
+
+def _audit(action, addr, allowed, detail=""):
+    """Every mutation attempt, allowed or refused, goes to the journal with its source.
+
+    A redirection of the room's audio previously left no trace. Refusals are logged too: a
+    burst of them from one address is the only signal that someone is probing the bridge.
+    """
+    try:
+        subprocess.run(["logger", "-t", "bridge-web",
+                        "%s %s from=%s %s" % ("ALLOW" if allowed else "REFUSE",
+                                              action, addr, detail)],
+                       timeout=3)
+    except Exception:
+        pass
+
+
 def settling():
     """Is the Pi still doing its post-flash work?
 
@@ -413,7 +506,7 @@ def pairing_code(serial):
     return "BRIDGE-" + h
 
 def tailscale_ip4():
-    return sh("tailscale ip -4 2>/dev/null").splitlines()[0] if sh("tailscale ip -4 2>/dev/null") else ""
+    return sh("tailscale ip -4").splitlines()[0] if sh("tailscale ip -4") else ""
 
 def svc_restarts(svc):
     v = sh("systemctl show -p NRestarts --value %s" % svc)
@@ -438,7 +531,7 @@ def clock_verdict():
         pass
     except Exception:
         pass
-    errs = sh("journalctl -u bridge-return-audio --since '-10 min' 2>/dev/null "
+    errs = sh("journalctl -u bridge-return-audio --since '-10 min' "
               "| grep -ci 'input/output error'")
     try:
         return int(errs) > 0, {"verdict": "crackle" if int(errs) > 0 else "clean",
@@ -464,7 +557,7 @@ def gather():
             d["speed"] = read("%s/%s/current_speed" % (udcdir, f))
             break
     d["udc"] = state or "?"
-    d["functions"] = sh("ls /sys/kernel/config/usb_gadget/g1/functions/ 2>/dev/null").replace("\n", " ")
+    d["functions"] = sh("ls /sys/kernel/config/usb_gadget/g1/functions/").replace("\n", " ")
     d["video40"] = os.path.exists("/dev/video40")
     d["uac2"] = os.path.isdir("/proc/asound/UAC2Gadget")
     d["temp"] = soc_temp()
@@ -574,7 +667,7 @@ def mesh_path():
             peer = ln.split("=", 1)[1].strip()
     if not peer:
         return {}
-    for ln in sh("tailscale status 2>/dev/null").splitlines():
+    for ln in sh("tailscale status").splitlines():
         if not ln.startswith(peer + " ") and not ln.startswith(peer + "\t"):
             continue
         low = ln.lower()
@@ -875,8 +968,11 @@ tailscale: %(tsip)s &nbsp; clock: %(clock)s<br>
     return html
 
 class H(http.server.BaseHTTPRequestHandler):
-    def _send(self, body, ctype):
-        self.send_response(200)
+    def _send(self, body, ctype, status=200):
+        # status defaults to 200 so every existing caller is unchanged; a refusal needs to be
+        # a real 403, not a 200 carrying {"ok": false}, or no client or proxy can tell the
+        # difference between "denied" and "worked".
+        self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -907,6 +1003,18 @@ class H(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        # Every POST on this server mutates something. None of them has a legitimate caller on
+        # the LAN, so the check sits here rather than being repeated per endpoint - a new
+        # mutating endpoint added later is protected by default instead of by remembering.
+        peer = (self.client_address or ("",))[0]
+        if not _mesh_or_local(peer):
+            _audit(path, peer, False)
+            self._send(json.dumps({"ok": False, "error": "forbidden",
+                                   "detail": "this endpoint is reachable from the mesh only"}
+                                  ).encode("utf-8"),
+                       "application/json; charset=utf-8", status=403)
+            return
+        _audit(path, peer, True)
         if path == "/api/set-peer":
             # Register the presenter as the return-audio destination — the SSH-free
             # replacement for `ssh pi@bridge bridge set-peer <ip>`. Strictly a
