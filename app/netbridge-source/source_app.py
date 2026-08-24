@@ -64,7 +64,7 @@ RTP_VIDEO, RTP_VOICE = 5000, 5002
 # Build stamp. build.py rewrites this line, and it is what the updater compares against
 # the signed manifest — so a build that forgets to bump it simply never updates, rather
 # than update-looping.
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.1.9"
 
 
 # --------------------------------------------------------------------------- state
@@ -501,6 +501,24 @@ class Session:
         # redundancy is already on the wire and FEC reconstructs real audio rather than
         # guessing. On our link, measured loss is zero — so concealment can only invent.
         self.return_conceal = os.environ.get("NB_RETURN_CONCEAL", "0") != "0"
+        # Defaults chosen from what the bridge actually sends: it encodes with inband-fec and
+        # packet-loss-percentage=20, so the redundancy exists whether or not we use it. FEC on
+        # costs nothing extra on the wire and repairs real loss. PLC stays off - its guesses
+        # are the warble that was chased for a week.
+        self.return_fec = os.environ.get("NB_RETURN_FEC", "1") != "0"
+        self.return_plc = os.environ.get("NB_RETURN_PLC", "0") != "0"
+
+    # Did the OPERATOR ask for this session, or is it merely still twitching?
+    #
+    # `live` below is derived purely from whether processes happen to be running, which means
+    # a stopped session and a crashed one look identical to every supervisor in this file.
+    # They then did what they exist to do and restarted the legs - so /api/stop killed the
+    # encoders, the guard brought them back within seconds, and the camera light came back on.
+    # On 2026-08-24 an operator ended a session and the camera kept recording; there was no
+    # way to stop it short of quitting the app.
+    #
+    # Intent is not derivable from process state. It has to be recorded.
+    wanted = False
 
     @property
     def live(self):
@@ -554,6 +572,9 @@ class Session:
         # Remember each leg's argv so ONE leg can be respawned without disturbing the others.
         # Previously a dead video leg meant restarting the whole session — a visible freeze
         # plus an audible gap — to fix a fault that only touched video.
+        # The session is now intended to run. Everything that repairs a leg checks this, so
+        # it must be set where a session BEGINS, not where a process happens to start.
+        self.wanted = True
         self.leg_argv = {"video": v, "voice": a}
         self.leg_proc = {}
         logdir = _logdir()
@@ -582,6 +603,10 @@ class Session:
         interrupt the audio the room is listening to, and vice versa — a supervisor that
         rebuilds the session to fix one leg causes a bigger outage than the fault it is
         repairing. That mistake was made once tonight and it ended a live call."""
+        # Refuse to resurrect a session the operator ended. Without this the supervisor
+        # silently undoes a deliberate stop, which is how the camera stayed on.
+        if not getattr(self, "wanted", False):
+            return False
         argv = (getattr(self, "leg_argv", {}) or {}).get(name)
         if not argv:
             return False
@@ -615,7 +640,8 @@ class Session:
             if self.return_on else None      # None = deliberately off, not a fault
         return out
 
-    def set_return_tuning(self, gain=None, jitter_ms=None, dynamics=None, sink_sync=None, conceal=None):
+    def set_return_tuning(self, gain=None, jitter_ms=None, dynamics=None, sink_sync=None, conceal=None,
+                          fec=None, plc=None):
         """Change return-audio gain / buffer depth WITHOUT ending the session.
 
         These were env-vars read once at app launch, so trying a different value meant
@@ -635,12 +661,24 @@ class Session:
             self.return_sink_sync = bool(sink_sync)
         if conceal is not None:
             self.return_conceal = bool(conceal)
+            # Keep the old single switch working: turning conceal ON means "do everything",
+            # which is what any existing caller meant by it.
+            self.return_fec = bool(conceal)
+            self.return_plc = bool(conceal)
+        # Explicit knobs win over the legacy switch, so the two can be tested apart. This is
+        # the whole point of splitting them: FEC repairs real loss, PLC invents audio, and
+        # they must be answerable separately.
+        if fec is not None:
+            self.return_fec = bool(fec)
+        if plc is not None:
+            self.return_plc = bool(plc)
         if self.return_on:            # re-open the player so the new values take effect
             self.set_return(False)
             self.set_return(True)
         return {"gain": self.return_gain, "jitter_ms": self.return_jitter_ms,
                 "dynamics": self.return_dynamics, "sink_sync": self.return_sink_sync,
-                "conceal": self.return_conceal, "player": self.return_player}
+                "conceal": self.return_conceal, "fec": self.return_fec,
+                "plc": self.return_plc, "player": self.return_player}
 
     @_locked
     def set_return(self, on):
@@ -649,6 +687,15 @@ class Session:
         play it here — e.g. when you're listening on the meeting device itself)."""
         self.return_on = bool(on)
         running = self.return_proc and self.return_proc.poll() is None
+        # The return player is counted in self.procs, so starting one would make `live` true
+        # again on a session the operator has ended - and the supervisor calls this to repair
+        # a dead return leg. Remember the preference either way; just do not act on it when
+        # there is no session to play into.
+        if self.return_on and not running and not getattr(self, "wanted", False):
+            # False, not a dict: this function normally returns a bool and the supervisor
+            # treats the result as "did the repair work". A dict is truthy, so returning one
+            # here would report a success that did not happen.
+            return False
         if self.return_on and not running:
             self.return_player = self._start_return(self.return_port)
         elif not self.return_on and running:
@@ -698,13 +745,34 @@ class Session:
                 # /api/return-tuning) — see set_return_tuning for why.
                 lat = getattr(self, "return_jitter_ms", None) or os.environ.get("NB_RETURN_JITTER_MS", "250")
                 gain = getattr(self, "return_gain", None) or os.environ.get("NB_RETURN_GAIN", "2.0")
+                # LOSS AND LATENESS ARE DIFFERENT FAULTS, AND ONE FLAG WAS DECIDING BOTH.
+                #
+                # `return_conceal` switched three things at once: do-lost, use-inband-fec and
+                # plc. It was turned OFF because PLC's guesses were audible as warble - correct,
+                # and it stays off. But that also disabled inband-FEC, which is not a guess:
+                # the bridge encodes with `inband-fec=true packet-loss-percentage=20`, so every
+                # packet already carries a redundant copy of the previous frame. The decoder was
+                # discarding it. The bridge has been spending a fifth of its bitrate on
+                # redundancy that this machine threw away.
+                #
+                # That mattered once the fault was measured instead of assumed. On 2026-08-24
+                # the link showed 6.7-10% PACKET LOSS at 6-15ms latency - things going missing,
+                # not arriving late. A deeper jitter buffer cannot repair a packet that never
+                # came, which is why every buffer change this week did nothing.
+                #
+                # FEC needs do-lost: the decoder only reaches for the redundant copy when the
+                # jitterbuffer tells it a packet is missing. So FEC = do-lost + use-inband-fec,
+                # and PLC stays a separate switch that defaults OFF. Where there is no redundant
+                # copy, opusdec emits silence rather than inventing something.
+                fec = getattr(self, "return_fec", True)
+                plc = getattr(self, "return_plc", False)
                 chain = [gst, "-q",
                     "udpsrc", "port=%d" % port, "caps=" + caps, "!",
                     "rtpjitterbuffer", "latency=" + lat] + (
-                        ["do-lost=true"] if getattr(self, "return_conceal", True) else []) + ["!",
+                        ["do-lost=true"] if (fec or plc) else []) + ["!",
                     "rtpopusdepay", "!",
-                    "opusdec"] + (["use-inband-fec=true", "plc=true"]
-                                  if getattr(self, "return_conceal", True) else []) + ["!",
+                    "opusdec"] + (["use-inband-fec=true"] if fec else []) \
+                               + (["plc=true"] if plc else []) + ["!",
                     "audioconvert", "!", "audioresample", "quality=10", "!",
                 ]
                 if getattr(self, "return_dynamics", True):
@@ -765,6 +833,9 @@ class Session:
 
     @_locked
     def stop(self):
+        # Record the intent FIRST. If this were set after the kills, a supervisor tick landing
+        # in between would see dead legs, believe they crashed, and restart them.
+        self.wanted = False
         # Ask every leg to quit and release its device, in parallel, before escalating. The
         # old version went terminate -> kill on a 4s budget shared across ALL processes, so
         # the last leg in the list could be SIGKILLed almost immediately - and a SIGKILLed
@@ -1211,7 +1282,12 @@ class StreamGuard:
                     "abandoned": list(self.giving_up)}
 
     def _tick(self):
-        if not SESSION.live:
+        # `wanted` first, and separately from `live`. A leg can still be dying while the
+        # operator's stop is already in flight, and in that window `live` is briefly true - so
+        # gating on `live` alone let one last repair through and printed "restart FAILED",
+        # which reads like a fault when it was a correct refusal. If the session was ended,
+        # there is nothing here to supervise.
+        if not getattr(SESSION, "wanted", False) or not SESSION.live:
             with self.lock:
                 self.live_since = 0.0
                 if self.repairs or self.giving_up:
@@ -1486,7 +1562,9 @@ class BridgeWatch:
         return None
 
     def _tick(self):
-        if not SESSION.live:
+        # Same reasoning as StreamGuard: an ended session is not a fault to diagnose, and
+        # repairing one would undo the operator's stop.
+        if not getattr(SESSION, "wanted", False) or not SESSION.live:
             if self.live_since or self.last_checks:
                 self._reset()
             return
@@ -1719,7 +1797,7 @@ class Handler(BaseHTTPRequestHandler):
                 "legs": LEGS.snapshot(),
                 "guard": GUARD.snapshot(),
                 "bridge_checks": BRIDGEWATCH.snapshot(),
-                "return_on": SESSION.return_on, "return_gain": SESSION.return_gain, "return_jitter_ms": SESSION.return_jitter_ms, "return_sink_sync": SESSION.return_sink_sync, "return_conceal": SESSION.return_conceal,
+                "return_on": SESSION.return_on, "return_gain": SESSION.return_gain, "return_jitter_ms": SESSION.return_jitter_ms, "return_sink_sync": SESSION.return_sink_sync, "return_conceal": SESSION.return_conceal, "return_fec": SESSION.return_fec, "return_plc": SESSION.return_plc,
                 "version": APP_VERSION,
                 "update_note": _update_note,
             })
@@ -1986,7 +2064,7 @@ class Handler(BaseHTTPRequestHandler):
             # bursts (raise the buffer). No restart, no terminal, no lost session.
             b = self._body()
             return self._send({"ok": True,
-                               **SESSION.set_return_tuning(b.get("gain"), b.get("jitter_ms"), b.get("dynamics"), b.get("sink_sync"), b.get("conceal"))})
+                               **SESSION.set_return_tuning(b.get("gain"), b.get("jitter_ms"), b.get("dynamics"), b.get("sink_sync"), b.get("conceal"), b.get("fec"), b.get("plc"))})
 
         if self.path == "/api/return":
             # "Play meeting audio here" toggle — starts/stops the local return player only.
