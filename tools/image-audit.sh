@@ -271,7 +271,7 @@ else
   # Units that carry WantedBy but must NOT be enabled in a production image: they are test
   # modes. bridge-testpattern declares Conflicts=bridge-feeder-net, so enabling it would
   # actively break real video.
-  EXPECT_DISABLED="bridge-feeder bridge-testpattern bridge-soak"
+  EXPECT_DISABLED="bridge-feeder bridge-testpattern bridge-soak bridge-crackle-sentry bridge-pitch"
   MISSING=0; NOTEN=0; NCHK=0
   for f in $REPO_UNITS; do
     u=$(basename "$f" .service)
@@ -302,11 +302,17 @@ else
   "$DEBUGFS" -R "stat /etc/systemd/system/bridge-agent.timer" "$ROOTDEV" 2>/dev/null \
     | grep -q Inode && ok "bridge-agent.timer present (this is what starts the agent)" \
     || no "bridge-agent.timer MISSING — the bridge will never poll for commands"
-  # The two that have shipped-but-disabled before. Named explicitly because they are the
-  # specific regression this section exists to catch.
+  # These two are installed but must NOT be enabled. That flipped on 2026-08-14: neither had
+  # ever been shown to help, and bridge-pitch does nothing at all while the gadget is in
+  # adaptive mode. Fewer services during a live session means fewer variables in an audio
+  # fault we still cannot explain. Installed-and-available, off by default.
   for u in bridge-crackle-sentry bridge-pitch; do
-    if grep -q "${u}.service" "$CAT/.wants" 2>/dev/null; then ok "$u is ENABLED (it was not, for weeks)"
-    else no "$u present but not enabled — the exact bug this check exists for"; fi
+    "$DEBUGFS" -R "stat /etc/systemd/system/${u}.service" "$ROOTDEV" 2>/dev/null | grep -q Inode \
+      && ok "$u is installed (available to enable deliberately)" \
+      || no "$u missing entirely — it should ship, just not run"
+    grep -q "${u}.service" "$CAT/.wants" 2>/dev/null \
+      && no "$u is ENABLED — it must be off by default" \
+      || ok "$u correctly NOT enabled"
   done
 fi
 

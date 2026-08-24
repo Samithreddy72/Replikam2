@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Does the presenter app blame the RIGHT END when it gives up?
+
+WHY THIS EXISTS
+---------------
+On 2026-08-14 the app printed, verbatim:
+
+    video_arriving still failing after 3 repairs — this is not something the app can fix;
+    check the bridge
+
+while the actual fault was on the Mac it was printed from: the camera daemons had been left
+wedged by a process killed mid-capture, so avfoundation handed out the device and delivered
+no frames. Voice and return audio were green on the same poll, which means the bridge and the
+link were both fine.
+
+Sending an operator to the far end of the link to look for a local fault is the single most
+expensive mistake this project keeps making — it is what turned one wedged camera into an
+evening of flashing bridge images. So the sentence the supervisor prints when it gives up is
+now worth testing.
+
+  python3 tests/test-app-diagnosis.py
+"""
+import pathlib, re, sys, types
+
+SRC = pathlib.Path(__file__).resolve().parent.parent / "app" / "netbridge-source" / "source_app.py"
+
+passed = failed = 0
+def ok(m):
+    global passed; passed += 1; print("  PASS  %s" % m)
+def no(m, got=None):
+    global failed; failed += 1; print("  FAIL  %s" % m)
+    if got is not None: print("          %r" % (got,))
+
+# Importing the whole app would start threads and bind a port, so lift just the one method
+# out of the file and give it the two collaborators it touches. Testing the real source text
+# means the test cannot drift away from what ships.
+text = SRC.read_text()
+m = re.search(r"\n    def _giving_up_because\(self, key, done\):.*?\n(?=    def )", text, re.S)
+if not m:
+    print("  FAIL  _giving_up_because not found in source_app.py"); sys.exit(1)
+
+ns = {}
+guard = types.SimpleNamespace(snapshot=lambda: {"repairs": {}})
+exec("class W:\n" + m.group(0).rstrip() + "\n", {"GUARD": guard}, ns)
+W = ns["W"]
+
+def watcher(deaths, others):
+    w = W()
+    w.LEG_FOR = {"video_arriving": "video", "voice_arriving": "voice"}
+    w.last_checks = others
+    g = types.SimpleNamespace(snapshot=lambda: {"repairs": deaths})
+    # rebind the module global the method closes over
+    W._giving_up_because.__globals__["GUARD"] = g
+    return w
+
+print("\nPresenter app — which end does it blame?")
+print("=======================================")
+
+print("\n  ---- the 2026-08-14 case ----")
+w = watcher({"video": 3}, {"voice_arriving": {"ok": True}, "return_audio": {"ok": True}})
+msg = w._giving_up_because("video_arriving", 3)
+if "camera" in msg.lower() and "this mac" in msg.lower():
+    ok("a dying video leg while voice+return are green -> blames the Mac's camera")
+else:
+    no("still sends the operator to the bridge for a local camera fault", msg)
+if "fix-camera-macos.sh" in msg:
+    ok("gives the actual repair command instead of 'check the bridge'")
+else:
+    no("names the cause but not the fix", msg)
+if "check the bridge" not in msg.lower():
+    ok("does not say 'check the bridge' when the bridge is demonstrably fine")
+else:
+    no("still contains the misleading sentence", msg)
+
+print("\n  ---- a leg that dies with nothing else working ----")
+w = watcher({"video": 4}, {"voice_arriving": {"ok": False}})
+msg = w._giving_up_because("video_arriving", 3)
+if "local" in msg.lower() and "camera" not in msg.lower():
+    ok("dying leg, nothing green -> local capture/encode, without guessing the camera")
+else:
+    no("over-claims the camera when there is no evidence the bridge is fine", msg)
+
+print("\n  ---- a leg that stays UP ----")
+# A bridge that is not receiving cannot kill our encoder, so zero deaths means the fault is
+# downstream. This is the case where 'check the bridge' is the correct advice.
+w = watcher({}, {"voice_arriving": {"ok": True}})
+msg = w._giving_up_because("video_arriving", 3)
+if "downstream" in msg.lower() or "bridge" in msg.lower():
+    ok("healthy local leg + nothing arriving -> points downstream (network or bridge)")
+else:
+    no("fails to point anywhere useful when the fault really is remote", msg)
+
+print("\n  ---- negative control ----")
+a = watcher({"video": 3}, {"voice_arriving": {"ok": True}})._giving_up_because("video_arriving", 3)
+b = watcher({}, {"voice_arriving": {"ok": True}})._giving_up_because("video_arriving", 3)
+if a != b:
+    ok("the two situations produce different sentences — the test can tell them apart")
+else:
+    no("same message either way; this proves nothing", a)
+
+print("\n  ---- the camera is released, not killed ----")
+# The wedge that cost the 2026-08-14 session was ffmpeg being SIGKILLed while it held
+# avfoundation. Everything below is checked against the real source text, because the failure
+# is only visible in the ORDER of the shutdown steps.
+if "stdin=subprocess.PIPE" in text:
+    ok("media legs are spawned with a stdin pipe (so they can be asked to quit)")
+else:
+    no("no stdin pipe — the only way to stop ffmpeg is a signal")
+
+q = re.search(r"\ndef _quit\(p, timeout=[\d.]+\):.*?\n(?=\n\S)", text, re.S)
+if q:
+    body = q.group(0)
+    ask, term, kill = (body.find('b"q'), body.find(".terminate()"), body.find(".kill()"))
+    if -1 not in (ask, term, kill) and ask < term < kill:
+        ok("escalation order is ask -> SIGTERM -> SIGKILL, never straight to kill")
+    else:
+        no("escalation order is wrong or incomplete", (ask, term, kill))
+else:
+    no("_quit() helper not found")
+
+for fn, why in (("def stop", "full teardown"), ("def respawn_leg", "single-leg repair")):
+    seg = text[text.find(fn):]
+    seg = seg[:seg.find("\n    @_locked", 10) if "\n    @_locked" in seg[10:] else 3000]
+    if "_quit(" in seg:
+        ok("%-16s uses the polite quit (%s)" % (fn.replace("def ",""), why))
+    else:
+        no("%s still stops processes without releasing the device" % fn)
+
+print("\n  %d passed, %d failed\n" % (passed, failed))
+sys.exit(1 if failed else 0)

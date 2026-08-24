@@ -64,7 +64,16 @@ CONTROL_URL=${CONTROL_URL:-}
 BOOTSTRAP_TOKEN=${BOOTSTRAP_TOKEN:-}
 EOF
 chmod 600 /etc/default/bridge-agent
-echo "${BRIDGE_VERSION:-dev}" >/etc/bridge/version
+# Only overwrite the version CI baked in if provisioning actually supplies one. The old
+# line wrote "dev" whenever BRIDGE_VERSION was unset - which is every card, since the
+# provision conf does not carry it - so the one field that identifies an image destroyed
+# itself on first boot. On 2026-08-14 a running bridge had to be identified by fingerprinting
+# an unrelated bug in its status output, because /etc/bridge/version said "dev".
+if [ -n "${BRIDGE_VERSION:-}" ]; then
+  echo "$BRIDGE_VERSION" >/etc/bridge/version
+elif [ ! -s /etc/bridge/version ]; then
+  echo dev >/etc/bridge/version
+fi
 
 # 2a. Per-device hostname. Every card ships as "raspberrypi", so putting two bridges on
 # one venue LAN collides on mDNS (both claim raspberrypi.local), makes the router's client

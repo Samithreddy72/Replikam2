@@ -220,10 +220,23 @@ for u in bridge-gadget bridge-feeder-net bridge-uvcd bridge-feeder-audio bridge-
          bridge-watchdog.timer bridge-web bridge-wifi-portal bridge-idle-frame \
          bridge-idle-frame.timer gadget-clean-detach bridge-agent.timer \
          bridge-ab-healthcheck bridge-wifi-unblock bridge-firstdiag \
-         bridge-firstboot bridge-regen-hostkeys bridge-pitch bridge-crackle-sentry; do
+         bridge-firstboot bridge-regen-hostkeys; do
   systemctl enable "$u" 2>/dev/null || echo "WARN: could not enable $u"
 done
 systemctl disable bridge-testpattern 2>/dev/null || true
+# Installed but deliberately NOT enabled, and both for the same reason: neither has ever been
+# shown to help, and every service running during a live session is another variable in an
+# audio fault we have not yet explained.
+#
+#   bridge-crackle-sentry  built 21 Jul, enabled 13 Aug, never once caught a real crackle.
+#                          While a session holds the PCM it only greps the journal, so it is
+#                          cheap - but "cheap and unproven" is still not a reason to run it.
+#   bridge-pitch           does nothing at all unless the gadget is in c_sync=async, and the
+#                          image ships adaptive. Enabling a daemon that exits immediately
+#                          buys nothing and hides the fact that the feature is untested on
+#                          hardware. Enable it deliberately when running that experiment.
+systemctl disable bridge-crackle-sentry 2>/dev/null || true
+systemctl disable bridge-pitch 2>/dev/null || true
 
 # ---------------- GENERALIZE: strip ALL per-device identity (secret-free) ----------------
 log "generalize -> secret-free"

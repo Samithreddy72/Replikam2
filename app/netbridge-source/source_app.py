@@ -64,7 +64,7 @@ RTP_VIDEO, RTP_VOICE = 5000, 5002
 # Build stamp. build.py rewrites this line, and it is what the updater compares against
 # the signed manifest — so a build that forgets to bump it simply never updates, rather
 # than update-looping.
-APP_VERSION = "1.1.6"
+APP_VERSION = "1.1.7"
 
 
 # --------------------------------------------------------------------------- state
@@ -560,7 +560,13 @@ class Session:
         for name, argv in (("video", v), ("voice", a)):
             lf = open(os.path.join(str(logdir), "netbridge-source-%s.log" % name), "w")
             self.logs.append(lf)
-            proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=lf)
+            # stdin is a PIPE so this leg can be asked to quit POLITELY later. ffmpeg exits
+            # cleanly on "q" and releases its capture device; killed with a signal while it
+            # holds avfoundation it can leave the macOS camera daemons wedged - handing out
+            # the device afterwards but never delivering frames. That happened on 2026-08-14
+            # and cost a live session. See _quit().
+            proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                                    stdout=subprocess.DEVNULL, stderr=lf)
             self.procs.append(proc)
             self.leg_proc[name] = proc
             if name == "voice":
@@ -581,19 +587,17 @@ class Session:
             return False
         old = (getattr(self, "leg_proc", {}) or {}).get(name)
         if old is not None:
-            try:
-                if old.poll() is None:
-                    old.terminate()
-                    old.wait(timeout=3)
-            except Exception:
-                try: old.kill()
-                except Exception: pass
+            # Same care as a full stop. A respawn happens exactly when something is already
+            # wrong, which is the worst moment to SIGKILL a process holding the camera and
+            # turn a recoverable fault into an unrecoverable one.
+            _quit(old, timeout=3.0)
             if old in self.procs:
                 self.procs.remove(old)
         try:
             lf = open(os.path.join(str(_logdir()), "netbridge-source-%s.log" % name), "w")
             self.logs.append(lf)
-            proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=lf)
+            proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                                    stdout=subprocess.DEVNULL, stderr=lf)
         except Exception:
             return False
         self.procs.append(proc)
@@ -761,22 +765,67 @@ class Session:
 
     @_locked
     def stop(self):
+        # Ask every leg to quit and release its device, in parallel, before escalating. The
+        # old version went terminate -> kill on a 4s budget shared across ALL processes, so
+        # the last leg in the list could be SIGKILLed almost immediately - and a SIGKILLed
+        # ffmpeg is what leaves the camera wedged. _quit() gives each one its own escalation.
         for p in self.procs:
             try:
-                p.terminate()
+                if p.stdin and not p.stdin.closed:
+                    p.stdin.write(b"q\n"); p.stdin.flush()
             except Exception:
                 pass
-        deadline = time.time() + 4
         for p in self.procs:
-            try:
-                p.wait(timeout=max(0.1, deadline - time.time()))
-            except Exception:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
+            _quit(p)
         self.procs = []
         self.return_proc = None
+
+
+
+def _quit(p, timeout=4.0):
+    """Stop one media process without wedging the hardware it holds.
+
+    WHY THE ORDER MATTERS
+    ---------------------
+    ffmpeg reading from avfoundation must be allowed to close the device itself. Ask first
+    ("q" on stdin, its documented graceful quit), then SIGTERM, and only SIGKILL as a last
+    resort. Going straight to a signal - and especially to SIGKILL - can leave the macOS
+    capture daemons handing out the camera while delivering no frames at all, which looks
+    exactly like a broken bridge and is not fixable from inside this app.
+
+    That is not hypothetical: on 2026-08-14 the app was killed mid-capture, every later
+    launch got a camera that opened and produced nothing, the supervisor restarted the video
+    leg three times against a fault no restart could reach, and the session was lost.
+
+    Each escalation is skipped if the process is already gone, so the normal path costs
+    nothing.
+    """
+    if p is None:
+        return
+    try:
+        if p.poll() is not None:
+            return
+    except Exception:
+        return
+    try:
+        if p.stdin and not p.stdin.closed:
+            p.stdin.write(b"q\n")
+            p.stdin.flush()
+    except Exception:
+        pass
+    for step in ("asked", "term"):
+        try:
+            p.wait(timeout=timeout if step == "asked" else 2.0)
+            return
+        except Exception:
+            pass
+        if step == "asked":
+            try: p.terminate()
+            except Exception: pass
+    try:
+        p.kill()
+    except Exception:
+        pass
 
 
 SESSION = Session()
@@ -1351,6 +1400,48 @@ class BridgeWatch:
                 applied.get("jitter_ms"), why)
         print("[fleet-tune] %s" % self.last, flush=True)
 
+    def _giving_up_because(self, key, done):
+        """Say which END the fault is on before telling anyone to go looking.
+
+        The old text was always "check the bridge". On 2026-08-14 that sentence was printed
+        while the actual fault was on THIS Mac: the camera daemons were wedged after a
+        process was killed mid-capture, so avfoundation handed out the device and delivered
+        no frames. The bridge was healthy — voice and return audio were green on the same
+        poll — and the operator was sent to the far end of the link to look for it. That is
+        the exact wrong-end misdiagnosis this whole supervisor exists to prevent.
+
+        The tell is local and already recorded: a leg that keeps DYING is a capture failure
+        on this machine, because a bridge that is not receiving cannot kill our encoder. A
+        leg that stays up while the far end reports nothing arriving is a transport or bridge
+        problem. Those need different sentences and different people.
+        """
+        leg = self.LEG_FOR.get(key)
+        deaths = 0
+        if leg:
+            try:
+                deaths = int((GUARD.snapshot() or {}).get("repairs", {}).get(leg, 0))
+            except Exception:
+                deaths = 0
+
+        # Other checks green on the same poll means the link and the bridge are fine.
+        others_ok = [k for k, v in (self.last_checks or {}).items()
+                     if isinstance(v, dict) and k != key
+                     and k in ("video_arriving", "voice_arriving", "return_audio")
+                     and v.get("ok")]
+
+        if leg == "video" and deaths and others_ok:
+            return ("video is not arriving, but the video leg keeps dying on THIS Mac while "
+                    "%s still work — so the bridge is fine. This is almost always the macOS "
+                    "camera left wedged by a process that was killed while holding it: it "
+                    "opens but delivers no frames. Fix it here, not on the bridge:\n"
+                    "    bash tools/fix-camera-macos.sh" % " and ".join(others_ok))
+        if leg and deaths:
+            return ("%s is not arriving and the %s leg keeps dying on THIS Mac (%d times) — "
+                    "the fault is local capture or encoding, not the bridge."
+                    % (key, leg, deaths))
+        return ("%s still failing after %d repairs, and the leg here is staying up — so the "
+                "problem is downstream of this Mac: the network or the bridge." % (key, done))
+
     def _repair(self, key, checks):
         """Fix one failing check. Returns a human sentence, or None if nothing was done."""
         leg = self.LEG_FOR.get(key)
@@ -1467,8 +1558,7 @@ class BridgeWatch:
             if n < self.STRIKES or done >= self.MAX_REPAIRS:
                 if done >= self.MAX_REPAIRS and n == self.STRIKES:
                     with self.lock:
-                        self.last = ("%s still failing after %d repairs — this is not something "
-                                     "the app can fix; check the bridge" % (key, done))
+                        self.last = self._giving_up_because(key, done)
                     print("[bridge] %s" % self.last, flush=True)
                 continue
 

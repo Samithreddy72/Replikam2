@@ -28,6 +28,10 @@ ON_DEMAND = {
     "bridge-soak":        "a soak test, run by hand",
     "bridge-testpattern": "explicitly disabled at build time; used for bring-up",
     "bridge-update":      "invoked by the update command, not at boot",
+    # Turned OFF again on 2026-08-14. Both ship so they can be switched on for a specific
+    # experiment; neither runs by default. See the dedicated section below for why.
+    "bridge-crackle-sentry": "unproven detector; enable deliberately, never by default",
+    "bridge-pitch":          "inert unless c_sync=async; enable only for that experiment",
 }
 
 passed = failed = 0
@@ -64,9 +68,7 @@ print("\n  ---- the ones this test was written for ----")
 def is_enabled(u):
     return u.replace(".timer", "") in enabled
 
-for u, why in (("bridge-crackle-sentry", "sets clock_suspect, which the jitter diagnosis reads"),
-               ("bridge-pitch", "closes the USB audio rate loop"),
-               ("jitter-sentry", "measures the path and adapts"),
+for u, why in (("jitter-sentry", "measures the path and adapts"),
                ("flight-recorder", "the power black box"),
                ("bridge-web", "serves /api/status to the app and the fleet"),
                ("bridge-agent.timer", "the only way the fleet reaches this device")):
@@ -74,6 +76,21 @@ for u, why in (("bridge-crackle-sentry", "sets clock_suspect, which the jitter d
         ok("%-24s enabled  (%s)" % (u, why))
     else:
         no("%s is NOT enabled — %s" % (u, why))
+
+print("\n  ---- installed, but deliberately NOT enabled ----")
+# These two were enabled on 13 Aug and turned back off on 14 Aug. Neither had ever been shown
+# to help, and bridge-pitch does nothing whatsoever while the gadget is in adaptive mode -
+# which is what the image ships. During an audio fault we still cannot explain, every extra
+# service running in a live session is another variable. They stay installed so either can be
+# switched on deliberately for an experiment; they must not switch themselves on.
+for u, why in (("bridge-crackle-sentry", "never caught a real crackle; unproven"),
+               ("bridge-pitch", "inert unless c_sync=async, which is not the shipped default")):
+    if not (UNITS / (u + ".service")).exists():
+        no("%s should still SHIP, just not run" % u)
+    elif is_enabled(u):
+        no("%s is enabled again — it must be off by default (%s)" % (u, why))
+    else:
+        ok("%-24s installed, not enabled  (%s)" % (u, why))
 
 print("\n  ---- everything enabled actually exists ----")
 ghosts = sorted(u for u in enabled if u not in shipped
