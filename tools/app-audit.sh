@@ -165,6 +165,40 @@ srcgrep '_kill_orphan_media' \
   && ok "sweeps its own leftovers at startup after a hard kill" \
   || warn "no orphan sweep — a crashed run could leave ffmpeg holding the camera"
 
+sec "Ending a session actually ends it"
+# The camera kept recording after an operator ended a session, because `live` was derived
+# from process state - so a stop and a crash looked identical and the supervisors restarted
+# the legs. Intent has to be recorded, not inferred.
+srcgrep 'wanted = False' && ok "the session records whether it is WANTED, not just running" \
+  || no "no intent flag — a stop is indistinguishable from a crash"
+if body stop | grep -q 'self.wanted = False'; then
+  ST=$(body stop)
+  IF=$(printf '%s' "$ST" | grep -n 'self.wanted = False' | head -1 | cut -d: -f1)
+  IK=$(printf '%s' "$ST" | grep -n '_quit(\|stdin.write' | head -1 | cut -d: -f1)
+  if [ -z "$IK" ] || [ "$IF" -lt "$IK" ]; then
+    ok "intent is recorded BEFORE anything is killed (no window for a tick to resurrect it)"
+  else no "killed first, flagged second — a supervisor tick in between restarts the session"; fi
+else no "stop() does not record intent"; fi
+body respawn_leg | grep -q 'wanted' \
+  && ok "leg repair refuses on a session the operator ended" \
+  || no "the supervisor will silently undo a deliberate stop"
+body set_return | grep -q 'wanted' \
+  && ok "the return player will not restart on an ended session" \
+  || no "the return player can resurrect `live` after a stop"
+
+sec "Return audio uses the redundancy the bridge already pays for"
+# The bridge encodes with inband-fec=true packet-loss-percentage=20. One flag used to switch
+# do-lost, use-inband-fec and plc together and was off because PLC's guesses were audible -
+# so a fifth of the bridge's bitrate was redundancy this machine discarded. FEC rebuilds from
+# data actually sent; PLC invents. They are different questions.
+srcgrep 'return_fec' && srcgrep 'return_plc' \
+  && ok "FEC and PLC are separate switches" \
+  || no "one flag still decides both — turning off the guessing also loses the repair"
+srcgrep 'NB_RETURN_FEC", "1"' && ok "FEC defaults ON (the redundancy is already on the wire)" \
+  || warn "FEC does not default on"
+srcgrep 'NB_RETURN_PLC", "0"' && ok "PLC defaults OFF (its guesses were the artifact)" \
+  || warn "PLC does not default off"
+
 sec "Safety of what it accepts from the network"
 # The bridge is a courier for presenter tuning. A courier must not be able to make this
 # machine do something unbounded.
