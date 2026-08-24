@@ -33,6 +33,48 @@ if mountpoint -q /data && [ -b "${DISK}p4" ] && [ ! -f /data/.expanded ]; then
   touch /data/.expanded 2>/dev/null || true
 fi
 
+# ---------------------------------------------------------------------------------------
+# Everything from here to the CONF check must NOT depend on a provisioning file, because on
+# these images there ISN'T one. The fleet config is seeded onto /data at build time instead,
+# so `exit 0` below fires on every single card - and it used to sit ABOVE this work, which
+# meant the hostname rename and the version stamp never ran anywhere. Every bridge stayed
+# "raspberrypi" and every bridge reported version "dev". Enrolment still worked, which is
+# precisely why nobody noticed for weeks.
+# ---------------------------------------------------------------------------------------
+
+# 2a. Per-device hostname. Every card ships as "raspberrypi", so putting two bridges on
+# one venue LAN collides on mDNS (both claim raspberrypi.local), makes the router's client
+# list useless, and gives arbitrary numeric suffixes on the tailnet - MAIN already shows up
+# as "bridge-001-1" for exactly this reason. Name it after the pairing code, which is the
+# same identifier printed on the label and shown in the fleet panel, so the device is
+# recognisable everywhere by one name: netbridge-2626.local, netbridge-2626 on the tailnet.
+PC="$(cat /etc/bridge/pairing-code 2>/dev/null || true)"
+if [ -z "${PC:-}" ]; then
+  SER="$(awk -F': *' '/^Serial/{print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
+  [ -n "${SER:-}" ] && PC="$(printf '%s' "$SER" | sha256sum | cut -c1-4 | tr 'a-f' 'A-F')"
+fi
+if [ -n "${PC:-}" ]; then
+  NEWHOST="netbridge-${PC}"
+  if [ "$(hostname)" != "$NEWHOST" ]; then
+    hostnamectl set-hostname "$NEWHOST" 2>/dev/null \
+      || { echo "$NEWHOST" >/etc/hostname 2>/dev/null; hostname "$NEWHOST" 2>/dev/null; }
+    # keep /etc/hosts consistent or sudo warns "unable to resolve host" on every call
+    sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$NEWHOST/" /etc/hosts 2>/dev/null \
+      || printf '127.0.1.1\t%s\n' "$NEWHOST" >>/etc/hosts 2>/dev/null || true
+    log "hostname -> $NEWHOST"
+  fi
+fi
+
+# Version stamp. /etc/bridge is bind-mounted from /data/etc-bridge, so the copy the image
+# build writes into the rootfs is invisible at runtime; build-disk-image.sh seeds the bind
+# source instead. Only fill in a fallback if that seed is somehow absent.
+if [ -n "${BRIDGE_VERSION:-}" ]; then
+  echo "$BRIDGE_VERSION" >/etc/bridge/version
+elif [ ! -s /etc/bridge/version ]; then
+  echo dev >/etc/bridge/version
+  log "version: no seed on /data and none provisioned -> dev"
+fi
+
 CONF=/boot/firmware/bridge-provision.conf
 [ -f "$CONF" ] || CONF=/boot/bridge-provision.conf
 [ -f "$CONF" ] || { log "no provision conf found; nothing to do"; exit 0; }
@@ -69,34 +111,6 @@ chmod 600 /etc/default/bridge-agent
 # provision conf does not carry it - so the one field that identifies an image destroyed
 # itself on first boot. On 2026-08-14 a running bridge had to be identified by fingerprinting
 # an unrelated bug in its status output, because /etc/bridge/version said "dev".
-if [ -n "${BRIDGE_VERSION:-}" ]; then
-  echo "$BRIDGE_VERSION" >/etc/bridge/version
-elif [ ! -s /etc/bridge/version ]; then
-  echo dev >/etc/bridge/version
-fi
-
-# 2a. Per-device hostname. Every card ships as "raspberrypi", so putting two bridges on
-# one venue LAN collides on mDNS (both claim raspberrypi.local), makes the router's client
-# list useless, and gives arbitrary numeric suffixes on the tailnet - MAIN already shows up
-# as "bridge-001-1" for exactly this reason. Name it after the pairing code, which is the
-# same identifier printed on the label and shown in the fleet panel, so the device is
-# recognisable everywhere by one name: netbridge-2626.local, netbridge-2626 on the tailnet.
-PC="$(cat /etc/bridge/pairing-code 2>/dev/null || true)"
-if [ -z "${PC:-}" ]; then
-  SER="$(awk -F': *' '/^Serial/{print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
-  [ -n "${SER:-}" ] && PC="$(printf '%s' "$SER" | sha256sum | cut -c1-4 | tr 'a-f' 'A-F')"
-fi
-if [ -n "${PC:-}" ]; then
-  NEWHOST="netbridge-${PC}"
-  if [ "$(hostname)" != "$NEWHOST" ]; then
-    hostnamectl set-hostname "$NEWHOST" 2>/dev/null \
-      || { echo "$NEWHOST" >/etc/hostname 2>/dev/null; hostname "$NEWHOST" 2>/dev/null; }
-    # keep /etc/hosts consistent or sudo warns "unable to resolve host" on every call
-    sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$NEWHOST/" /etc/hosts 2>/dev/null \
-      || printf '127.0.1.1\t%s\n' "$NEWHOST" >>/etc/hosts 2>/dev/null || true
-    log "hostname -> $NEWHOST"
-  fi
-fi
 
 # 2b. setup-AP passphrase. NOT written here any more: it is derived per device from the
 # CPU serial by bridge-derive-pass, which every consumer calls. Writing a value here was

@@ -285,6 +285,21 @@ else
   printf '# managed on /data (read-only root)\n' > "$MNT/p4/config/bridge-agent"
 fi
 printf '# managed on /data (read-only root)\n' > "$MNT/p4/config/bridge-net"
+# Seed the VERSION into the /data bind source, which is the only copy that exists at runtime.
+#
+# fstab binds /data/etc-bridge over /etc/bridge, and this build creates that directory EMPTY.
+# So the version ci-build-image.sh writes to /etc/bridge/version inside the rootfs is shadowed
+# the moment /data mounts, and bridge-web falls back to the literal string "dev". Every card
+# has reported "dev" since the bind was introduced - which on 2026-08-24 meant a running
+# bridge had to be identified by fingerprinting an unrelated bug in its status output, and a
+# fix aimed at bridge-firstboot.sh changed nothing because it was writing to the shadowed
+# path too. Confirmed by reading the device: "cannot stat /etc/bridge/version (No such file)".
+if [ -n "${VERSION:-}" ]; then
+  printf '%s\n' "$VERSION" > "$MNT/p4/etc-bridge/version"
+  log "data: seeded /etc/bridge/version = $VERSION (the bind source, not the shadowed rootfs copy)"
+else
+  log "data: no --version given; /etc/bridge/version left unset"
+fi
 touch "$MNT/p4"/soak.log
 install -d -o 1000 -g 1000 "$MNT/p4"/fleet-brain 2>/dev/null || install -d "$MNT/p4"/fleet-brain
 # secret-free fleet-brain env template (real secrets arrive at claim; DB lives on /data)

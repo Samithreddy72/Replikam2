@@ -639,7 +639,20 @@ def _stream_live(name, value, now):
     # A stale cache (process asleep, panel closed for an hour) says nothing about NOW.
     if gap <= 0 or gap > 120:
         return False
-    return value > old
+
+    # ANY advance is not enough. An idle GStreamer feeder still wakes up now and then, so
+    # `value > old` made the voice flag flicker true/false for minutes after a session ended
+    # - on a bridge with nothing arriving at it. A rate floor separates the two cleanly:
+    # decoding real RTP burns ~14 CPU ticks/second (29 ticks over a 2s sample, measured on
+    # this hardware), while an idle feeder manages roughly 0.1. One tick per second sits two
+    # orders of magnitude below live and an order above idle.
+    #
+    # The return stream is exempt: its counter is a CAPTURE pointer in frames, which advances
+    # at the sample rate (48000/s) whenever the meeting laptop is playing into the bridge -
+    # something that continues perfectly correctly after the presenter has gone home.
+    rate = (value - old) / gap
+    floor = 1.0 if name in ("video", "voice") else 0.0
+    return rate > floor
 
 
 def _return_pcm():

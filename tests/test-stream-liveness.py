@@ -92,6 +92,36 @@ if not bw._stream_live("video", None, 105.0):
 else:
     no("a missing counter was treated as live")
 
+print("\n  ---- an idle feeder is not a live one ----")
+# Measured on hardware: decoding real RTP burns ~14 CPU ticks/second; an idle GStreamer
+# feeder still wakes occasionally and manages about 0.1. `value > old` counted that as live,
+# so after a session ended the voice flag flickered true/false for minutes on a bridge with
+# nothing arriving at it.
+bw._STREAM_SEEN.clear()
+bw._stream_live("voice", 1000, 100.0)
+if not bw._stream_live("voice", 1001, 110.0):          # 1 tick in 10s = 0.1/s
+    ok("an idle feeder ticking over does NOT read as live")
+else:
+    no("any advance still counts — the flag will flicker after a session ends")
+
+bw._STREAM_SEEN.clear()
+bw._stream_live("voice", 1000, 100.0)
+if bw._stream_live("voice", 1028, 102.0):              # 28 ticks in 2s = 14/s
+    ok("a feeder actually decoding RTP reads as live")
+else:
+    no("real traffic is now being rejected — the floor is too high")
+
+print("\n  ---- the return stream is exempt, and must be ----")
+# Its counter is a capture pointer in frames at the sample rate, and it keeps advancing
+# whenever the meeting laptop plays into the bridge - which correctly continues after the
+# presenter has gone.
+bw._STREAM_SEEN.clear()
+bw._stream_live("return", 0, 100.0)
+if bw._stream_live("return", 48000, 101.0):
+    ok("return audio still reports live from the capture pointer")
+else:
+    no("the CPU floor was wrongly applied to a frame counter")
+
 print("\n  ---- negative control ----")
 bw._STREAM_SEEN.clear()
 bw._stream_live("x", 10, 1.0)
