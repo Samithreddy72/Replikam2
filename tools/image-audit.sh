@@ -268,6 +268,40 @@ else
   ok "no unconditional 'dev' write remains"
 fi
 
+sec "It can say when it is still settling after a flash"
+# Flashing rewrites the whole disk, /data included, so the /data/.expanded guard goes with it
+# and the filesystem expansion runs AGAIN on that boot - resize2fs plus ssh-keygen -A against
+# a real-time media pipeline. An operator who goes live immediately hears bursts that stop by
+# themselves, with every metric reading healthy throughout.
+grepf bridge-web.py 'def settling' \
+  && ok "the bridge can report that post-flash work is still running" \
+  || no "no settling signal — bursts after a flash look identical to a fault"
+grepf bridge-web.py 'STILL SETTLING' \
+  && ok "it says so in /api/checks, the line the app actually displays" \
+  || no "settling is not surfaced where an operator would see it"
+grepf bridge-web.py 'FIRSTBOOT_UNITS' \
+  && ok "watches the one-shot units that only run after a flash" \
+  || no "does not know which units to watch"
+
+sec "A flashed card knows its own name and version"
+grepf bridge-firstboot.sh 'NEWHOST="netbridge-' \
+  && ok "hostname is derived from the pairing code" || no "no hostname rename"
+# Both used to sit BELOW the provision-conf early exit, which fires on every one of these
+# images, so neither ever ran: every card stayed "raspberrypi" and reported version "dev".
+if [ "$(python3 -c "
+t=open('$CAT/bridge-firstboot.sh').read()
+ex=t.find('no provision conf found'); ho=t.find('hostnamectl set-hostname'); ve=t.find('>/etc/bridge/version')
+print('ok' if (ex>0 and 0<ho<ex and 0<ve<ex) else 'bad')" 2>/dev/null)" = "ok" ]; then
+  ok "hostname and version are set BEFORE the provision-conf early exit"
+else
+  no "identity work still sits after the early exit — it will never run"
+fi
+if [ -n "$DATADEV" ]; then
+  V=$("$DEBUGFS" -R "cat /etc-bridge/version" "$DATADEV" 2>/dev/null | tr -d '\r\n ')
+  if [ -n "$V" ]; then ok "version seeded on /data where it is actually readable: $V"
+  else no "/data/etc-bridge/version is empty — the bind shadows the rootfs copy, so it reads 'dev'"; fi
+fi
+
 sec "The new remote-read capability"
 has bridge-read.py && ok "bridge-read.py installed" || no "bridge-read.py MISSING"
 grepf bridge-read.py 'os\.path\.realpath\(r\) for r in _ROOTS' \
