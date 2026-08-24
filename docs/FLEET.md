@@ -152,6 +152,11 @@ Alerts appear with their known fix attached, and also email you. Seven kinds: of
 thermal, under-voltage/throttling, service failure, restart storms, the audio-clock crackle
 signature, and PIN lockout.
 
+> **The crackle alert needs its detector switched on.** `bridge-crackle-sentry` ships but is
+> **not enabled** as of 2026-08-24: it had never caught a real crackle, and during an audio
+> fault nobody has explained yet, every extra service in a live session is another variable.
+> Until it is enabled deliberately, `clock_suspect` stays false and that alert cannot fire.
+
 An alert clears itself when the condition does.
 
 > ⚠️ **Do not judge power health from the `throttled` field.** It reports the *instantaneous*
