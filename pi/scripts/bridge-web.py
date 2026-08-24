@@ -459,13 +459,21 @@ def gather():
     d["version"] = read(VERSION_FILE) or "dev"
     d["tailscale_ip"] = tailscale_ip4()
     svc = dict(d["services"])
-    # Per-stream up/down. Service "active" is the cheap proxy; a configured UDC means a
-    # client is actually attached so the forward streams can land somewhere.
+    # Per-stream up/down, from counters that MOVE. A configured UDC is still required — a
+    # forward stream with nowhere to land is not live — but it is no longer sufficient.
+    # See _stream_live() for why "the service is active" was not a usable test.
     attached = d["udc"] == "configured"
+    _now = time.monotonic()
+    _, _vt = _feeder_cpu_ticks()
+    _, _at = _voice_feeder_cpu_ticks()
+    _rp = _return_hw_ptr()
     d["streams"] = {
-        "video":  svc.get("bridge-feeder-net") == "active" and attached,
-        "voice":  svc.get("bridge-feeder-audio") == "active" and attached,
-        "return": svc.get("bridge-return-audio") == "active" and attached,
+        "video":  attached and svc.get("bridge-feeder-net") == "active"
+                  and _stream_live("video", _vt, _now),
+        "voice":  attached and svc.get("bridge-feeder-audio") == "active"
+                  and _stream_live("voice", _at, _now),
+        "return": attached and svc.get("bridge-return-audio") == "active"
+                  and _stream_live("return", _rp, _now),
     }
     d["restarts"] = {
         "feeder_net": svc_restarts("bridge-feeder-net"),
@@ -592,6 +600,46 @@ def _voice_feeder_cpu_ticks():
         return pids[0], int(f[11]) + int(f[12])
     except Exception:
         return pids[0], None
+
+
+# Remembered between /api/status calls so liveness can be a DELTA rather than a guess.
+# {name: (counter, monotonic_at_read)}
+_STREAM_SEEN = {}
+
+
+def _stream_live(name, value, now):
+    """True only if this stream's counter has MOVED since the previous status poll.
+
+    WHY NOT "is the service active"
+    -------------------------------
+    That was the old test, and it could not be false. bridge-feeder-net, -audio and
+    -return-audio are enabled at boot and sit on their UDP sockets forever, so they read
+    `active` on an idle bridge with nobody connected to it. Combined with "a USB cable is
+    plugged in", the fleet reported a bridge as LIVE whenever it was merely powered — which
+    is what it showed on 2026-08-24 with the presenter app stopped and no encoder running
+    anywhere. An indicator that is true whenever the device has power is not an indicator.
+
+    A counter that advances is evidence: CPU burned by a feeder means RTP is actually being
+    decoded, and a capture hw_ptr that moves means the meeting laptop is genuinely delivering
+    audio. Both are already read for /api/checks; here they are compared against the previous
+    poll instead of sampled over a sleep, so /api/status stays cheap enough for a 5s panel.
+
+    The first poll after a restart has nothing to compare against and reports False. That is
+    the right way round: a stream shows up one poll late rather than a dead one showing up
+    as live forever.
+    """
+    prev = _STREAM_SEEN.get(name)
+    _STREAM_SEEN[name] = (value, now)
+    if value is None or prev is None:
+        return False
+    old, then = prev
+    if old is None:
+        return False
+    gap = now - then
+    # A stale cache (process asleep, panel closed for an hour) says nothing about NOW.
+    if gap <= 0 or gap > 120:
+        return False
+    return value > old
 
 
 def _return_pcm():
