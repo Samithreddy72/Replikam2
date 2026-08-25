@@ -631,6 +631,59 @@ class Session:
             self.voice_proc = proc
         return proc.poll() is None
 
+    def leg_cpu_rate(self, name):
+        """CPU seconds per wall second this leg is currently burning, or None.
+
+        A PROCESS BEING ALIVE IS NOT PROOF THAT A CAMERA IS PRODUCING FRAMES.
+        ---------------------------------------------------------------------
+        That distinction is the whole point. When the macOS capture daemons are left wedged -
+        which happens when something is killed while holding the camera - avfoundation hands
+        out the device and then delivers nothing. ffmpeg sits there perfectly healthy,
+        `poll()` returns None, and the supervisor concludes the local end is fine and blames
+        the far end. On 2026-08-24 the app told an operator to check the bridge while the
+        fault was on the Mac the message was printed from.
+
+        The tell is work done, not liveness. Measured on this hardware: a healthy 20fps
+        encoder burned 26.81 CPU seconds over 81 wall seconds (~0.33), a wedged one managed
+        0.23 over 56 (~0.004) - about eighty times less. The threshold is not those numbers:
+        they are one machine on one day, and a faster Mac or a lighter stream would move them.
+        What is robust is the ORDER of magnitude between working and not, so the caller
+        compares against a floor far below any plausible real workload.
+        """
+        p = (getattr(self, "leg_proc", {}) or {}).get(name)
+        if not p or p.poll() is not None:
+            return None
+        try:
+            t = os.times()      # wall clock reference that does not depend on the system clock
+            now = time.monotonic()
+            r = subprocess.run(["ps", "-o", "time=", "-p", str(p.pid)],
+                               capture_output=True, text=True, timeout=3)
+            raw = (r.stdout or "").strip()
+            if not raw:
+                return None
+            # ps prints [dd-]hh:mm:ss or mm:ss.ss depending on magnitude
+            parts = raw.replace("-", ":").split(":")
+            secs = 0.0
+            for x in parts:
+                secs = secs * 60 + float(x)
+        except Exception:
+            return None
+        prev = (getattr(self, "_leg_cpu", {}) or {}).get(name)
+        if not hasattr(self, "_leg_cpu"):
+            self._leg_cpu = {}
+        self._leg_cpu[name] = (secs, now)
+        if not prev:
+            return None                     # first sample: a rate needs two
+        psecs, pnow = prev
+        gap = now - pnow
+        if gap < 2.0 or gap > 300:          # too short to be meaningful, or a stale sample
+            return None
+        return max(0.0, (secs - psecs) / gap)
+
+    # Far below any real encode - a 320x180 stream at 20fps sits two orders of magnitude
+    # above this - and far above an idle process that merely wakes up occasionally.
+    CPU_FLOOR = 0.02
+
     def leg_status(self):
         """Which media legs are alive right now, by name."""
         out = {}
@@ -1498,6 +1551,23 @@ class BridgeWatch:
                 deaths = int((GUARD.snapshot() or {}).get("repairs", {}).get(leg, 0))
             except Exception:
                 deaths = 0
+
+        # A leg that is ALIVE but doing no work is the case the death-counting heuristic below
+        # cannot see, and it is the one that actually happened: a wedged macOS camera leaves
+        # ffmpeg running happily while avfoundation delivers nothing. Ask what it is doing, not
+        # whether it exists.
+        rate = SESSION.leg_cpu_rate(leg) if leg else None
+        if leg == "video" and rate is not None and rate < SESSION.CPU_FLOOR:
+            return ("LOCAL_CAMERA_FAULT: video is not arriving, and the encoder on THIS Mac is "
+                    "running but doing almost no work (%.3f CPU-seconds per second, against "
+                    "~0.3 for a real stream). The camera has been handed out but is delivering "
+                    "no frames — the bridge cannot cause that. Fix it here:\n"
+                    "    bash tools/fix-camera-macos.sh\n"
+                    "then Stop and Go live again so the leg is rebuilt." % rate)
+        if leg == "voice" and rate is not None and rate < SESSION.CPU_FLOOR:
+            return ("LOCAL_MIC_FAULT: voice is not arriving and the capture process on THIS Mac "
+                    "is idle (%.3f CPU-seconds per second). The microphone is open but "
+                    "producing nothing; re-select it in the app." % rate)
 
         # Other checks green on the same poll means the link and the bridge are fine.
         others_ok = [k for k, v in (self.last_checks or {}).items()

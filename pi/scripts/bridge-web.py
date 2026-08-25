@@ -364,6 +364,64 @@ def _audit(action, addr, allowed, detail=""):
         pass
 
 
+# ---------------------------------------------------------------------------------------
+# WHAT THE USB SIDE IS ACTUALLY DOING
+#
+# `udc: not attached` was reported for five different situations - nothing plugged in, a
+# charge-only cable, the meeting laptop asleep, the host refusing to enumerate, and a broken
+# gadget - and in the fleet it reads like the bridge is offline. During the 2026-08-24 audit
+# that cost twenty minutes: the bridge was healthy and the cable was simply out.
+#
+# The kernel already distinguishes more than we were using. /sys/class/udc/<udc>/state moves
+# through: not attached -> attached -> powered -> default -> addressed -> configured, plus
+# suspended. Each step tells you how far enumeration got, and therefore which end to look at.
+#
+# Where the hardware genuinely cannot tell two cases apart, this says so instead of guessing.
+# A charge-only cable and an unplugged cable both leave the gadget with no data lines, and on
+# a Pi 4 there is no VBUS sense line exposed to tell them apart - so both are reported as
+# USB_DISCONNECTED with the ambiguity stated in the detail, rather than inventing certainty.
+USB_STATES = {
+    "configured": ("USB_CONNECTED_HEALTHY", True,
+                   "the meeting laptop has enumerated the bridge and is using it"),
+    "suspended":  ("USB_HOST_SUSPENDED", True,
+                   "the meeting laptop has suspended the USB bus - it is probably asleep"),
+    "addressed":  ("USB_HOST_NOT_ENUMERATING", True,
+                   "the host assigned an address but never configured the device - "
+                   "enumeration stalled on the laptop, not on the bridge"),
+    "default":    ("USB_HOST_NOT_ENUMERATING", True,
+                   "the host began enumeration and did not finish it"),
+    "powered":    ("USB_HOST_NOT_ENUMERATING", True,
+                   "bus power is present but the host has not started enumeration - "
+                   "often a charge-only cable, or a port that does not carry data"),
+    "attached":   ("USB_HOST_NOT_ENUMERATING", True,
+                   "a host is attached but enumeration has not begun"),
+    "not attached": ("USB_DISCONNECTED", False,
+                   "no USB host. This looks the same whether the cable is out, the cable is "
+                   "charge-only, or the laptop is powered off - the Pi cannot tell them "
+                   "apart. Check the cable first; it is the most common cause."),
+}
+
+
+def usb_diagnosis(state, functions, video40, uac2):
+    """Classify the USB side, and admit when the answer is ambiguous.
+
+    Returns diagnosis / certain / detail. `certain` is False when the hardware genuinely
+    cannot distinguish the possibilities - an operator is better served by "one of these
+    three, check the cable first" than by a confident wrong answer.
+    """
+    # A gadget that never built is a bridge-side fault and must not be reported as a cable
+    # problem: the states above all assume the gadget exists to be enumerated.
+    if not (video40 and uac2 and functions and "uac2" in functions):
+        return ("USB_GADGET_FAULT", True,
+                "the USB gadget did not build on the bridge (uac2/uvc missing) - this is a "
+                "bridge fault, not a cable or laptop one")
+    d, certain, detail = USB_STATES.get((state or "").strip(),
+                                        ("UNKNOWN", False,
+                                         "the kernel reports an unrecognised UDC state (%r)"
+                                         % state))
+    return (d, certain, detail)
+
+
 def settling():
     """Is the Pi still doing its post-flash work?
 
@@ -560,6 +618,13 @@ def gather():
     d["functions"] = sh("ls /sys/kernel/config/usb_gadget/g1/functions/").replace("\n", " ")
     d["video40"] = os.path.exists("/dev/video40")
     d["uac2"] = os.path.isdir("/proc/asound/UAC2Gadget")
+    # AFTER functions/video40/uac2 are known - placing this above them made every reading say
+    # USB_GADGET_FAULT, because the gadget check read a dict key that had not been filled in
+    # yet. Kept alongside the raw `udc` value rather than replacing it: existing consumers
+    # read that, and the raw kernel string is still the most useful thing when debugging.
+    _dg, _certain, _detail = usb_diagnosis(state, d["functions"], d["video40"], d["uac2"])
+    d["usb"] = {"state": state or "?", "diagnosis": _dg,
+                "certain": _certain, "detail": _detail}
     d["temp"] = soc_temp()
     d["throttled"] = soc_throttled()
     d["config"] = golden_state()
