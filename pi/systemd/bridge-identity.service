@@ -1,0 +1,15 @@
+[Unit]
+Description=NetBridge per-device identity (hostname + version), applied on every boot
+# Before anything that reports or depends on the device's name: the agent sends the hostname
+# as telemetry, and avahi answers mDNS queries with the kernel name.
+After=local-fs.target
+Before=bridge-agent.service bridge-web.service avahi-daemon.service
+ConditionPathExists=/usr/local/bin/bridge-identity.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bridge-identity.sh
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target

@@ -42,38 +42,49 @@ fi
 # precisely why nobody noticed for weeks.
 # ---------------------------------------------------------------------------------------
 
-# 2a. Per-device hostname. Every card ships as "raspberrypi", so putting two bridges on
-# one venue LAN collides on mDNS (both claim raspberrypi.local), makes the router's client
-# list useless, and gives arbitrary numeric suffixes on the tailnet - MAIN already shows up
-# as "bridge-001-1" for exactly this reason. Name it after the pairing code, which is the
-# same identifier printed on the label and shown in the fleet panel, so the device is
-# recognisable everywhere by one name: netbridge-2626.local, netbridge-2626 on the tailnet.
-PC="$(cat /etc/bridge/pairing-code 2>/dev/null || true)"
-if [ -z "${PC:-}" ]; then
-  SER="$(awk -F': *' '/^Serial/{print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
-  [ -n "${SER:-}" ] && PC="$(printf '%s' "$SER" | sha256sum | cut -c1-4 | tr 'a-f' 'A-F')"
-fi
+# Per-device identity (hostname, version stamp) now lives in bridge-identity.sh and runs from
+# its own unit on EVERY boot. It used to sit here, which worked only by accident: the
+# `systemctl disable` at the end of this script is unreachable while no provisioning file
+# exists, so firstboot happens to run every time. The day a provision conf appears, firstboot
+# would self-disable and the hostname would silently stop being applied - on a read-only root
+# there is no file holding it, so it must be set at each boot by something that always runs.
+/usr/local/bin/bridge-identity.sh || log "identity step failed"
+
 if [ -n "${PC:-}" ]; then
   NEWHOST="netbridge-${PC}"
   if [ "$(hostname)" != "$NEWHOST" ]; then
-    hostnamectl set-hostname "$NEWHOST" 2>/dev/null \
-      || { echo "$NEWHOST" >/etc/hostname 2>/dev/null; hostname "$NEWHOST" 2>/dev/null; }
-    # keep /etc/hosts consistent or sudo warns "unable to resolve host" on every call
-    sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$NEWHOST/" /etc/hosts 2>/dev/null \
-      || printf '127.0.1.1\t%s\n' "$NEWHOST" >>/etc/hosts 2>/dev/null || true
-    log "hostname -> $NEWHOST"
+    # THE ROOT IS READ-ONLY ext4 (/dev/mmcblk0p2 / ext4 ro,relatime), not an overlay.
+    #
+    # So /etc/hostname cannot be written, and `hostnamectl set-hostname` - which tries to
+    # write it - appears to SUCCEED anyway: it returned 0 on every card while changing
+    # nothing, so the `||` fallback that would have worked was never reached. Every bridge
+    # shipped as "raspberrypi", which collides on mDNS the moment two share a venue LAN.
+    #
+    # Two fixes, and the second is the one that matters:
+    #   * set the kernel hostname directly. sethostname(2) touches no filesystem, so it works
+    #     on a read-only root, and it is what avahi and mDNS actually answer with.
+    #   * VERIFY by reading the hostname back instead of trusting an exit code. That is the
+    #     failure this had: a command that reports success and does nothing.
+    #
+    # Persistence comes from this script running on every boot, not from a file. On a
+    # read-only root that is the honest mechanism: nothing to write, nothing to drift.
+    hostnamectl set-hostname "$NEWHOST" >/dev/null 2>&1 || true
+    [ "$(hostname)" = "$NEWHOST" ] || hostname "$NEWHOST" 2>/dev/null || true
+    # /etc/hostname is on the read-only root; this succeeds only if something has made it
+    # writable, and is skipped silently otherwise. The kernel name above is what matters.
+    [ -w /etc/hostname ] && echo "$NEWHOST" >/etc/hostname 2>/dev/null || true
+    [ -w /etc/hosts ] && sed -i "s/^127\\.0\\.1\\.1.*/127.0.1.1\\t$NEWHOST/" /etc/hosts 2>/dev/null || true
+
+    if [ "$(hostname)" = "$NEWHOST" ]; then
+      log "hostname -> $NEWHOST"
+    else
+      # Say so loudly rather than leaving a silent no-op to be discovered months later by
+      # two bridges answering to the same name.
+      log "ERROR: hostname is still $(hostname), wanted $NEWHOST - mDNS will collide if a second bridge joins this LAN"
+    fi
   fi
 fi
 
-# Version stamp. /etc/bridge is bind-mounted from /data/etc-bridge, so the copy the image
-# build writes into the rootfs is invisible at runtime; build-disk-image.sh seeds the bind
-# source instead. Only fill in a fallback if that seed is somehow absent.
-if [ -n "${BRIDGE_VERSION:-}" ]; then
-  echo "$BRIDGE_VERSION" >/etc/bridge/version
-elif [ ! -s /etc/bridge/version ]; then
-  echo dev >/etc/bridge/version
-  log "version: no seed on /data and none provisioned -> dev"
-fi
 
 CONF=/boot/firmware/bridge-provision.conf
 [ -f "$CONF" ] || CONF=/boot/bridge-provision.conf

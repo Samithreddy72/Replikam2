@@ -30,6 +30,13 @@ import pathlib, re, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FB = (ROOT / "pi" / "scripts" / "bridge-firstboot.sh").read_text()
+# The identity work moved out of firstboot on 2026-08-25. It had worked only by accident:
+# firstboot's `systemctl disable` is unreachable while no provisioning file exists, so the
+# script happened to run every boot. On a read-only root nothing holds the hostname, so it
+# must be set at each boot by something that ALWAYS runs - not by a script that would
+# self-disable the day a provision conf appeared.
+ID = (ROOT / "pi" / "scripts" / "bridge-identity.sh").read_text()
+UNIT = (ROOT / "pi" / "systemd" / "bridge-identity.service").read_text()
 DISK = (ROOT / "factory" / "build-disk-image.sh").read_text()
 
 passed = failed = 0
@@ -42,21 +49,25 @@ def no(m, got=None):
 print("\nA flashed card knows its own name and version")
 print("=============================================")
 
-print("\n  ---- the early exit no longer eats the identity work ----")
+print("\n  ---- identity does not depend on firstboot's fate ----")
 exit_at = FB.find("no provision conf found")
-host_at = FB.find("hostnamectl set-hostname")
-ver_at  = FB.find(">/etc/bridge/version")
-if exit_at == -1:
-    no("the provision-conf guard vanished entirely")
+call_at = FB.find("bridge-identity.sh")
+if exit_at > 0 and 0 < call_at < exit_at:
+    ok("firstboot invokes the identity step BEFORE its early exit")
 else:
-    if host_at != -1 and host_at < exit_at:
-        ok("hostname is set BEFORE the early exit")
-    else:
-        no("hostname rename still sits after the exit — every card stays 'raspberrypi'")
-    if ver_at != -1 and ver_at < exit_at:
-        ok("version is stamped BEFORE the early exit")
-    else:
-        no("version stamp still sits after the exit — every card reports 'dev'")
+    no("identity is behind the exit that fires on every card", (call_at, exit_at))
+if "WantedBy=multi-user.target" in UNIT and "Type=oneshot" in UNIT:
+    ok("identity also has its own unit, so it runs even if firstboot self-disables")
+else:
+    no("identity would stop being applied the day firstboot disables itself")
+if "RemainAfterExit=no" in UNIT:
+    ok("it runs on EVERY boot — the only persistence a read-only root allows")
+else:
+    no("would run once and never again; the kernel hostname does not survive a reboot")
+if "hostnamectl set-hostname" in ID and ">/etc/bridge/version" in ID:
+    ok("both hostname and version live in the always-run script")
+else:
+    no("the identity script is missing one of them")
 
 print("\n  ---- the version is written where it can actually be read ----")
 # fstab: /data/etc-bridge -> /etc/bridge. Writing the rootfs copy is writing to a path that
@@ -75,21 +86,42 @@ else:
     no("would write an empty or literal version string")
 
 print("\n  ---- the fallback still exists, but only as a fallback ----")
-if 'elif [ ! -s /etc/bridge/version ]; then' in FB:
+if 'elif [ ! -s /etc/bridge/version ]; then' in ID:
     ok("firstboot fills in 'dev' only when no seed and no provisioning value exist")
 else:
     no("no fallback — a card with neither would report nothing at all")
 
 print("\n  ---- the hostname is derived, not invented ----")
-if "pairing-code" in FB and "sha256sum" in FB:
+if "pairing-code" in ID and "sha256sum" in ID:
     ok("named from the pairing code, falling back to the CPU serial")
 else:
     no("hostname no longer derives from a stable per-device identifier")
 
+print("\n  ---- it does not trust a command that lies ----")
+# hostnamectl tries to write /etc/hostname, and on this read-only root it returned 0 while
+# changing nothing - so the `||` fallback that WOULD have worked never ran. Every bridge
+# shipped as "raspberrypi" as a result.
+if 'hostnamectl set-hostname "$NEWHOST" >/dev/null 2>&1 || true' in ID:
+    ok("hostnamectl's exit code is explicitly discarded")
+else:
+    no("still branches on an exit code that reports success and does nothing")
+if '[ "$(hostname)" = "$NEWHOST" ] || hostname "$NEWHOST"' in ID:
+    ok("falls back to sethostname(2), which works on a read-only root")
+else:
+    no("no filesystem-free way to set the name")
+if 'ERROR: hostname is still' in ID:
+    ok("a failure is reported loudly instead of leaving a silent no-op")
+else:
+    no("would fail silently again")
+if "[ -w /etc/hostname ]" in ID and "[ -w /etc/hosts ]" in ID:
+    ok("writes to the read-only root are attempted only if writable, never assumed")
+else:
+    no("would fail or error on a read-only root")
+
 print("\n  ---- negative control ----")
 # Moving the guard above the identity work must break these tests, or they prove nothing.
-if exit_at != -1 and host_at != -1 and ver_at != -1:
-    ok("all three markers found, so their ORDER is what is being tested")
+if exit_at != -1 and call_at != -1:
+    ok("both markers found, so their ORDER is what is being tested")
 else:
     no("a marker is missing; the ordering check would silently pass")
 

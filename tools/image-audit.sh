@@ -87,6 +87,7 @@ if [ $have_root -eq 1 ]; then
            /usr/local/bin/bridge-jitter.py /usr/local/bin/jitter-sentry.sh \
            /usr/local/bin/bridge-run.sh /etc/os-release \
            /usr/local/bin/bridge-firstboot.sh /usr/local/bin/bridge-wifi-portal.sh \
+           /usr/local/bin/bridge-identity.sh \
            /usr/local/bin/bridge-gadget-setup.sh /usr/local/bin/bridge-supervisor.sh \
            /usr/local/bin/bridge-feeder-audio.sh /usr/local/bin/bridge-return-audio.sh \
            /usr/local/bin/bridge-uvcd.sh /usr/local/bin/bridge-watchdog.sh \
@@ -98,7 +99,7 @@ if [ $have_root -eq 1 ]; then
            /etc/netbridge/control-url /etc/bridge/control-url; do
     "$DEBUGFS" -R "cat $f" "$ROOTDEV" >"$CAT/$(basename "$f")" 2>/dev/null
   done
-  for u in bridge-agent bridge-web bridge-media bridge-pitch bridge-crackle-sentry \
+  for u in bridge-agent bridge-web bridge-media bridge-pitch bridge-crackle-sentry bridge-identity \
            bridge-jitter-sentry netbridge-gadget; do
     "$DEBUGFS" -R "cat /etc/systemd/system/${u}.service" "$ROOTDEV" >"$CAT/${u}.service" 2>/dev/null
   done
@@ -284,6 +285,14 @@ grepf bridge-web.py 'FIRSTBOOT_UNITS' \
   || no "does not know which units to watch"
 
 sec "A flashed card knows its own name and version"
+has bridge-identity.sh && ok "bridge-identity.sh installed (runs every boot)" \
+  || no "no identity script — the hostname would never be applied"
+grep -q "bridge-identity.service" "$CAT/.wants" 2>/dev/null \
+  && ok "bridge-identity is ENABLED at boot" \
+  || no "identity script present but not enabled — it will never run"
+grepf bridge-identity.sh 'hostname "\$NEWHOST"' \
+  && ok "sets the kernel hostname directly (the only thing that works on a read-only root)" \
+  || no "relies on writing /etc/hostname, which this image cannot do"
 grepf bridge-firstboot.sh 'NEWHOST="netbridge-' \
   && ok "hostname is derived from the pairing code" || no "no hostname rename"
 # Both used to sit BELOW the provision-conf early exit, which fires on every one of these
