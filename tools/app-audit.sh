@@ -78,12 +78,19 @@ sec "Gatekeeper — the first thing that stops an amateur"
 if [ -f "$APP" ]; then
   sig=$(codesign -dv "$APP" 2>&1)
   if printf '%s' "$sig" | grep -q 'flags=.*adhoc'; then
-    no "ad-hoc signed: ANY browser download will be SIGKILLed by Gatekeeper.
-        Verify with:  xattr -w com.apple.quarantine '0081;0;Safari;$(uuidgen)' <file> && ./<file>
-        Needs a Developer ID signature + notarisation, or the recipient must run
-        xattr -dr com.apple.quarantine <file> before first launch."
+    # WARN, not FAIL: unsigned is a deliberate choice here (signing needs a paid Apple
+    # account). What must never be silent is the CONSEQUENCE, because the failure mode is
+    # invisible - a quarantined ad-hoc binary is SIGKILLed with no dialog and no stderr.
+    warn "ad-hoc signed (deliberate — signing needs a paid Apple account).
+        A copy that arrives by BROWSER DOWNLOAD or AIRDROP is quarantined, and macOS then
+        kills it on launch SILENTLY: no dialog, no error, nothing happens at all.
+        On every new Mac, run this in the app folder BEFORE the first launch:
+            xattr -dr com.apple.quarantine .
+        To reproduce the failure deliberately:
+            xattr -w com.apple.quarantine \"0081;0;Safari;\$(uuidgen)\" <file> && ./<file>"
   elif printf '%s' "$sig" | grep -q 'TeamIdentifier=not set'; then
-    no "no Team ID: not distributable — Gatekeeper will reject a downloaded copy"
+    warn "no Team ID — fine for personal/internal use, but a downloaded copy needs the
+        xattr step above; public distribution would need Developer ID + notarisation"
   else
     ok "signed with a Team ID (survives a browser download)"
   fi
@@ -92,7 +99,8 @@ if [ -f "$APP" ]; then
   if spctl -a -t execute "$APP" >/dev/null 2>&1; then
     ok "Gatekeeper accepts it for execution"
   else
-    no "spctl REJECTS it — a recipient who downloads this in a browser cannot launch it"
+    note "spctl rejects it, as expected for an unsigned build — harmless once the quarantine
+        flag is cleared, fatal and SILENT if it is not"
   fi
 
   # Notarisation staple: what lets it pass with no network round-trip.
@@ -105,8 +113,9 @@ if [ -f "$APP" ]; then
   if xattr -p com.apple.quarantine "$APP" >/dev/null 2>&1; then
     warn "this copy is quarantined (so it was fetched the way a real user would)"
   else
-    note "this copy is NOT quarantined — it was fetched with a CLI, so it is NOT a fair test
-        of the recipient experience; the signature checks above are what matter"
+    note "this copy is NOT quarantined — it was built locally or fetched with a CLI, neither
+        of which sets the flag, so this is NOT a fair test of the recipient experience;
+        the signature checks above are what matter"
   fi
 fi
 

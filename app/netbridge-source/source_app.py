@@ -64,7 +64,7 @@ RTP_VIDEO, RTP_VOICE = 5000, 5002
 # Build stamp. build.py rewrites this line, and it is what the updater compares against
 # the signed manifest — so a build that forgets to bump it simply never updates, rather
 # than update-looping.
-APP_VERSION = "1.1.9"
+APP_VERSION = "1.2.0"
 
 
 # --------------------------------------------------------------------------- state
