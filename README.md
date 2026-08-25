@@ -276,7 +276,9 @@ This is a working system, not a finished product. Kept deliberately visible:
 - **The presenter app is ad-hoc signed, not notarised.** The packaged macOS binary runs
   (an earlier `CODESIGNING / Invalid Page` kill cleared after a reboot), but macOS may still
   quarantine a *freshly downloaded* copy — clear it with
-  `xattr -dr com.apple.quarantine NetBridgeSource`. Proper notarisation needs an Apple
+  `xattr -dr com.apple.quarantine .` — the whole folder, because the mesh helper is
+  quarantined too and a blocked helper kills return audio without looking broken. Proper
+  notarisation needs an Apple
   Developer account. First launch takes ~15s while the one-file bundle unpacks.
 - **Under-voltage on the reference hardware is unresolved and is not a software problem.**
   Every available software mitigation is applied and measured ineffective.

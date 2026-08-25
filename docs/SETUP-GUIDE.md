@@ -60,7 +60,7 @@ The builds are not code-signed, so each OS asks once:
 
 ```bash
 # macOS — clear the download quarantine
-xattr -dr com.apple.quarantine NetBridgeSource
+xattr -dr com.apple.quarantine .   # the WHOLE folder — the mesh helper is quarantined too
 ```
 
 On Windows, SmartScreen shows "Windows protected your PC" → **More info** → **Run anyway**.

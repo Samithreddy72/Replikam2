@@ -11,7 +11,11 @@ Grab the zip for your platform from the release page, unzip, and run it.
 It is not code-signed, so Gatekeeper blocks it once:
 
 * **Right-click the app → Open**, then confirm. (A normal double-click will not offer the option.)
-* Or from a terminal: `xattr -dr com.apple.quarantine NetBridgeSource`
+* Or from a terminal, `cd` into the folder and run:  `xattr -dr com.apple.quarantine .`
+
+  Clear the WHOLE folder, not just the app. `netbridge-mesh` is quarantined too, and a
+  blocked helper does not announce itself: the meeting still sees and hears you, you hear
+  nothing back, and nothing looks obviously wrong.
 
 macOS will also ask for **Camera** and **Microphone** access the first time you go live —
 this must be allowed, or ffmpeg opens the camera and silently receives no frames: the video
