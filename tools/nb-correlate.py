@@ -211,7 +211,20 @@ def analyse(path):
     # as ~60000ppm of apparent clock error. Over the whole run that timing noise averages out,
     # and THAT is the number worth quoting. Reporting the per-tick swing as a clock error would
     # repeat exactly the mistake that cost this project an evening.
-    hp = [(r["t"], r["hw_ptr"]) for r in rows if isinstance(r.get("hw_ptr"), int)]
+    # hw_ptr RESETS when the return pipeline restarts - the PCM is reopened and the pointer
+    # goes back to zero. Differencing first against last across a reset produced -8,737,478 ppm
+    # in the 21:42 capture, which is not a clock error but an artifact of treating a counter
+    # that restarted as one that ran continuously. Use the longest monotonic stretch instead,
+    # and say how much of the run it covers.
+    hp_all = [(r["t"], r["hw_ptr"]) for r in rows if isinstance(r.get("hw_ptr"), int)]
+    segs, cur = [], []
+    for pt in hp_all:
+        if cur and pt[1] < cur[-1][1]:
+            segs.append(cur); cur = []
+        cur.append(pt)
+    if cur: segs.append(cur)
+    resets = len(segs) - 1
+    hp = max(segs, key=len) if segs else []
     if len(hp) >= 3:
         span = hp[-1][0] - hp[0][0]
         frames = hp[-1][1] - hp[0][1]
@@ -220,10 +233,17 @@ def analyse(path):
             ppm = (frames / span / nominal - 1) * 1e6
             per = [r["capture_ppm"] for r in rows if isinstance(r.get("capture_ppm"), (int, float))]
             swing = (max(per) - min(per)) if per else 0
-            print("\n  ---- capture clock over the WHOLE run ----")
-            print("  %+.0f ppm over %.0fs  (per-tick readings swing %.0f ppm; that spread is"
-                  % (ppm, span, swing))
-            print("   sampling jitter, not clock error — only this run-level figure is meaningful)")
+            total = rows[-1]["t"] - rows[0]["t"]
+            print("\n  ---- capture clock ----")
+            print("  %+.0f ppm over the longest unbroken stretch (%.0fs of %.0fs)"
+                  % (ppm, span, total))
+            if resets:
+                print("  %d pointer RESET(S) — the return pipeline restarted that many times."
+                      % resets)
+                print("  That is itself a finding: a restart is a gap in the room's audio.")
+            print("  (per-tick readings swing %.0f ppm; that is sampling jitter, not clock"
+                  % swing)
+            print("   error — only the figure above is meaningful)")
 
     print("\n  ---- disturbances ----")
     bad = [r for r in rows if r.get("brownout_live") or r.get("legs_drops")
