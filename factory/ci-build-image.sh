@@ -332,4 +332,23 @@ log "secret sweep clean"
 log "preflight dependency check"
 bash "$REPO/factory/preflight-check.sh"
 
+# ---------------- Strip the build-time repository copy ----------------
+# The whole checkout is copied to /opt/replikam2 so this script can install from it. Every
+# bridge script is `install`ed into /usr/local/bin above, and NOTHING on the device references
+# /opt/replikam2 at runtime -- so once the install is done the copy is dead weight.
+#
+# It is not small dead weight: the .git directory alone is ~50 MB of commit history, shipped
+# into every meeting room this product is plugged into, on a card the release notes already
+# ask people to treat as confidential. Leaving the full source and history on a device that
+# goes to other organisations' sites buys nothing and costs both space and disclosure.
+#
+# Removed LAST, after preflight-check.sh -- which executes out of $REPO. The first version of
+# this stripped the copy before the sweep and would have deleted the tree the very next step
+# runs from; caught by reading what still referenced $REPO below the insertion point, before
+# the build was started rather than after it failed.
+if [ -d "$REPO" ]; then
+  log "removing the build-time repo copy from the image ($(du -sh "$REPO" 2>/dev/null | cut -f1))"
+  rm -rf "$REPO"
+fi
+
 echo "== ci-build: done (version $IMAGE_VERSION) =="
