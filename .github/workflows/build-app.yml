@@ -221,3 +221,34 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" "${{ matrix.asset }}.zip" \
             --repo "${{ github.repository }}" --clobber
 
+          # RELEASE MANIFEST — so provenance ships WITH the artifact.
+          #
+          # app-v1.2.0's macOS asset was a locally built binary that CI never tested, and
+          # nothing on the release said so; it took hashing the file against a developer's
+          # Desktop to discover it. A release that cannot say where it came from invites
+          # exactly that.
+          #
+          # Everything here is derived from the run that produced the artifact -- none of it
+          # is typed by a human, which is the property that makes it trustworthy.
+          SUM=$(shasum -a 256 "${{ matrix.asset }}.zip" | cut -d" " -f1)
+          cat > "${{ matrix.asset }}.manifest.json" <<MANIFEST
+          {
+            "artifact":     "${{ matrix.asset }}.zip",
+            "sha256":       "${SUM}",
+            "version":      "${GITHUB_REF_NAME#app-v}",
+            "git_sha":      "${{ github.sha }}",
+            "git_ref":      "${GITHUB_REF_NAME}",
+            "workflow_run": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "run_id":       "${{ github.run_id }}",
+            "runner_os":    "${{ runner.os }}",
+            "built_at":     "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "built_by":     "github-actions",
+            "signed":       false,
+            "notarized":    false,
+            "note": "Unsigned and un-notarized: no Apple Developer Program. A browser download is quarantined and must be cleared with: xattr -dr com.apple.quarantine ."
+          }
+          MANIFEST
+          gh release upload "${GITHUB_REF_NAME}" "${{ matrix.asset }}.manifest.json" \
+            --repo "${{ github.repository }}" --clobber
+          echo "manifest: ${{ matrix.asset }}.zip sha256=${SUM} from ${{ github.sha }}"
+
