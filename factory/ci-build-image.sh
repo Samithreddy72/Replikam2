@@ -279,6 +279,27 @@ rm -f  /etc/ssh/ssh_host_*                         # regenerated per-device by b
 # fleet-brain is NOT part of the bridge image (it is the separate control plane) — nothing to strip here.
 install -d /etc/bridge
 echo "$IMAGE_VERSION" > /etc/bridge/version        # bridge-firstboot re-stamps with the flashed BRIDGE_VERSION
+# STRUCTURED PROVENANCE, not just a version string.
+#
+# "2.0.0-1db20ec" carries a short SHA, and that suffix is the only part of it that means
+# anything: the "2.0.0" is a manually typed CI input, which is how a JULY image ended up
+# labelled 2.0.1 while AUGUST images say 2.0.0. Answering "what exactly is this device
+# running?" should not require a human to recognise a 7-character prefix.
+#
+# The image cannot contain its own sha256 (writing it in would change it), so the digest lives
+# in the signed manifest beside the artifact. Everything the image CAN know about itself is
+# recorded here, and bridge-web serves it at /api/status as `build`.
+cat > /etc/bridge/release.json <<RELEOF
+{
+  "version": "${IMAGE_VERSION}",
+  "git_sha": "${BUILD_GIT_SHA:-unknown}",
+  "git_short": "${IMAGE_VERSION##*-}",
+  "build_id": "${BUILD_ID:-local}",
+  "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "builder": "${BUILD_URL:-local}"
+}
+RELEOF
+chmod 0644 /etc/bridge/release.json
 
 # ---------------- Verify no obvious secrets survived ----------------
 log "secret sweep"

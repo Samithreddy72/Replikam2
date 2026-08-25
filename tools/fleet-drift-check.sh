@@ -54,7 +54,13 @@ dev=$(printf '%s' "$status" | python3 -c 'import sys,json;print(json.load(sys.st
 # carries information: the first half is a manual CI input that defaults to 2.0.0, which is how
 # a July image ended up labelled 2.0.1 while August images say 2.0.0. Parse for the SHA and
 # ignore the rest.
-sha="${ver##*-}"
+# Prefer the FULL sha from the structured release record; fall back to the short suffix of the
+# version string for images built before 2026-08-26, which have no release.json. A 7-character
+# prefix is not an identity -- it is a convenience that happens to be unique today.
+sha=$(printf '%s' "$status" | python3 -c 'import sys,json
+d=json.load(sys.stdin); b=d.get("build") or {}
+print(b.get("git_sha") or "")' 2>/dev/null)
+case "$sha" in ""|unknown) sha="${ver##*-}" ;; esac
 if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
   say "  \033[31mUNKNOWN\033[0m  device reports version '$ver'; '$sha' is not a commit in this repo."
   say "          Either the image was built from another tree, or the marker is malformed."

@@ -12,6 +12,7 @@ import importlib.util
 
 PORT = 8080
 VERSION_FILE = "/etc/bridge/version"
+RELEASE_FILE = "/etc/bridge/release.json"
 SERVICES = ["bridge-gadget", "bridge-feeder-net", "bridge-uvcd",
             "bridge-feeder-audio", "bridge-return-audio"]
 
@@ -728,6 +729,13 @@ def gather():
     d["device_id"] = serial
     d["pairing_code"] = pairing_code(serial)
     d["version"] = read(VERSION_FILE) or "dev"
+    # Full provenance, so the fleet can answer "what EXACTLY is this device running?" without
+    # a human recognising a 7-character prefix. Images built before 2026-08-26 have no such
+    # record, hence the tolerant default: a missing record reports as unknown, never invented.
+    try:
+        d["build"] = json.loads(read(RELEASE_FILE) or "{}") or {"version": d["version"]}
+    except Exception:
+        d["build"] = {"version": d["version"], "note": "release.json unreadable"}
     d["tailscale_ip"] = tailscale_ip4()
     svc = dict(d["services"])
     # Per-stream up/down, from counters that MOVE. A configured UDC is still required — a

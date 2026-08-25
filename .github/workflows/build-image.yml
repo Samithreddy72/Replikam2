@@ -26,13 +26,29 @@ jobs:
       - name: Compute version
         id: ver
         run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then V="${{ github.event.inputs.version }}"
-          elif [ "${{ github.ref_type }}" = "tag" ]; then V="${GITHUB_REF_NAME#v}"
-          else V="2.0.0"; fi
+          # THE VERSION COMES FROM THE REPOSITORY, NOT FROM A TEXT BOX.
+          #
+          # This used to default to a hard-coded 2.0.0 with an optional dispatch input. Someone
+          # typed 2.1 in July, later builds fell back to the default, and the result is a JULY
+          # image on the releases page labelled 2.0.1 sitting above AUGUST images labelled
+          # 2.0.0. The number carried no ordering information at all, and a person reaching for
+          # "the newest" would have flashed the oldest.
+          #
+          # ./VERSION is reviewed like any other file, so changing it is a commit, not a
+          # keystroke at dispatch time. A tag push takes its version from the tag. The dispatch
+          # input survives only as a deliberate override for one-off builds.
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            V="${{ github.event.inputs.version }}"
+            echo "::warning::version overridden at dispatch to $V (repository VERSION says $(cat VERSION))"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V="$(tr -d ' \n\r' < VERSION)"
+          fi
+          [ -n "$V" ] || { echo "::error::no version could be determined"; exit 1; }
+          # The identity is the SHA; the semantic part is a label for humans.
           echo "version=${V}-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      # arm-runner emulates a Raspberry Pi OS arm64 rootfs and runs our provisioning
-      # inside it (chroot + binfmt/qemu). The repo checkout is copied to /opt/replikam2.
       - name: Build Raspberry Pi OS image
         id: build
         uses: pguyot/arm-runner-action@v2
@@ -43,6 +59,9 @@ jobs:
           optimize_image: 'yes'
           commands: |
             IMAGE_VERSION="${{ steps.ver.outputs.version }}" REPLIKAM_REPO=/opt/replikam2 \
+              BUILD_GIT_SHA="${{ github.sha }}" \
+              BUILD_ID="${{ github.run_id }}" \
+              BUILD_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
               FLEET_CONTROL_URL="${{ vars.FLEET_CONTROL_URL }}" \
               FLEET_BOOTSTRAP_TOKEN="${{ secrets.FLEET_BOOTSTRAP_TOKEN }}" \
               bash /opt/replikam2/factory/ci-build-image.sh
