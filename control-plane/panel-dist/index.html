@@ -547,7 +547,24 @@ async function doAction(devId, devName, value, isLive){
     }
     try {
     const r = await api(`/admin/devices/${devId}/commands`, {method:"POST", body:JSON.stringify({type, args, confirm: confirmed})});
-    toast(`queued ${type} on ${devName} — command #${r.id}`);
+    if (r.deduplicated) {
+      // The backend handed back an EXISTING command rather than queuing a second one. Say so:
+      // silently returning an older id would read as a fresh action having been taken.
+      toast(`${type} was already in flight on ${devName} — showing #${r.id}, not a second one`);
+    } else {
+      toast(`queued ${type} on ${devName} — command #${r.id}`);
+    }
+    // FOLLOW IT TO A TERMINAL STATE.
+    //
+    // Until 26 Aug 2026 the toast above was the last the operator ever heard. Every command
+    // ended at "queued … command #N", so one that EXPIRED, FAILED, or was refused by the
+    // device looked exactly like one that succeeded. awaitCommand() already existed and was
+    // wired to a single action (jitter-diagnose); everything else — including reboot and
+    // golden-restore — reported nothing at all.
+    //
+    // A fleet that cannot tell you whether the reboot you ordered actually happened is not an
+    // operations tool, it is a request form.
+    followCommand(devId, devName, type, r.id);
     // A diagnosis nobody reads is not a diagnosis. Everything else here is an ACTION whose
     // effect the operator can see in the fleet row, but jitter-diagnose exists purely to
     // produce an answer, so it has to be fetched back and shown.
@@ -555,14 +572,56 @@ async function doAction(devId, devName, value, isLive){
   } catch(e){ if(e.message!=="auth") toast("failed: "+e.message); }
 }
 
-async function awaitCommand(devId, cmdId, tries = 24){
+async function followCommand(devId, devName, type, cmdId){
+  // Watch a command to its terminal state and tell the operator what actually happened — and,
+  // while it is still recallable, offer to cancel it.
+  //
+  // The DELETE endpoint has existed since an unrecallable reboot reached a live bridge during
+  // an audit. Nothing in the UI could reach it: the operator was shown a command id they had
+  // no way to act on.
+  const c = await awaitCommand(devId, cmdId, 24, (row) => {
+    // Fires once, the first time the command is seen still sitting in `pending`. `sent` is past
+    // the point of recall — the device already has it — and offering to "cancel" then would be
+    // a promise we cannot keep.
+    if (row.status !== "pending") return;
+    if (!DISRUPTIVE.has(type) && !BACKEND_CONFIRM.has(type)) return;   // don't nag on reads
+    if (!confirm(`"${type}" is still QUEUED on ${devName} (command #${cmdId}) — the bridge has not picked it up yet.\n\nCancel it?`)) return;
+    api(`/admin/devices/${devId}/commands/${cmdId}`, {method:"DELETE"})
+      .then(() => toast(`cancelled #${cmdId} — the bridge never received it`))
+      .catch(e => toast(e.message === "HTTP 409"
+        ? `too late to cancel #${cmdId} — the bridge already has it`
+        : `could not cancel #${cmdId}: ${e.message}`));
+  });
+
+  if (!c){
+    // No terminal state inside the polling window. That is NOT success and must never be
+    // reported as one — say plainly that we do not know.
+    toast(`${type} on ${devName}: still no result for #${cmdId} — state UNKNOWN, check the device`);
+    return;
+  }
+  const detail = (c.output || c.fail_reason || "").toString().slice(0, 90);
+  if (c.status === "done" || c.status === "succeeded"){
+    toast(`${type} on ${devName}: SUCCEEDED (#${cmdId})`);
+  } else if (c.status === "cancelled"){
+    toast(`${type} on ${devName}: cancelled (#${cmdId})`);
+  } else if (c.status === "expired"){
+    toast(`${type} on ${devName}: EXPIRED — the bridge never reported back (#${cmdId})`);
+  } else {
+    toast(`${type} on ${devName}: ${String(c.status).toUpperCase()} (#${cmdId})${detail ? " — " + detail : ""}`);
+  }
+}
+
+async function awaitCommand(devId, cmdId, tries = 24, onFirstPending){
   // The agent runs on a timer, so a result is not instant. Poll rather than guess a delay.
   for (let i = 0; i < tries; i++){
     await new Promise(r => setTimeout(r, 2500));
     let list;
     try { list = await api(`/admin/devices/${devId}/commands`); } catch(e){ return null; }
     const c = (list || []).find(x => x.id === cmdId);
-    if (c && c.status !== "queued" && c.status !== "sent") return c;
+    if (c && onFirstPending){ onFirstPending(c); onFirstPending = null; }
+    // `pending` joins the non-terminal set: it is where a command sits before the agent
+    // collects it, and treating it as terminal would report UNKNOWN the instant one is queued.
+    if (c && c.status !== "queued" && c.status !== "sent" && c.status !== "pending") return c;
   }
   return null;
 }
