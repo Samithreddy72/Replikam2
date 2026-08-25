@@ -111,6 +111,20 @@ jobs:
         working-directory: app/netbridge-source
         run: python build.py ${{ (github.event.inputs.bundle_ffmpeg == 'false') && '--no-ffmpeg' || '' }}
 
+      # Does the tree we are ABOUT TO SHIP contain everything the return pipeline needs?
+      #
+      # The smoke test below proves the app serves HTTP and reaches the fleet over TLS. Neither
+      # touches GStreamer, so both would pass on a build whose return pipeline cannot be
+      # constructed at all -- which is exactly what the Windows bundler produced while its
+      # plugin allow-list was missing gstaudiofx (audiodynamic, used twice) and gstvolume.
+      # Room audio silently absent, everything else apparently fine.
+      #
+      # This resolves every pipeline element against the BUNDLED plugin path with the system
+      # path cleared, so it cannot pass by borrowing the runner's own GStreamer install.
+      - name: Verify the bundled GStreamer can build the return pipeline
+        working-directory: .
+        run: python tools/verify-gst-bundle.py app/netbridge-source/_bundle/gst
+
       # Prove the binary at least starts and serves before publishing it. A build that
       # produces a file which crashes on launch is worse than a failed build: it looks
       # shippable. This does not need a camera — only the local HTTP server.
