@@ -1215,6 +1215,42 @@ class MeshManager:
         return {"via": "mesh", "control_host": "127.0.0.1", "control_port": self.control_port,
                 "media_host": "127.0.0.1", "return_peer": self.tailnet_ip}
 
+    def health(self):
+        """Is the helper actually alive, and does the app know why if not?
+
+        THE FAILURE THIS EXISTS FOR. The helper carries the meeting's audio BACK to the
+        presenter. When it dies, everything the presenter can see keeps working: the app is up,
+        the camera light is on, the room sees and hears them. Only the return path is gone, and
+        the presenter cannot tell whether the room is silent or whether they have been cut off.
+
+        Until 26 Aug 2026 nothing reported this at all. `MESH.proc` appeared in exactly one
+        place in the whole app -- the leg watchdog -- and there it SILENCED the alarm: a dead
+        helper took the same branch as "no session running", cleared the missing-legs list, and
+        the UI reported legs ok. A dead helper made the app look healthier, not less healthy.
+        """
+        # MeshManager has no intent flag of its own; the helper exists only for the duration
+        # of a session, so SESSION.wanted is the right question. Using `self.proc is None`
+        # alone would report "missing" for the entirely normal idle case.
+        if not getattr(SESSION, "wanted", False):
+            return {"state": "not_started", "ok": True,
+                    "detail": "no session running; the helper only runs while live"}
+        if not self.proc:
+            return {"state": "missing", "ok": False,
+                    "detail": "the mesh helper was never started. Return audio cannot work: "
+                              "the room will see and hear you, and you will hear nothing back.",
+                    "fix": "Quit and relaunch the app. If it persists, check that "
+                           "netbridge-mesh sits beside the app and is not quarantined "
+                           "(xattr -dr com.apple.quarantine .)"}
+        rc = self.proc.poll()
+        if rc is None:
+            return {"state": "running", "ok": True, "pid": self.proc.pid}
+        return {"state": "dead", "ok": False, "exit_code": rc,
+                "detail": "the mesh helper EXITED (code %s). The room can still see and hear "
+                          "you; you will hear nothing back, and nothing else will look wrong."
+                          % rc,
+                "fix": "Stop and go live again. If it dies immediately, the helper is most "
+                       "likely quarantined or missing next to the app."}
+
     def stop(self):
         if self.proc:
             try:
@@ -1308,9 +1344,26 @@ class LegWatch:
             self.missing, self.since, self.strikes, self.drops = [], 0.0, 0, 0
 
     def _tick(self):
-        if not SESSION.live or not MESH.proc or MESH.proc.poll() is not None:
+        # A DEAD HELPER IS NOT A QUIET SESSION.
+        #
+        # This used to read `if not SESSION.live or not MESH.proc or MESH.proc.poll() is not
+        # None`, clearing the missing-leg list for all three. The first is correct -- no
+        # session, nothing to watch. The other two are FAULTS being treated as calm: when the
+        # mesh helper died, this cleared the alarm and `legs.ok` went TRUE. The app reported
+        # itself healthier for having lost the thing that carries the room's audio back.
+        #
+        # Helper death is now reported by MESH.health() and surfaced in /api/state as `mesh`.
+        # The watchdog still stops probing legs it cannot reach through a dead helper -- there
+        # is nothing useful to say about them -- but it no longer pretends they are fine.
+        if not SESSION.live:
             with self.lock:
                 self.missing, self.strikes, self.live_since = [], 0, 0.0
+            return
+        if not MESH.proc or MESH.proc.poll() is not None:
+            with self.lock:
+                # Do not clear `missing`: the legs genuinely are unreachable. Freeze what we
+                # know and let `mesh` explain why, rather than reporting an all-clear.
+                self.strikes = 0
             return
         with self.lock:
             if not self.live_since:
@@ -1913,6 +1966,11 @@ class Handler(BaseHTTPRequestHandler):
                 "last_mic": st.get("mic_name"),
                 "live": SESSION.live,
                 "legs": LEGS.snapshot(),
+                # Reported SEPARATELY from legs, because a dead helper used to make the legs
+                # look healthy. The UI must be able to say APP OK / MESH OK / BRIDGE OK /
+                # RETURN AUDIO OK independently — one green light covering four things is how
+                # a presenter ends up talking to a room that cannot answer.
+                "mesh": MESH.health(),
                 "guard": GUARD.snapshot(),
                 "bridge_checks": BRIDGEWATCH.snapshot(),
                 "return_on": SESSION.return_on, "return_gain": SESSION.return_gain, "return_jitter_ms": SESSION.return_jitter_ms, "return_sink_sync": SESSION.return_sink_sync, "return_conceal": SESSION.return_conceal, "return_fec": SESSION.return_fec, "return_plc": SESSION.return_plc,

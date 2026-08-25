@@ -229,9 +229,38 @@ async def _start_background():
     asyncio.create_task(alerting.evaluate_loop(SessionLocal, settings.alert_eval_interval_s))
 
 
+# WHAT COMMIT IS ACTUALLY LIVE?
+#
+# Until 26 Aug 2026 the answer was "nobody can tell". The backend reported no version, no
+# commit and no build id, so the only way to establish what fleet.scine.online was running was
+# to probe its BEHAVIOUR -- which is exactly how the /docs exposure was found still live days
+# after being closed in source. "Fixed in the repository" and "fixed in production" were
+# indistinguishable from the outside, which is the same disease that left the P0 auth fix off
+# the bridge.
+#
+# deploy.sh now stamps these at build time. An unstamped deployment reports "unknown" rather
+# than inventing a value: a control plane that cannot say what it is must not claim to be
+# current.
+CP_GIT_SHA = os.getenv("CONTROL_PLANE_GIT_SHA", "unknown")
+CP_BUILD_ID = os.getenv("CONTROL_PLANE_BUILD_ID", "unknown")
+CP_BUILT_AT = os.getenv("CONTROL_PLANE_BUILT_AT", "unknown")
+
+
 @app.get("/healthz")
 def healthz():
-    return {"ok": True}
+    """Liveness AND identity.
+
+    `{"ok": true}` alone is the kind of green light this project has learned to distrust: it
+    means a process answered a socket, not that the right code is running.
+    """
+    return {
+        "ok": True,
+        "git_sha": CP_GIT_SHA,
+        "git_short": CP_GIT_SHA[:7] if CP_GIT_SHA != "unknown" else "unknown",
+        "build_id": CP_BUILD_ID,
+        "built_at": CP_BUILT_AT,
+        "api_docs_public": _DOCS,
+    }
 
 
 # ----------------------------- device-facing (/v1) -----------------------------
