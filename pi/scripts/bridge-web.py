@@ -402,6 +402,80 @@ USB_STATES = {
 }
 
 
+# ---------------------------------------------------------------------------------------
+# IS THE VIDEO ANY GOOD, OR MERELY PRESENT?
+#
+# `video_arriving` has always been "is the feeder burning CPU". That answers whether something
+# is happening and nothing about whether the meeting room is seeing a usable picture: a feeder
+# decoding a stream that has collapsed to two frames a second burns CPU exactly like a healthy
+# one. The audit could say video ARRIVES and could not say it was ACCEPTABLE.
+#
+# Bytes written to the loopback device is the honest measure, because a frame that reaches
+# /dev/video40 is a frame the UVC gadget can hand to the laptop. It is raw YUY2, so the size
+# is exactly known and frames-per-second follows by division - no estimation, no guessing.
+#
+# /proc/<pid>/io wchar counts bytes the process passed to write(), which for this pipeline is
+# the v4l2sink. It costs one small read.
+def _video_bytes(pid):
+    if not pid:
+        return None
+    try:
+        for ln in (read("/proc/%s/io" % pid) or "").splitlines():
+            if ln.startswith("wchar:"):
+                return int(ln.split(":", 1)[1].strip())
+    except Exception:
+        pass
+    return None
+
+
+def _video_frame_bytes():
+    """Bytes per frame for the format actually configured, not an assumed one."""
+    caps = read("/sys/devices/virtual/video4linux/video40/format") or ""
+    m = re.search(r"(\d+)x(\d+)", caps)
+    if m:
+        return int(m.group(1)) * int(m.group(2)) * 2      # YUY2 = 2 bytes/pixel
+    return 640 * 360 * 2                                   # the configured default
+
+
+_VIDEO_SEEN = {}
+
+
+def _expected_fps():
+    """The frame rate the gadget was actually set up for.
+
+    Read from the setup script rather than hard-coded, so changing the pipeline does not
+    silently leave a health check comparing against a number nobody updated.
+    """
+    try:
+        txt = read("/home/pi/uvc-raw-setup.sh") or read("/usr/local/bin/bridge-gadget-setup.sh") or ""
+        m = re.search(r"framerate=(\d+)/1", txt) or re.search(r"@(\d+)/1", txt)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return 20
+
+
+def video_throughput(pid, now):
+    """Frames per second actually delivered to the gadget, or None.
+
+    A DELTA between polls, like the stream-liveness check, so it costs nothing and cannot lie
+    about a moment it did not observe. The first poll after a restart returns None rather than
+    inventing a rate from one reading.
+    """
+    b = _video_bytes(pid)
+    prev = _VIDEO_SEEN.get("v")
+    _VIDEO_SEEN["v"] = (b, now)
+    if b is None or not prev or prev[0] is None:
+        return None
+    ob, ot = prev
+    gap = now - ot
+    if gap <= 0 or gap > 120:
+        return None
+    per_frame = _video_frame_bytes() or 1
+    return round((b - ob) / gap / per_frame, 1)
+
+
 def usb_diagnosis(state, functions, video40, uac2):
     """Classify the USB side, and admit when the answer is ambiguous.
 
@@ -923,7 +997,22 @@ def checks():
     else:
         dt = t1 - t0
         video_ok = dt > 10          # >10 cpu ticks in 2s = actively decoding RTP
-        video_detail = "feeder pid %s used %d cpu ticks in %.0fs" % (pid, dt, win)
+        # CPU says the feeder is BUSY. Frames per second says the room is getting a PICTURE -
+        # a stream collapsed to a couple of frames a second burns CPU exactly like a healthy
+        # one, so "arriving" and "watchable" were previously the same claim.
+        fps = video_throughput(pid, time.monotonic())
+        want = _expected_fps()
+        if fps is None:
+            video_detail = ("feeder pid %s used %d cpu ticks in %.0fs "
+                            "(frame rate needs a second poll)" % (pid, dt, win))
+        else:
+            video_detail = ("feeder pid %s: %.1f fps to the gadget (expected ~%d), "
+                            "%d cpu ticks in %.0fs" % (pid, fps, want, dt, win))
+            # Two thirds of nominal is the line between "someone would call this broken" and
+            # "a codec having a hard second". Below it the picture is visibly stuttering.
+            if fps < want * 0.66:
+                video_ok = False
+                video_detail += " — DEGRADED: the room is seeing a stuttering picture"
 
     if p0 is None or p1 is None:
         audio_ok, audio_detail = False, ("the meeting laptop is not playing audio into NetBridge — "
