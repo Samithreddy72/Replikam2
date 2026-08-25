@@ -117,3 +117,66 @@ fail loudly is not a test.
 
 True suite size: **385 passing**, 0 failing, 0 skipped, 0 without result — up from a reported
 346, of which 12 were dead and 27 were being skipped for a missing virtualenv.
+
+---
+
+# 8/10 hardening sprint — 26 August 2026
+
+Baseline frozen at `d95de0b`, tag `baseline-pre-8of10-sprint-2026-08-26`, suite 385 passing,
+master audit 5.9/10.
+
+## The finding that reframed the sprint
+
+**S-1 — the fix was in the repository and not on the device.** The P0 mutation-auth fix
+(`182eaea`) was present, covered by 28 passing tests, and correctly recorded here as SOFTWARE
+VERIFIED. The bridge was running image `2.0.0-1db20ec`, built *before* it, and had just carried
+a live meeting with `/api/set-peer`, `/api/return-tune` and `/api/unlock` reachable from the LAN
+with no credential at all.
+
+Nothing in this file was wrong. The gap was that "verified" had only ever been tracked against
+the repository. Proven with one deliberately harmless request — an invalid IP, so the outcome
+was diagnostic either way:
+
+```
+expected if deployed : HTTP 403
+observed             : HTTP 200 {"ok": false, "error": "bad ip"}   ← reached the handler
+```
+
+| ID | finding | fix | tests | status |
+|---|---|---|---|---|
+| **S-1** | repository-verified ≠ fleet-deployed | `tools/fleet-drift-check.sh` asks the device its build SHA and compares against HEAD; exit 2 on security-relevant drift, exit 3 when it cannot tell, never "in sync" on doubt | 8 | **SOFTWARE VERIFIED** — and **hardware-exercised against the live bridge**, where it correctly reports 182eaea missing |
+| **S-2** | mesh auth key passed as an argv argument, readable in `ps` | not fixed — deferred with the tailnet work | — | **DEFERRED** (observed live; the exposed key should be rotated) |
+| **S-3** | `/docs`, `/redoc`, `/openapi.json` public — 35 endpoints, 23 admin routes, `securitySchemes: NONE` | off unless `NB_API_DOCS=1`; verified 404 in default and 200 with the flag, `/healthz` unaffected | — | **CODE FIXED** — *not deployed*; the live control plane still exposes them |
+| **I-1** | updater compared version STRINGS; three different binaries were all stamped 1.1.9 | hashes the running binary and compares against the manifest sha256, before downloading, failing closed if it cannot hash itself | 11 | **SOFTWARE VERIFIED** |
+| **V-1** | encoder produced 320×180 into a gadget advertising 640×360 | 640×360 @ 1500k, both named constants, with a cross-file test that reads the UVC descriptor and fails if the two ever disagree | incl. above | **CODE FIXED** — needs a live look at the picture |
+| **W-1** | Windows never built — Chocolatey GStreamer failed its own checksum | official GStreamer MSVC MSI, version pinned, **sha256 pinned in the workflow** and verified before install; `--ignore-checksums` still refused | — | **SOFTWARE VERIFIED** — CI green, `app responds`, `fleet TLS ok` |
+| **W-2** | Windows plugin allow-list missing `gstaudiofx` + `gstvolume` | Windows now resolves plugins from `GST_ELEMENTS` via gst-inspect as macOS does; static set kept only as a floor | 8 | **SOFTWARE VERIFIED** |
+| **W-3** | nothing verified the shipped media stack | `tools/verify-gst-bundle.py` resolves every pipeline element against the bundled plugin path with the system path cleared; wired into CI on both platforms | — | **SOFTWARE VERIFIED** |
+| **M-1** | the `.app` was never built — `--windowed` gated on `NB_APP_BUNDLE`, which nothing sets | built unconditionally, with usage strings, stable bundle id, and the helper inside `Contents/MacOS` | 21 | **SOFTWARE VERIFIED** |
+| **M-2** | Info.plist written with PlistBuddy; an apostrophe truncated two usage strings to EMPTY | `plistlib`, plus a build-time abort if any usage string lands empty | incl. above | **SOFTWARE VERIFIED** |
+| **M-3** | no signing/notarization path at all | Developer ID + hardened runtime + notarytool + stapler wired and inert; minimum entitlements | incl. above | **BLOCKED BY EXTERNAL REQUIREMENT** — needs a paid Apple account |
+| **D-1** | README told users to de-quarantine only the app, not the mesh helper | instruction now clears the whole folder, and says what happens if you don't | — | **CODE FIXED** |
+
+## W-2 deserves its own note
+
+The Windows allow-list was missing the plugins backing `audiodynamic` (used twice — compressor
+and limiter) and `volume`. A Windows build would have compiled, launched, answered `/api/state`
+and passed the existing CI smoke test — and then been unable to construct its return pipeline
+at all. **Room audio silently absent, everything else apparently fine.**
+
+That is exactly the failure this project refused to ship when it declined to bypass the
+GStreamer checksum, and it was sitting in the allow-list the whole time. The cause was
+structural: macOS resolved plugins dynamically, Windows kept a second hand-written list, and
+the two drifted.
+
+## Recurring lesson, now tooled
+
+Searching source text and matching a **comment** produced a wrong answer five times in this
+project, three of them in this one sitting — twice while writing the very tests meant to catch
+it. The comment exists *because* the thing was fixed, so the better the explanation, the louder
+the false alarm. `tests/_source.py::code_only()` strips whole-line comments; use it for any
+check asserting the ABSENCE of something.
+
+## Suite
+
+385 → 433 passing, 0 failed, 0 skipped, 0 without result.

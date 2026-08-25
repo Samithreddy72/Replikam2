@@ -113,7 +113,11 @@ bundles its own ffmpeg and GStreamer. Download it from
 # 6. Download the app for your platform from Releases (the app-v* release),
 #    unzip it, and keep every file in the folder together — the mesh helper
 #    beside the app is what carries the meeting's audio back to you.
-#       macOS   : xattr -dr com.apple.quarantine NetBridgeSource   (once, after download)
+#       macOS   : cd into the folder, then:  xattr -dr com.apple.quarantine .
+#                 (once, after download. Clear the WHOLE folder, not just the app:
+#                  the mesh helper is quarantined too, and if it is blocked the
+#                  meeting still sees and hears you while YOU hear nothing back,
+#                  with nothing looking obviously wrong.)
 #       Windows : SmartScreen -> "More info" -> "Run anyway"       (once)
 # 7. Run it. First launch takes ~15s while it unpacks; a browser tab opens at
 #    http://127.0.0.1:8765/
@@ -132,6 +136,52 @@ Full detail, including what you should see at each step:
 **[docs/SETUP-GUIDE.md](docs/SETUP-GUIDE.md)**
 
 ---
+
+## Verifying a build before trusting it
+
+Every one of these exists because something passed a check that did not mean what it looked
+like it meant. Run them; do not assume.
+
+```bash
+bash tools/run-tests.sh --python /tmp/bev/bin/python   # whole suite; a crashed test is a FAILURE,
+                                                        # never a blank row
+bash tools/fleet-drift-check.sh 192.168.1.11           # is the DEVICE running the fix, or just the repo?
+python3 tools/verify-gst-bundle.py                      # can the shipped bundle build the return pipeline?
+bash tools/app-audit.sh ~/Desktop/NetBridge             # the presenter app bundle
+bash tools/image-audit.sh <image.img>                   # ~86 checks BEFORE anything is flashed
+bash tools/session-end-check.sh                         # did a session really end, on both ends?
+```
+
+**`fleet-drift-check.sh` is the one people skip and should not.** On 26 Aug 2026 the P0
+security fix was in git, covered by 28 passing tests, recorded as SOFTWARE VERIFIED — and not
+running on the bridge, which had just carried a live meeting with three unauthenticated
+mutation endpoints exposed to the LAN. Nothing was lying; "verified" had only ever been checked
+against the repository. Exit 2 from this tool means the device is missing security-relevant
+commits. Believe it over any document, including this one.
+
+## Building the app
+
+```bash
+cd app/netbridge-source
+python3 build.py --version 1.3.0        # needs Go, Homebrew GStreamer; fetches ffmpeg once
+```
+
+Produces `dist/NetBridgeSource` (one-file), `dist/netbridge-mesh` (verbatim sidecar — never let
+PyInstaller re-sign it, the stripped copy silently drops inbound UDP over tsnet) and, on macOS,
+`dist/NetBridgeSource.app` with camera/microphone/local-network usage strings and the helper
+inside `Contents/MacOS/`.
+
+The build ad-hoc signs and says plainly that the result is **not distributable**. For a build a
+recipient can double-click, set both of:
+
+```bash
+export NETBRIDGE_SIGN_ID="Developer ID Application: <name> (TEAMID)"
+export NETBRIDGE_NOTARY_PROFILE="<notarytool keychain profile>"
+```
+
+and the same command signs with Hardened Runtime, submits to Apple's notary service and staples
+the ticket. That requires a paid Apple Developer account, which is the only thing standing
+between the current build and a normal macOS install.
 
 ## Documentation
 
