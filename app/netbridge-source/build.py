@@ -225,7 +225,13 @@ def _bundle_gstreamer_windows(dest: pathlib.Path):
     # every DLL in bin/, plus gst-launch-1.0.exe
     n = 0
     for f in os.listdir(binsrc):
-        if f.lower().endswith(".dll") or f == "gst-launch-1.0.exe":
+        # gst-inspect travels too: it is what lets tools/verify-gst-bundle.py resolve elements
+        # against the SHIPPED plugin set with the bundle's own libraries, instead of falling
+        # back to a filename check. gst-plugin-scanner is the helper gst-inspect spawns to
+        # probe plugins out-of-process; without it GStreamer still works but warns on startup.
+        if (f.lower().endswith(".dll")
+                or f in ("gst-launch-1.0.exe", "gst-inspect-1.0.exe",
+                         "gst-plugin-scanner.exe")):
             shutil.copy2(os.path.join(binsrc, f), libdir / f)
             n += 1
     # only the plugins our pipeline references
