@@ -39,10 +39,15 @@ def main():
         return 0
 
     plugdir = gstdir / "plugins"
-    exe = gstdir / ("gst-inspect-1.0.exe" if os.name == "nt" else "gst-inspect-1.0")
-    if not exe.exists():
-        # macOS bundles gst-launch but not always gst-inspect; fall back to a filename check,
-        # which is weaker but still catches a wholly absent plugin.
+    # gst-inspect does not have to come from the bundle -- it only has to be pointed AT the
+    # bundle. The bundler copies gst-launch and not gst-inspect, so requiring the tool to be
+    # inside meant this silently fell back to a filename check on both platforms, which is a
+    # much weaker claim than the one this script is supposed to make.
+    #
+    # So: use any gst-inspect we can find (bundle, PATH, or the runner's own GStreamer install)
+    # and force it to resolve ONLY against the bundled plugin directory.
+    exe = _find_inspect(gstdir)
+    if not exe:
         return _by_filename(plugdir)
 
     # Point GStreamer at ONLY the bundled plugins. Without clearing the system path this would
@@ -56,15 +61,45 @@ def main():
     env["GST_REGISTRY"] = str(gstdir / ".verify-registry")
     env["GST_REGISTRY_UPDATE"] = "no"
 
+    def resolves(el):
+        # NO EXTRA FLAGS. The first version passed --no-colour, which this GStreamer does not
+        # accept: every element exited 255 and the tool reported a catastrophically broken
+        # bundle that in fact works in production. A verifier that cries wolf gets switched off.
+        r = subprocess.run([str(exe), el], env=env, capture_output=True, text=True, timeout=30)
+        return r.returncode == 0
+
+    # SENTINEL FIRST. `fakesink` lives in coreelements and is present in every conceivable
+    # GStreamer. If it does not resolve, the HARNESS is wrong -- bad flag, bad env, wrong
+    # binary -- and reporting "the bundle is broken" would be a false alarm about the artifact.
+    # Distinguishing "I cannot verify" from "this is broken" is the whole point.
+    if not resolves("fakesink"):
+        print("  method: gst-inspect (bundled)")
+        print("  \033[33mCANNOT VERIFY\033[0m  the sentinel element `fakesink` did not resolve,")
+        print("        so this check is not working — the bundle is not implicated.")
+        print("        Falling back to a filename check.")
+        return _by_filename(plugdir)
+
     want = CORE + SINKS.get(sys.platform, [])
-    missing = []
-    for el in want:
-        r = subprocess.run([str(exe), "--no-colour", el], env=env,
-                           capture_output=True, text=True, timeout=30)
-        if r.returncode != 0:
-            missing.append(el)
+    missing = [el for el in want if not resolves(el)]
     _report(want, missing, "gst-inspect against the bundled plugin path only")
     return 1 if missing else 0
+
+
+def _find_inspect(gstdir):
+    """Only a gst-inspect that shares the BUNDLE'S OWN library closure can answer this.
+
+    A foreign gst-inspect (Homebrew's, the runner's) already has its own libgstreamer mapped.
+    dlopening a bundled plugin then pulls a SECOND libgstreamer into the same process, and
+    GStreamer rejects every plugin -- which looks exactly like a catastrophically broken bundle
+    and is really a broken test. The first version of this script did that and reported all 11
+    elements missing from a bundle that works in production.
+
+    On Windows the bundler copies the whole bin/, so gst-inspect.exe is already there. On macOS
+    it is copied deliberately for this purpose.
+    """
+    name = "gst-inspect-1.0.exe" if os.name == "nt" else "gst-inspect-1.0"
+    c = gstdir / name
+    return c if c.exists() else None
 
 
 def _by_filename(plugdir):

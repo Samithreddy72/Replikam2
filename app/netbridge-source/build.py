@@ -145,8 +145,14 @@ def bundle_gstreamer(dest: pathlib.Path):
         log("could not resolve any GStreamer plugins — skipping")
         return None
 
-    # walk the closure
-    seen, queue = {}, [gst] + sorted(plugins)
+    # walk the closure. gst-inspect travels too: it is ~100 KB, it makes the shipped bundle
+    # self-verifying (tools/verify-gst-bundle.py), and it is the only way to ask a FIELD
+    # install what it can actually do. A foreign gst-inspect cannot answer that question --
+    # it already has its own libgstreamer mapped, so dlopening a bundled plugin pulls a second
+    # copy into the process and GStreamer refuses every plugin. The tool has to share the
+    # bundle's own library closure.
+    inspect = shutil.which("gst-inspect-1.0")
+    seen, queue = {}, [gst] + ([inspect] if inspect else []) + sorted(plugins)
     while queue:
         src = queue.pop()
         if not src or src in seen or not os.path.exists(src):
@@ -159,6 +165,8 @@ def bundle_gstreamer(dest: pathlib.Path):
         tgt = (plugdir if src in plugins else libdir) / os.path.basename(src)
         if src == gst:
             tgt = libdir / "gst-launch-1.0"
+        elif inspect and src == inspect:
+            tgt = libdir / "gst-inspect-1.0"
         if not tgt.exists():
             shutil.copy2(src, tgt)
             tgt.chmod(0o755)
