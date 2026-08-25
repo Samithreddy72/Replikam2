@@ -26,6 +26,11 @@ WORK = HERE / "build"
 IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
 
+# Reverse-DNS bundle identifier. macOS keys TCC permission grants (camera, microphone, local
+# network) to this string, so it must stay STABLE across releases: change it and every user is
+# re-prompted for permissions they already granted, on the next update.
+BUNDLE_ID = "online.scine.netbridge.source"
+
 # Static ffmpeg builds. Bundling means the presenter installs nothing; it also pins the
 # ffmpeg we tested against rather than whatever happens to be on their machine.
 FFMPEG_URLS = {
@@ -285,6 +290,180 @@ def build_mesh():
     return out
 
 
+
+ENTITLEMENTS = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+    '<plist version="1.0"><dict>\n'
+    '  <key>com.apple.security.cs.disable-library-validation</key><true/>\n'
+    '  <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>\n'
+    '  <key>com.apple.security.device.camera</key><true/>\n'
+    '  <key>com.apple.security.device.audio-input</key><true/>\n'
+    '</dict></plist>\n'
+)
+
+
+def finish_mac_bundle(app_path, mesh, version):
+    """Make the .app a real, shippable macOS application.
+
+    PyInstaller produces a structurally valid bundle and stops. Three things still have to be
+    true before it is something a person can be handed:
+
+      INFO.PLIST USAGE STRINGS. macOS refuses camera and microphone access to a bundle that
+      does not declare WHY it wants them, and since Sequoia it also gates local networking.
+      Without these the app is denied silently - no prompt, no error, just no video, which is
+      the most expensive failure mode this project has had.
+
+      THE SIDECAR MUST BE INSIDE. _mesh_bin() looks for the helper next to sys.executable, and
+      inside a bundle that is Contents/MacOS/. The helper is copied VERBATIM and never handed
+      to PyInstaller, because PyInstaller re-signs any Mach-O it bundles and the stripped copy
+      silently drops inbound UDP over tsnet - return audio dead, nothing else visibly wrong.
+
+      SIGNING ORDER. Nested code first, outer bundle last. Sign the bundle first and the later
+      signature of a nested binary invalidates the seal, which macOS reports as a damaged app.
+    """
+    if not app_path.exists():
+        return None
+    macos = app_path / "Contents" / "MacOS"
+    macos.mkdir(parents=True, exist_ok=True)
+
+    if mesh:
+        side = macos / "netbridge-mesh"
+        shutil.copy2(mesh, side)
+        os.chmod(side, 0o755)
+        log("bundle: mesh helper placed at Contents/MacOS/netbridge-mesh")
+
+    plist = app_path / "Contents" / "Info.plist"
+    keys = [
+        ("NSCameraUsageDescription", "string",
+         "NetBridge sends your camera to the meeting room's bridge so the room sees you as "
+         "its own webcam."),
+        ("NSMicrophoneUsageDescription", "string",
+         "NetBridge sends your voice to the meeting room's bridge so the room hears you "
+         "through its own speakers."),
+        ("NSLocalNetworkUsageDescription", "string",
+         "NetBridge finds and talks to your bridge on the local network."),
+        ("CFBundleShortVersionString", "string", version),
+        ("CFBundleVersion", "string", version),
+        ("LSMinimumSystemVersion", "string", "12.0"),
+        # The UI is a browser tab the app opens itself; there is no Cocoa window. Without this
+        # macOS parks a permanent blank icon in the Dock.
+        ("LSUIElement", "bool", "true"),
+    ]
+    # plistlib, NOT PlistBuddy.
+    #
+    # The first version shelled out to `PlistBuddy -c "Add :key string <value>"`. PlistBuddy
+    # parses that value string, and an apostrophe in "the room's bridge" silently truncated it
+    # to EMPTY. Two of the three keys came out blank while the third -- the one with no
+    # apostrophe -- was fine, and the build reported success either way.
+    #
+    # An empty NSCameraUsageDescription is not a cosmetic bug: macOS denies the camera to a
+    # bundle with no usage string, without prompting. The app would have shipped, launched,
+    # gone live, and delivered no video, with nothing anywhere saying why. Structured data
+    # deserves a structured writer.
+    import plistlib
+    with open(plist, "rb") as fh:
+        info = plistlib.load(fh)
+    for k, typ, val in keys:
+        info[k] = (val == "true") if typ == "bool" else val
+    with open(plist, "wb") as fh:
+        plistlib.dump(info, fh)
+
+    # Verify what actually landed. A usage string that exists but is empty is worse than one
+    # that is missing, because it looks correct in a diff.
+    with open(plist, "rb") as fh:
+        got = plistlib.load(fh)
+    blank = [k for k, typ, _ in keys if typ == "string" and not str(got.get(k, "")).strip()]
+    if blank:
+        raise SystemExit("[build] FATAL: Info.plist keys are present but EMPTY: %s\n"
+                         "        macOS denies camera/microphone access silently in this state."
+                         % ", ".join(blank))
+
+    log("bundle: Info.plist carries camera / microphone / local-network usage strings")
+
+    # --- signing ---------------------------------------------------------------------------
+    # NETBRIDGE_SIGN_ID is a Developer ID Application identity, e.g.
+    #   "Developer ID Application: Some Name (TEAMID)"
+    # Without it we ad-hoc sign, which is what Apple Silicon needs in order to execute at all
+    # but is NOT distributable: a browser download of an ad-hoc bundle is quarantined and
+    # refused. The pipeline is identical either way, so the day an Apple Developer account
+    # exists this is one environment variable rather than a rewrite.
+    ident = os.environ.get("NETBRIDGE_SIGN_ID", "").strip() or "-"
+    adhoc = ident == "-"
+
+    ents = None
+    if not adhoc:
+        # Hardened Runtime is required for notarization, and a PyInstaller one-file app unpacks
+        # and dlopen()s its own dylibs at runtime, which library validation blocks outright.
+        # These are the minimum entitlements that permit that while keeping the rest of the
+        # hardened runtime. Deliberately NOT disable-executable-page-protection, and
+        # deliberately not the blanket allow-dyld-environment-variables.
+        ents = WORK / "entitlements.plist"
+        ents.parent.mkdir(parents=True, exist_ok=True)
+        ents.write_text(ENTITLEMENTS)
+
+    def sign(target, seal_bundle=False):
+        cmd = ["codesign", "--force", "--sign", ident]
+        if not adhoc:
+            cmd += ["--timestamp", "--options", "runtime"]
+            if ents:
+                cmd += ["--entitlements", str(ents)]
+        cmd += [str(target)]
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    # NESTED FIRST. What matters is that nothing nested is signed AFTER the bundle itself.
+    for f in sorted(macos.rglob("*")):
+        if f.is_file() and os.access(f, os.X_OK) and f.name != app_path.stem:
+            sign(f)
+    r = sign(app_path, seal_bundle=True)
+    if r.returncode != 0:
+        log("bundle: codesign FAILED: %s" % (r.stderr or "").strip()[:200])
+        return app_path
+
+    v = subprocess.run(["codesign", "--verify", "--deep", "--strict", "--verbose=2",
+                        str(app_path)], capture_output=True, text=True)
+    log("bundle: signed with %s - verify %s"
+        % ("ad-hoc (NOT distributable)" if adhoc else ident,
+           "OK" if v.returncode == 0 else "FAILED: " + (v.stderr or "").strip()[:160]))
+
+    if adhoc:
+        log("bundle: NOT notarised. A browser download of this bundle WILL be quarantined and")
+        log("        Gatekeeper will refuse it. Set NETBRIDGE_SIGN_ID (a Developer ID identity)")
+        log("        and NETBRIDGE_NOTARY_PROFILE to produce a distributable build.")
+        return app_path
+
+    # --- notarization ----------------------------------------------------------------------
+    # notarytool wants an archive, not a directory, and it must be made with ditto: plain `zip`
+    # loses symlinks and extended attributes and produces a bundle Apple rejects. The ticket is
+    # then STAPLED so the first launch works with no network round-trip.
+    profile = os.environ.get("NETBRIDGE_NOTARY_PROFILE", "").strip()
+    if not profile:
+        log("bundle: signed but NOT notarised (NETBRIDGE_NOTARY_PROFILE unset)")
+        return app_path
+    zipped = DIST / (app_path.stem + "-notarize.zip")
+    subprocess.run(["ditto", "-c", "-k", "--keepParent", str(app_path), str(zipped)], check=True)
+    log("bundle: submitting to the Apple notary service (minutes, not seconds)")
+    n = subprocess.run(["xcrun", "notarytool", "submit", str(zipped),
+                        "--keychain-profile", profile, "--wait"],
+                       capture_output=True, text=True)
+    if n.returncode != 0:
+        log("bundle: notarization FAILED: %s" % (n.stdout + n.stderr)[-400:])
+        return app_path
+    st = subprocess.run(["xcrun", "stapler", "staple", str(app_path)],
+                        capture_output=True, text=True)
+    gk = subprocess.run(["spctl", "-a", "-vv", "-t", "exec", str(app_path)],
+                        capture_output=True, text=True)
+    tail = (gk.stderr or gk.stdout or "").strip().splitlines()
+    log("bundle: notarised; staple %s; Gatekeeper says %s"
+        % ("OK" if st.returncode == 0 else "FAILED", tail[-1] if tail else "?"))
+    try:
+        zipped.unlink()
+    except OSError:
+        pass
+    return app_path
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-ffmpeg", action="store_true", help="do not bundle ffmpeg")
@@ -352,9 +531,27 @@ def main():
     # explicitly rather than relying on PyInstaller's static analysis to spot it.
     cmd += ["--hidden-import", "certifi", "--collect-data", "certifi"]
     if IS_MAC:
-        # A .app bundle is what macOS users expect to double-click. The onefile binary
-        # still works from a terminal, and is what CI zips.
-        cmd += ["--windowed"] if os.environ.get("NB_APP_BUNDLE") else []
+        # ALWAYS build the .app, not just when an env var happens to be set.
+        #
+        # This was `["--windowed"] if os.environ.get("NB_APP_BUNDLE") else []`, and nothing in
+        # the repository ever set NB_APP_BUNDLE -- so every release for months shipped two bare
+        # Mach-O executables. That matters for three separate reasons:
+        #
+        #  1. GATEKEEPER. A quarantined bare executable has NO user-recoverable path: macOS
+        #     kills it (or hangs it in dyld) with an empty stdout and stderr, and Finder offers
+        #     nothing. A quarantined .app gets the supported "Open Anyway" flow in System
+        #     Settings > Privacy & Security. Same signature, completely different outcome.
+        #  2. TCC IDENTITY. A bare binary has no Info.plist, so it has no camera/microphone
+        #     usage strings and no bundle identity: macOS attributes the request to whatever
+        #     LAUNCHED it. That is the entire reason this project's launcher carries a warning
+        #     never to start the app from another tool -- do so and you get microphone but no
+        #     video, with no error and no prompt. A .app owns its own TCC entry.
+        #  3. NOTARIZATION. Apple notarises bundles. A signing pipeline that has no bundle to
+        #     sign cannot be finished later; with one, it is a credential away.
+        #
+        # The onefile binary is still produced alongside and remains what the proven
+        # Launch-NetBridge.command runs, so nothing that works today stops working.
+        cmd += ["--windowed", "--osx-bundle-identifier", BUNDLE_ID]
     cmd += [str(HERE / "source_app.py")]
 
     log(" ".join(cmd))
@@ -383,6 +580,11 @@ def main():
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         log("SIDECAR %s (%.1f MB) — verbatim helper, ships beside the app" %
             (side, side.stat().st_size / 1e6))
+
+    # Finish the .app: usage strings, the helper INSIDE Contents/MacOS, and signing.
+    if IS_MAC:
+        appb = DIST / (name + ".app")
+        finish_mac_bundle(appb, mesh, args.version or _stamped_version())
 
     # ---- update manifest (walkthrough J3: "kept current by auto-update") -------------
     # Same trust model as the image OTA: an EC-signed manifest naming a sha256. The app
