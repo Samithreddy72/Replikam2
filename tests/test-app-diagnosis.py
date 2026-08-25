@@ -41,10 +41,19 @@ if not m:
 
 ns = {}
 guard = types.SimpleNamespace(snapshot=lambda: {"repairs": {}})
-exec("class W:\n" + m.group(0).rstrip() + "\n", {"GUARD": guard}, ns)
+# The method also consults SESSION.leg_cpu_rate(), added when the wedged-camera signal landed.
+# Without a stand-in the whole file died with NameError - and because it crashed BEFORE
+# printing a summary line, the runner recorded it as "no result" rather than a failure and it
+# went unnoticed for two phases. A test that cannot fail loudly is not a test.
+session = types.SimpleNamespace(leg_cpu_rate=lambda name: None, CPU_FLOOR=0.02)
+exec("class W:\n" + m.group(0).rstrip() + "\n", {"GUARD": guard, "SESSION": session}, ns)
 W = ns["W"]
 
-def watcher(deaths, others):
+def watcher(deaths, others, cpu_rate=None):
+    """cpu_rate=None means "no throughput reading available", which is the case the
+    death-counting heuristic below must still handle."""
+    W._giving_up_because.__globals__["SESSION"] = types.SimpleNamespace(
+        leg_cpu_rate=lambda name: cpu_rate, CPU_FLOOR=0.02)
     w = W()
     w.LEG_FOR = {"video_arriving": "video", "voice_arriving": "voice"}
     w.last_checks = others
@@ -97,6 +106,23 @@ if a != b:
     ok("the two situations produce different sentences — the test can tell them apart")
 else:
     no("same message either way; this proves nothing", a)
+
+print("\n  ---- a leg that is ALIVE but doing no work ----")
+# The heuristic below counts DEATHS. A wedged camera leaves ffmpeg running happily while
+# avfoundation delivers nothing, so it dies never and the death count stays zero - which is
+# how "check the bridge" got printed for a fault on the Mac it was printed from.
+w = watcher({}, {"voice_arriving": {"ok": True}}, cpu_rate=0.004)
+msg = w._giving_up_because("video_arriving", 3)
+if "LOCAL_CAMERA_FAULT" in msg and "fix-camera-macos.sh" in msg:
+    ok("an alive-but-idle video leg is named a LOCAL camera fault")
+else:
+    no("a wedged camera that never dies is still blamed on the far end", msg[:90])
+w = watcher({}, {"voice_arriving": {"ok": True}}, cpu_rate=0.33)
+msg = w._giving_up_because("video_arriving", 3)
+if "LOCAL_CAMERA_FAULT" not in msg:
+    ok("a leg doing real work (0.33 CPU-s/s) is NOT blamed on the camera")
+else:
+    no("would blame the camera on a healthy encoder — false positives train people to ignore it")
 
 print("\n  ---- the camera is released, not killed ----")
 # The wedge that cost the 2026-08-14 session was ffmpeg being SIGKILLed while it held
