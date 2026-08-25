@@ -91,7 +91,11 @@ bundles its own ffmpeg and GStreamer. Download it from
 **The bridge** (once per device):
 
 ```bash
-# 1. Download the newest netbridge-os-*.img.xz from Releases
+# 1. Download the BEST KNOWN GOOD image — release v2.0.0-1db20ec, marked
+#    "✅ BEST KNOWN GOOD IMAGE" on the Releases page. Do NOT just take the newest
+#    or the highest version number: image versions were typed by hand until
+#    2026-08-26, so a JULY image is published as 2.0.1 above AUGUST 2.0.0 images.
+#    Verify sha256 against manifest-disk.txt before flashing.
 # 2. Flash it with Raspberry Pi Imager — pick "Use custom image", change no settings
 # 3. Boot the Pi. From a phone, join the "BridgeSetup-XXXX" Wi-Fi network it raises
 #    and hand it the venue's Wi-Fi through the page that opens.

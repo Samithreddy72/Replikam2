@@ -1,5 +1,21 @@
 # NetBridge — fix ledger
 
+> ## ✅ BEST KNOWN GOOD IMAGE — `2.0.0-1db20ec`
+>
+> Release [`v2.0.0-1db20ec`](https://github.com/Samithreddy72/Replikam2/releases/tag/v2.0.0-1db20ec) ·
+> sha256 `b884de3a…a17989` · built from `1db20ec` · image audit **86/86** · signature **Verified
+> OK** · **running in production**, 5/5 services, USB gadget `configured`, real meetings with 0
+> dropped legs.
+>
+> It is the fallback for everything, because it is the only image proven on hardware.
+>
+> **It predates the P0 mutation-auth fix (`182eaea`).** `/api/set-peer`, `/api/return-tune` and
+> `/api/unlock` are reachable from the LAN with no credential on it, and `set-peer` redirects
+> the room's microphone. Safe on a network you control; not on a venue LAN. Confirm any device
+> with `bash tools/fleet-drift-check.sh <ip>` — exit 2 means security-relevant drift, which is
+> what it returns today.
+
+
 Findings from the production audit of 25 August 2026 and their state. Nothing is removed from
 this file; entries only change status.
 
