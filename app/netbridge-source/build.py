@@ -216,9 +216,42 @@ def _bundle_gstreamer_windows(dest: pathlib.Path):
             shutil.copy2(os.path.join(binsrc, f), libdir / f)
             n += 1
     # only the plugins our pipeline references
+    # WHICH PLUGINS TO COPY.
+    #
+    # The macOS path resolves this dynamically: it asks gst-inspect which file backs each
+    # element in GST_ELEMENTS. Windows kept a SECOND, hand-written list of plugin names, and
+    # the two drifted -- gstaudiofx (audiodynamic, used twice as compressor and limiter) and
+    # gstvolume (the gain stage) were missing, so a Windows build would have produced an app
+    # whose return pipeline could not be constructed at all. Room audio silently absent,
+    # everything else apparently fine: exactly the failure this project refused to ship when
+    # it declined to bypass the GStreamer checksum.
+    #
+    # So: ask gst-inspect here too, from the single GST_ELEMENTS list, and keep the static set
+    # only as a floor for elements that fail to introspect on a headless runner.
     want = {"gstcoreelements", "gstudp", "gstrtpmanager", "gstrtp", "gstopus",
-            "gstaudioconvert", "gstaudioresample", "gstautodetect",
-            "gstaudioparsers", "gstwasapi", "gstwasapi2", "gstdirectsound"}
+            "gstaudioconvert", "gstaudioresample", "gstaudiofx", "gstvolume",
+            "gstautodetect", "gstaudioparsers",
+            "gstwasapi", "gstwasapi2", "gstdirectsound"}
+    inspect = os.path.join(binsrc, "gst-inspect-1.0.exe")
+    if os.path.exists(inspect):
+        resolved = set()
+        for el in GST_ELEMENTS:
+            try:
+                out = subprocess.run([inspect, el], capture_output=True, text=True,
+                                     timeout=20).stdout
+            except Exception:
+                continue
+            for line in out.splitlines():
+                if "Filename" in line:
+                    base = os.path.splitext(os.path.basename(line.split()[-1]))[0]
+                    resolved.add(base.replace("libgst", "gst"))
+                    break
+        if resolved:
+            missing = resolved - want
+            if missing:
+                log("gst-inspect found plugins the static list omits: %s" % sorted(missing))
+            want |= resolved
+
     pn = 0
     if os.path.isdir(plugsrc):
         for f in os.listdir(plugsrc):

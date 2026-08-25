@@ -136,7 +136,27 @@ PIN_BEARING_COMMANDS = {"set-pin", "unlock"}
 # unset the env var and let the next telemetry re-populate the mesh IP once mesh works.
 LAN_ONLY = os.getenv("NB_LAN_ONLY", "").strip().lower() not in ("", "0", "false", "no", "off")
 
-app = FastAPI(title="NetBridge Control Plane", version="0.1.0")
+# INTERACTIVE API DOCS ARE OFF UNLESS SOMEBODY ASKS FOR THEM.
+#
+# FastAPI serves /docs, /redoc and /openapi.json to anyone, with no authentication, by default.
+# On 26 Aug 2026 the live control plane was disclosing all 35 endpoints -- 23 admin routes and
+# 5 auth routes -- to an unauthenticated visitor, with no securitySchemes declared.
+#
+# The endpoints themselves are gated (/admin/rollouts correctly answers 401), so this was
+# reconnaissance value rather than direct access. But publishing the complete shape of an admin
+# API to the internet buys an attacker a map for free and buys us nothing: the people who need
+# the schema are developers, who can set the flag.
+#
+# NB_API_DOCS=1 turns them back on for local development.
+_DOCS = os.getenv("NB_API_DOCS", "").strip().lower() in ("1", "true", "yes", "on")
+
+app = FastAPI(
+    title="NetBridge Control Plane",
+    version="0.1.0",
+    docs_url="/docs" if _DOCS else None,
+    redoc_url="/redoc" if _DOCS else None,
+    openapi_url="/openapi.json" if _DOCS else None,
+)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # Bootstrap tables for dev/first run. For prod, switch to Alembic migrations.

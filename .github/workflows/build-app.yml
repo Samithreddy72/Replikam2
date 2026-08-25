@@ -59,9 +59,50 @@ jobs:
       # GStreamer is the ONLY return-audio player on Windows (ffmpeg has no audio output
       # device there), so it must be present on the runner for build.py to bundle it.
       # macOS copies from the runner's own Homebrew GStreamer, installed here too.
+      # OFFICIAL GSTREAMER, PINNED AND CHECKSUM-VERIFIED.
+      #
+      # This used to be `choco install gstreamer`, which failed its own checksum upstream and
+      # so failed every Windows build. The tempting fix -- --ignore-checksums -- was correctly
+      # refused: GStreamer is the ONLY return-audio player on Windows, so a build that skipped
+      # integrity verification would look fine and could have no room audio.
+      #
+      # The real fix is to stop using a third-party repackager. GStreamer publishes MSVC MSIs
+      # and a .sha256sum for each one, so the checksum is verified against a value PINNED HERE:
+      # verifying against a hash downloaded next to the file would only prove the mirror is
+      # self-consistent, not that it is the artifact we tested.
+      #
+      # Runtime only. The devel MSI (352 MB) carries headers and import libraries we never use.
+      # Everything the return pipeline needs -- core, udp, rtp/rtpmanager, opus, audioconvert,
+      # audioresample, audiofx, volume, autodetect, wasapi -- is LGPL, and none of the
+      # "restricted"/"ugly"/GPL codec packages are pulled in. That keeps redistribution simple.
+      #   https://gstreamer.freedesktop.org/documentation/deploying/windows.html
       - name: Install GStreamer (Windows)
         if: runner.os == 'Windows'
-        run: choco install gstreamer --no-progress -y
+        shell: pwsh
+        env:
+          GST_VERSION: "1.26.11"
+          GST_SHA256: "31cbc21fa0950b5c1e79c80959b2799805cb05a7a35953a13a9f790776137605"
+        run: |
+          $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc/gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.msi"
+          $msi = "$env:RUNNER_TEMP\gstreamer.msi"
+          Write-Host "downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing
+          $got = (Get-FileHash $msi -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:GST_SHA256.ToLower()) {
+            Write-Error "GStreamer MSI checksum MISMATCH`n  expected $($env:GST_SHA256)`n  got      $got`nRefusing to build: an unverified media stack means possibly-silent return audio."
+            exit 1
+          }
+          Write-Host "sha256 verified: $got"
+          # ADDLOCAL=ALL so the plugin set is complete; the bundler copies only what it needs.
+          Start-Process msiexec.exe -Wait -ArgumentList "/i `"$msi`" /qn /norestart ADDLOCAL=ALL INSTALLDIR=C:\gstreamer"
+          $root = "C:\gstreamer\1.0\msvc_x86_64"
+          if (-not (Test-Path "$root\bin\gst-launch-1.0.exe")) {
+            Write-Error "GStreamer installed but gst-launch-1.0.exe is not at $root\bin"
+            exit 1
+          }
+          Write-Host "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root"
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$root\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
       - name: Install GStreamer (macOS)
         if: runner.os == 'macOS'
         run: brew install gstreamer || true
