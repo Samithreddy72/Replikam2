@@ -129,6 +129,10 @@ let KEY = localStorage.getItem("nb_admin_key") || "";
 // and RESTARTS uvcd + feeder-net + feeder-audio. It was missing, and on 10 Aug the device
 // side did exactly that to a live meeting on its own — the two most dangerous entries in
 // this menu were the two that were unguarded.
+// Mirrors CONFIRM_REQUIRED in the backend. tests/test-fleet-contract.py fails if a command
+// the backend guards is not confirmed here, so the two cannot drift apart.
+const BACKEND_CONFIRM = new Set(["reboot","update","deploy-script","revert-script",
+                                 "unquarantine","golden-restore","reset-clock"]);
 const DISRUPTIVE = new Set(["restart","reset-clock","reboot","lock","stop","profile","update",
   "unquarantine","jitter-fix:3","deploy-script","revert-script","golden-restore"]);
 // Every entry here maps to a failure this fleet has ACTUALLY produced. Two candidates were
@@ -507,12 +511,29 @@ async function doAction(devId, devName, value, isLive){
   // disruptive member of the jitter-fix family — rungs 1 and 2 must not nag — so it is listed
   // by its full "jitter-fix:3" value and would otherwise never match, silently freezing video
   // on a live call with no confirmation at all.
-  if (DISRUPTIVE.has(type) || DISRUPTIVE.has(value)) {
-    if (isLive && !confirm(`⚠ ${devName} is LIVE — someone is streaming through it right now.\n\n"${type}" will interrupt them. Really proceed?`)) return;
-    if (!isLive && !confirm(`Run "${type}" on ${devName}?`)) return;
-  }
-  try {
-    const r = await api(`/admin/devices/${devId}/commands`, {method:"POST", body:JSON.stringify({type, args})});
+  // Confirmed here becomes confirm:true on the wire. The backend independently refuses a
+    // destructive command without it, so the browser dialog is no longer the only thing between
+    // a mis-click and a room dropping - but the two must agree, or every destructive button
+    // would 400. Only a dialog the operator actually accepted sets it.
+    // Confirmed here becomes confirm:true on the wire. The backend independently refuses a
+    // destructive command without it, so the browser dialog is no longer the only thing
+    // between a mis-click and a room dropping - but the two must agree, or every destructive
+    // button would 400. Only a dialog the operator actually accepted sets this.
+    let confirmed = false;
+    if (DISRUPTIVE.has(type) || DISRUPTIVE.has(value)) {
+      if (isLive && !confirm(`⚠ ${devName} is LIVE — someone is streaming through it right now.\n\n"${type}" will interrupt them. Really proceed?`)) return;
+      if (!isLive && !confirm(`Run "${type}" on ${devName}?`)) return;
+      confirmed = true;
+    }
+    // Destructive at the BACKEND without being flagged disruptive here - `update` has no
+    // button and no warning triangle. Ask explicitly rather than letting the request fail
+    // with a message the operator cannot act on.
+    if (!confirmed && BACKEND_CONFIRM.has(type)) {
+      if (!confirm(`"${type}" on ${devName} changes what code runs or interrupts service.\n\nProceed?`)) return;
+      confirmed = true;
+    }
+    try {
+    const r = await api(`/admin/devices/${devId}/commands`, {method:"POST", body:JSON.stringify({type, args, confirm: confirmed})});
     toast(`queued ${type} on ${devName} — command #${r.id}`);
     // A diagnosis nobody reads is not a diagnosis. Everything else here is an ACTION whose
     // effect the operator can see in the fleet row, but jitter-diagnose exists purely to

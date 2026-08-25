@@ -39,6 +39,10 @@ class ClaimIn(BaseModel):
 class IssueCommandIn(BaseModel):
     type: str                       # restart | reset-clock | profile | set-peer
     args: dict[str, Any] = {}
+    # Explicit intent for a command that interrupts service or changes what code runs. Defaults
+    # to False so an existing caller cannot accidentally acquire the right to reboot a bridge
+    # by omission - the safe direction for a field whose absence used to mean "go ahead".
+    confirm: bool = False
 
 
 class RolloutCreateIn(BaseModel):

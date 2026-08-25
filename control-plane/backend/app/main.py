@@ -45,6 +45,84 @@ ALLOWED_COMMANDS = {"restart", "reset-clock", "profile", "set-peer", "update", "
                     # read-only look at the device's filesystem; the device enforces the
                     # roots and redacts anything credential-shaped
                     "read-file"}
+# ---------------------------------------------------------------------------------------
+# COMMAND POLICY — how long a command may take, and which ones can hurt.
+#
+# On 2026-08-24 a probe queued a real `reboot` against a live bridge and there was no way to
+# recall it: no cancel endpoint, and the device had already collected it. The bridge rebooted.
+# Two other commands from the same session sat in "sent" for over an hour while later ones
+# completed, with nothing in the UI to say they were stuck.
+#
+# Two separate defences, because they solve different halves of that:
+#   CONFIRM_REQUIRED  stops the dangerous ones being issued by accident in the first place,
+#                     which is worth more than being able to cancel afterwards.
+#   TIMEOUTS          guarantee every command reaches a terminal state, so "sent" can never
+#                     again mean "unknown, forever".
+#
+# Timeouts are per CLASS, not global. A read answers in seconds; a reboot has to outlive the
+# reboot itself; an OTA has to survive a large download over a venue uplink. One number would
+# either kill legitimate slow work or leave a dead command sitting for an hour.
+TIMEOUT_S = {
+    # read-only: the agent answers on its next tick or something is wrong
+    "running": 90, "logs": 90, "read-file": 90, "gadget-tune-show": 90,
+    "jitter-diagnose": 120, "lock-state": 90,
+    # diagnostics collect for ~40s on the device before uploading
+    "diagnose": 300,
+    # media restarts are quick; the gadget re-enumerates a client, which is slower
+    "restart": 180, "profile": 180, "jitter-fix": 180, "jitter-reset": 180,
+    "set-peer": 120, "set-pin": 120, "unlock": 120, "lock": 120,
+    "gadget-tune": 120, "gadget-tune-clear": 120,
+    "golden-save": 180, "golden-restore": 300,
+    # must outlive the reboot and the services coming back
+    "reboot": 420, "reset-clock": 300,
+    # script deployment restarts a service and may auto-rollback
+    "deploy-script": 420, "revert-script": 300, "unquarantine": 300,
+    # a whole image over whatever uplink the venue has
+    "update": 3600,
+}
+DEFAULT_TIMEOUT_S = 240
+
+# Issuing these interrupts a meeting, changes what code runs, or cannot be undone from the
+# panel. The FRONTEND already warns; that is not a control, because the API is reachable
+# without it - which is exactly how the accidental reboot happened. The backend now refuses
+# them unless the caller states the intent explicitly.
+CONFIRM_REQUIRED = {"reboot", "update", "deploy-script", "revert-script",
+                    "unquarantine", "golden-restore", "reset-clock"}
+
+
+def _timeout_for(ctype: str) -> int:
+    return TIMEOUT_S.get(ctype, DEFAULT_TIMEOUT_S)
+
+
+def _sweep_expired(db: Session) -> int:
+    """Move commands that were delivered and never answered into a terminal state.
+
+    Called from the read paths rather than a background task: the fleet is small, the query
+    is indexed, and a sweeper that only runs when someone is looking cannot itself become a
+    silent failure. A command is only expired once it has actually been DELIVERED - a row
+    still `pending` is waiting for the device to poll, which is not a fault.
+    """
+    now = utcnow()
+    stale = db.scalars(select(Command).where(Command.status == "sent")).all()
+    n = 0
+    for c in stale:
+        started = c.sent_at or c.created_at
+        if not started:
+            continue
+        # tz-naive rows exist in databases written by the previous build
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=dt.timezone.utc)
+        if (now - started).total_seconds() > (c.timeout_s or DEFAULT_TIMEOUT_S):
+            c.status = "expired"
+            c.fail_reason = ("no result within %ds of delivery — the device may have rebooted, "
+                             "lost its uplink, or died mid-command" % (c.timeout_s or DEFAULT_TIMEOUT_S))
+            c.completed_at = now
+            n += 1
+    if n:
+        db.commit()
+    return n
+
+
 # Commands whose args contain a secret. Their args are scrubbed once the device confirms
 # execution, so a PIN never lives in the fleet database beyond its delivery window.
 PIN_BEARING_COMMANDS = {"set-pin", "unlock"}
@@ -92,6 +170,18 @@ def _migrate():
                 conn.execute(_text("ALTER TABLE users ADD COLUMN login_hash VARCHAR"))
             if "login_expires" not in ucols:
                 conn.execute(_text("ALTER TABLE users ADD COLUMN login_expires DATETIME"))
+        # Command lifecycle (2026-08-25). Existing rows keep their status; the new columns are
+        # nullable or defaulted, so a fleet database written by the previous build upgrades in
+        # place with no data loss. timeout_s defaults to the conservative class value rather
+        # than 0, so an old row inherited by the sweeper is never expired the instant it loads.
+        if "commands" in insp.get_table_names():
+            ccols = cols("commands")
+            if "sent_at" not in ccols:
+                conn.execute(_text("ALTER TABLE commands ADD COLUMN sent_at DATETIME"))
+            if "timeout_s" not in ccols:
+                conn.execute(_text("ALTER TABLE commands ADD COLUMN timeout_s INTEGER DEFAULT 120"))
+            if "fail_reason" not in ccols:
+                conn.execute(_text("ALTER TABLE commands ADD COLUMN fail_reason VARCHAR"))
 _migrate()
 
 
@@ -205,6 +295,10 @@ def pull_commands(dev: Device = Depends(auth.require_device), db: Session = Depe
     # re-pulled every tick (that once looped reset-clock -> gadget teardown).
     for c in rows:
         c.status = "sent"
+        # The clock the timeout runs against. Without it, "how long has this been out?" could
+        # only be answered from created_at, which includes however long the device was offline
+        # before it polled - and would expire commands that were never actually delivered late.
+        c.sent_at = utcnow()
     db.commit()
     return [CommandOut(id=c.id, type=c.type, args=c.args or {}) for c in rows]
 
@@ -587,13 +681,72 @@ def list_commands(device_id: str, limit: int = 20, actor=Depends(auth.require_ad
     if not dev or dev.org_id != actor.org:
         raise HTTPException(404, "no such device")
     from .models import Command
+    # Expire before reporting, so an operator never reads a stale "sent" as "in progress".
+    _sweep_expired(db)
     rows = db.scalars(select(Command).where(Command.device_id == device_id)
                       .order_by(desc(Command.id)).limit(max(1, min(limit, 100)))).all()
     return [{"id": c.id, "type": c.type, "status": c.status,
              "args": c.args, "output": c.output,
              "created_at": c.created_at.isoformat() if c.created_at else None,
-             "completed_at": c.completed_at.isoformat() if c.completed_at else None}
+             "sent_at": c.sent_at.isoformat() if c.sent_at else None,
+             "completed_at": c.completed_at.isoformat() if c.completed_at else None,
+             "timeout_s": c.timeout_s,
+             "fail_reason": c.fail_reason,
+             # An operator asking "can I just try that again?" should not have to reason about
+             # the state machine themselves.
+             "cancellable": c.status == "pending",
+             "retryable": c.status in ("failed", "rejected", "expired", "cancelled")}
             for c in rows]
+
+
+@app.delete("/admin/devices/{device_id}/commands/{cmd_id}")
+def cancel_command(device_id: str, cmd_id: int, actor=Depends(auth.require_admin),
+                   db: Session = Depends(get_db)):
+    """Cancel a command that has not yet reached the device.
+
+    HONESTY IS THE WHOLE POINT OF THIS ENDPOINT
+    -------------------------------------------
+    A cancellation that only changes a row in the fleet database while the device goes ahead
+    and executes the command anyway would be worse than having no cancel at all: an operator
+    would believe the reboot was stopped, and the room would drop mid-meeting regardless.
+
+    So this cancels exactly what can truly be cancelled, and refuses the rest with a reason:
+
+      pending    the device has not collected it -> cancelled, guaranteed
+      sent       the device already has it. Delivery is at-most-once and the agent executes
+                 on the tick it collects, so there is no safe window to reach into. Refused
+                 with 409 and told plainly, rather than pretending.
+      terminal   done / failed / rejected / cancelled / expired are immutable history
+
+    The window this protects is real but short - the agent polls every 15s - which is why the
+    confirmation gate on destructive commands matters more than this endpoint does. Preventing
+    the mistake beats recalling it.
+    """
+    dev = _scoped_device(db, device_id, actor)
+    c = db.get(Command, cmd_id)
+    if not c or c.device_id != device_id:
+        raise HTTPException(404, "no such command for this device")
+    if c.status == "pending":
+        c.status = "cancelled"
+        c.fail_reason = "cancelled by %s before the device collected it" % (
+            getattr(actor, "email", None) or "an operator")
+        c.completed_at = utcnow()
+        db.commit()
+        _audit(db, actor, "command:cancel:%s" % c.type, dev.name or device_id)
+        return {"id": c.id, "status": c.status, "cancelled": True}
+    if c.status == "sent":
+        raise HTTPException(409, {
+            "error": "already delivered",
+            "status": c.status,
+            "detail": ("the device collected this command and delivery is at-most-once, so it "
+                       "cannot be recalled. It will reach a terminal state on its own within "
+                       "%ds." % (c.timeout_s or DEFAULT_TIMEOUT_S)),
+        })
+    raise HTTPException(409, {
+        "error": "already finished",
+        "status": c.status,
+        "detail": "completed commands are immutable history",
+    })
 
 
 @app.post("/admin/devices/{device_id}/commands")
@@ -602,12 +755,24 @@ def issue_command(device_id: str, body: IssueCommandIn, actor=Depends(auth.requi
     if body.type not in ALLOWED_COMMANDS:
         raise HTTPException(400, "unsupported command type")
     dev = _scoped_device(db, device_id, actor)
-    c = Command(device_id=device_id, type=body.type, args=body.args or {})
+    # A destructive command must be asked for on purpose. The panel already shows a warning,
+    # but a warning in a browser is not a control: the API is reachable without it, which is
+    # precisely how a `reboot` reached a live bridge during the 2026-08-24 audit. Requiring
+    # the caller to say so explicitly makes the accident impossible rather than regrettable.
+    if body.type in CONFIRM_REQUIRED and not getattr(body, "confirm", False):
+        raise HTTPException(400, {
+            "error": "confirmation required",
+            "type": body.type,
+            "detail": ("this command interrupts service or changes what code runs; "
+                       "re-issue it with confirm=true"),
+        })
+    c = Command(device_id=device_id, type=body.type, args=body.args or {},
+                timeout_s=_timeout_for(body.type))
     db.add(c)
     db.commit()
     # audit: never include args (set-pin/unlock carry the PIN)
     _audit(db, actor, "command:%s" % body.type, dev.name or device_id)
-    return {"id": c.id, "status": c.status}
+    return {"id": c.id, "status": c.status, "timeout_s": c.timeout_s}
 
 
 @app.post("/admin/commands/broadcast")

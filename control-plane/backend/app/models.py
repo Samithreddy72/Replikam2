@@ -141,10 +141,27 @@ class Command(Base):
     device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
     type: Mapped[str] = mapped_column(String)        # restart | reset-clock | profile | set-peer
     args: Mapped[dict] = mapped_column(JSON, default=dict)
-    status: Mapped[str] = mapped_column(String, default="pending")  # pending|done|failed|rejected
+    # pending | sent | done | failed | rejected | cancelled | expired
+    #
+    # Before 2026-08-25 the vocabulary stopped at "sent", and nothing ever moved a command out
+    # of it: if the agent died, rebooted, or simply never reported, the row stayed "sent"
+    # forever. Two were observed stuck for over an hour while later commands completed, with
+    # nothing in the UI to say so. `expired` and `cancelled` exist so that every command
+    # reaches a terminal state and an operator can tell WHY it did.
+    status: Mapped[str] = mapped_column(String, default="pending")
     output: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # When the device actually took it. The gap between created_at and sent_at is queue wait;
+    # the gap between sent_at and now is what the timeout is measured against.
+    sent_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Seconds allowed between delivery and a result, chosen per command CLASS - a read takes
+    # seconds, a reboot has to survive the reboot itself, an OTA has to survive a download over
+    # a venue uplink. One global timeout would either kill legitimate slow work or let a dead
+    # command sit for an hour.
+    timeout_s: Mapped[int] = mapped_column(Integer, default=120)
+    # Why it ended badly. An operator asking "what happened to that?" currently has nothing.
+    fail_reason: Mapped[str | None] = mapped_column(String, nullable=True)
 
     device: Mapped[Device] = relationship(back_populates="commands")
 
