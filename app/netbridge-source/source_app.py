@@ -205,8 +205,32 @@ def check_for_update(base_url):
         fields = dict(l.split("=", 1) for l in man.read_text().splitlines()
                       if "=" in l and not l.startswith("#"))
         ver, want, fname = fields.get("version"), fields.get("sha256"), fields.get("file")
-        if not (ver and want and fname) or ver == APP_VERSION:
+        if not (ver and want and fname):
             return None
+
+        # IDENTITY IS THE DIGEST, NOT THE VERSION STRING.
+        #
+        # This used to read `or ver == APP_VERSION: return None`, and that one comparison made
+        # the updater structurally unable to do its job. On 25 Aug 2026 three DIFFERENT binaries
+        # were all stamped 1.1.9: the one running in production (Python 3.14, built locally), the
+        # one published on GitHub (Python 3.12, built by CI), and a third from the same source.
+        # Version strings here are hand-typed labels -- the image side has the same disease,
+        # which is why a JULY image is labelled 2.0.1 while AUGUST images say 2.0.0.
+        #
+        # So a same-version-different-bytes update could never be delivered, and the app could
+        # not even tell it was running something other than the published artifact.
+        #
+        # The manifest already carries a sha256. Compare THAT against the running binary: a
+        # digest cannot be mistyped. The version string survives only for display and for the
+        # "updated while you were away" note.
+        try:
+            running = _sha256(str(exe))
+        except Exception:
+            # Cannot hash ourselves -> cannot establish identity -> do not update.
+            # Failing closed is the entire point of this path.
+            return None
+        if running == want:
+            return None                     # byte-identical: genuinely nothing to do
         blob = tmp / fname
         urllib.request.urlretrieve("%s/%s" % (root, fname), blob)
         if _sha256(str(blob)) != want:
@@ -255,6 +279,29 @@ IS_MAC = sys.platform == "darwin"
 # at go-live: it is the only identifier both platforms share, and on macOS the index moves
 # when you plug in a headset.
 AV_FMT = "dshow" if IS_WIN else "avfoundation"
+
+# WHAT THE MEETING ROOM ACTUALLY SEES.
+#
+# The USB gadget advertises ONE frame size -- 640x360 uncompressed at 20 fps (see
+# pi/scripts/uvc-raw-setup.sh, create_frame ... 640 360 uncompressed). Until 26 Aug 2026 this
+# encoder produced 320x180 at 400 kbps, so the laptop was upscaling 2x from a quarter of the
+# pixels the USB path was already carrying, for free. Nobody had compared the two numbers.
+#
+# Encode at the gadget's own size: no scaling on the host, no wasted USB bandwidth, and the
+# picture stops being the weakest part of the product.
+#
+# The ceiling above this is NOT the network, it is USB. The Pi 4's OTG port is USB 2.0
+# (the bridge reports "high-speed"), and 640x360 YUY2 @20fps is already ~74 Mbps of the
+# ~480 Mbps theoretical bus. Uncompressed 720p would be ~295 Mbps and is not viable; reaching
+# 720p needs an MJPEG UVC format, which is tracked separately.
+STREAM_W, STREAM_H = 640, 360
+
+# 400 kbps was sized for 320x180. Four times the pixels needs roughly four times the bits to
+# hold the same quality; 1500 kbps at 640x360/20fps is comfortable for h264 and is still a
+# rounding error next to the 74 Mbps the USB leg carries. Deliberately a fixed value: this
+# encoder has no congestion feedback, so a "smart" bitrate here would be a guess wearing a
+# suit. Adaptive rate control is a real feature and belongs behind real RTCP feedback.
+STREAM_BITRATE = "1500k"
 
 
 def _is_exe(path):
@@ -556,9 +603,10 @@ class Session:
             ain = ["-f", "avfoundation", "-i", ":%s" % audio_idx]
 
         v = common + vin + [
-            "-vf", "scale=320:180,format=nv12", "-fps_mode", "cfr", "-r", str(fps),
+            "-vf", "scale=%d:%d,format=nv12" % (STREAM_W, STREAM_H),
+            "-fps_mode", "cfr", "-r", str(fps),
         ] + venc + [
-            "-b:v", "400k", "-g", str(fps), "-bsf:v", "dump_extra=freq=keyframe", "-an",
+            "-b:v", STREAM_BITRATE, "-g", str(fps), "-bsf:v", "dump_extra=freq=keyframe", "-an",
             "-f", "rtp", "rtp://%s:%d?pkt_size=1100" % (pi_host, RTP_VIDEO)]
         a = common + ain + [
             "-af", "volume=%ddB,alimiter=limit=0.9" % mic_gain,
