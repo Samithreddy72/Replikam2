@@ -64,16 +64,50 @@ if [ -f "$APP" ] && [ -f "$MESH" ]; then
     || no "architecture mismatch: app=$A sidecar=$B — the sidecar will not launch"
 fi
 
+note(){ printf "  \033[36mNOTE\033[0m  %s\n" "$1"; }
 sec "Gatekeeper — the first thing that stops an amateur"
+# The question is NOT "does the copy in my hand carry a quarantine flag". That flag is set by
+# the DOWNLOADER, so a copy fetched with `gh release download` or curl never has one and this
+# check went green while the real distribution path was broken. It is the same false green
+# that has bitten this project repeatedly: testing the artefact you happen to hold instead of
+# the one the user receives.
+#
+# What actually decides the outcome is the SIGNATURE. A browser download is always quarantined,
+# and macOS kills a quarantined binary that is ad-hoc signed - SIGKILL, no dialog in a terminal,
+# no output at all. Only a Developer ID signature plus notarisation survives that.
 if [ -f "$APP" ]; then
-  if xattr -p com.apple.quarantine "$APP" >/dev/null 2>&1; then
-    warn "quarantine flag set — first launch shows 'unidentified developer'; the recipient must
-        right-click -> Open once, or run: xattr -dr com.apple.quarantine <file>"
+  sig=$(codesign -dv "$APP" 2>&1)
+  if printf '%s' "$sig" | grep -q 'flags=.*adhoc'; then
+    no "ad-hoc signed: ANY browser download will be SIGKILLed by Gatekeeper.
+        Verify with:  xattr -w com.apple.quarantine '0081;0;Safari;$(uuidgen)' <file> && ./<file>
+        Needs a Developer ID signature + notarisation, or the recipient must run
+        xattr -dr com.apple.quarantine <file> before first launch."
+  elif printf '%s' "$sig" | grep -q 'TeamIdentifier=not set'; then
+    no "no Team ID: not distributable — Gatekeeper will reject a downloaded copy"
   else
-    ok "no quarantine flag on this copy — it will launch without the Gatekeeper prompt"
+    ok "signed with a Team ID (survives a browser download)"
   fi
-  codesign -dv "$APP" >/dev/null 2>&1 && ok "carries a code signature" \
-    || warn "not code-signed (expected; signing needs a paid Apple account)"
+
+  # spctl is the system's own verdict on whether it would let this execute.
+  if spctl -a -t execute "$APP" >/dev/null 2>&1; then
+    ok "Gatekeeper accepts it for execution"
+  else
+    no "spctl REJECTS it — a recipient who downloads this in a browser cannot launch it"
+  fi
+
+  # Notarisation staple: what lets it pass with no network round-trip.
+  if xcrun stapler validate "$APP" >/dev/null 2>&1; then
+    ok "notarisation ticket is stapled"
+  else
+    warn "no stapled notarisation ticket (expected until an Apple Developer account is paid for)"
+  fi
+
+  if xattr -p com.apple.quarantine "$APP" >/dev/null 2>&1; then
+    warn "this copy is quarantined (so it was fetched the way a real user would)"
+  else
+    note "this copy is NOT quarantined — it was fetched with a CLI, so it is NOT a fair test
+        of the recipient experience; the signature checks above are what matter"
+  fi
 fi
 
 sec "It actually runs, and brings its own tools"
@@ -223,6 +257,10 @@ if [ -f "$APP" ]; then
 fi
 
 echo
+# A check that errors out (typo'd helper, missing tool) must never be counted as a pass. This
+# script printed "0 failed - the bundle is sound" while two checks died on a command-not-found;
+# an audit that cannot fail loudly is worth nothing.
+if [ "$PASS" -eq 0 ]; then no "no checks executed at all — the audit itself is broken"; fi
 printf '\033[1m  %d passed, %d failed, %d warnings\033[0m\n' "$PASS" "$FAIL" "$WARN"
 [ "$FAIL" -eq 0 ] && echo "  → the bundle is sound" || echo "  → DO NOT SHIP"
 exit $([ "$FAIL" -eq 0 ] && echo 0 || echo 1)
