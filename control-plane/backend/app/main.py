@@ -97,6 +97,11 @@ NO_DOUBLE_EXECUTE = {"reboot", "restart", "update", "deploy-script", "revert-scr
                      "golden-restore", "golden-save", "unquarantine", "reset-clock",
                      "set-pin", "profile", "gadget-tune", "gadget-tune-clear"}
 
+# A command in one of these has finished as far as the control plane is concerned. Nothing a
+# device says afterwards may overwrite it -- see command_result(). `pending` and `sent` are the
+# only states from which a result is accepted.
+TERMINAL_STATES = {"done", "succeeded", "failed", "rejected", "cancelled", "expired"}
+
 
 def _timeout_for(ctype: str) -> int:
     return TIMEOUT_S.get(ctype, DEFAULT_TIMEOUT_S)
@@ -371,6 +376,30 @@ def command_result(cmd_id: int, body: CommandResultIn,
     c = db.get(Command, cmd_id)
     if not c or c.device_id != dev.id:
         raise HTTPException(404, "command not found")
+
+    # TERMINAL STATES ARE FINAL. LATE NEWS IS RECORDED, NOT SUBSTITUTED.
+    #
+    # This was `c.status = body.status`, unconditionally, which let a device report rewrite a
+    # verdict the control plane had already reached. The dangerous direction is not the obvious
+    # one: a command CANCELLED by an operator, or EXPIRED because the deadline passed, could be
+    # turned into `done` minutes later by an agent that finally got around to answering. The
+    # panel would then show a green tick for a command the operator believes they stopped.
+    #
+    # A device finishing after the deadline is a real event and worth knowing. It is just not
+    # the same event as "this succeeded", and the two must not be conflated. So the original
+    # verdict stands and the late report is appended as evidence -- both facts survive, which
+    # is what an operator needs to reconstruct what actually happened.
+    if c.status in TERMINAL_STATES:
+        stamp = utcnow().isoformat(timespec="seconds")
+        late = ("\n--- late report from the device at %s: status=%s "
+                "(the control plane had already recorded '%s'; that verdict stands) ---\n%s"
+                % (stamp, body.status, c.status, body.output or ""))
+        c.output = (c.output or "") + late
+        db.commit()
+        return {"ok": True, "recorded": "late-report", "status": c.status,
+                "note": "command already %s; the device's later result was appended as "
+                        "evidence and did not change the verdict" % c.status}
+
     c.status = body.status
     c.output = body.output
     c.completed_at = utcnow()
