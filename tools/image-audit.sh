@@ -199,11 +199,17 @@ ok "media units checked for enablement"
 sec "Stage 5 — a presenter goes live"
 has bridge-pin && ok "PIN tool present (set / rotate / lockout)" || no "no PIN tool"
 has bridge-derive-pass && ok "password derivation present" || warn "no password derivation"
-grepf bridge-web.py 'pin|lock' && ok "web layer enforces the PIN and lockout" \
+# NOT 'pin|lock'. That matched 28 times in bridge-web.py, FIFTEEN of them the word
+# "clock" -- PIN enforcement could have been deleted outright and this check would still
+# have passed. A false PASS in the tool that gates flashing is the worst kind there is.
+# Anchor on the actual state object the PIN gate publishes.
+grepf bridge-web.py '"pin_set": *(True|False)' && ok "web layer enforces the PIN and lockout" \
   || no "no PIN enforcement in the web layer — anyone on the mesh could go live"
-grepf bridge-web.py 'golden_state|config' && ok "status exposes the live config (Golden Profile)" \
+# 'config' appears everywhere; anchor on the call that actually publishes it.
+grepf bridge-web.py 'd\["config"\] *= *golden_state\(\)' && ok "status exposes the live config (Golden Profile)" \
   || warn "config not exposed — drift could not be detected"
-grepf bridge-web.py '_return_pcm|pcm' && ok "status exposes the capture ring (PCM pointers)" \
+# 'pcm' alone is far too loose; anchor on the assignment.
+grepf bridge-web.py 'd\["pcm"\] *= *_return_pcm\(\)' && ok "status exposes the capture ring (PCM pointers)" \
   || no "PCM pointers not exposed — the pitch controller and snapshots go blind"
 
 sec "Stage 6 — it keeps running"
@@ -319,7 +325,12 @@ grepf bridge-read.py 'os\.path\.realpath\(r\) for r in _ROOTS' \
 grepf bridge-read.py 'os\.path\.realpath\(p\) for p in \(' \
   && ok "deny-list is resolved too (bug #3 — agent.token was reachable)" \
   || no "deny-list unresolved — the credential files are NOT protected"
-grepf bridge-read.py 'token\|secret\|password' \
+# NOT 'token\|secret\|password'. grepf uses grep -E, where \| is a LITERAL pipe, not
+# alternation -- so this searched for the string "token|secret|password" and passed only
+# because bridge-read.py happens to contain exactly that inside its redaction regex. It
+# was verifying a coincidence, and a harmless reordering of that regex would have failed
+# an image whose redaction still worked perfectly. Anchor on the redaction being APPLIED.
+grepf bridge-read.py 'text, redacted = redact\(text\)' \
   && ok "secret redaction present" || no "no redaction — tokens would be returned verbatim"
 grepf bridge-agent.py 'read-file' && ok "agent allows the read-file command" \
   || no "agent does not know read-file — the panel button will be refused on the device"
