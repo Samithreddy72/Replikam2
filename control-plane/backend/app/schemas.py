@@ -43,6 +43,11 @@ class IssueCommandIn(BaseModel):
     # to False so an existing caller cannot accidentally acquire the right to reboot a bridge
     # by omission - the safe direction for a field whose absence used to mean "go ahead".
     confirm: bool = False
+    # Optional caller-supplied key for retry-safety. Two POSTs carrying the same key for the
+    # same device return the SAME command instead of queuing a second one. Optional because
+    # the in-flight guard below already protects the dangerous cases without any client
+    # change; this is for callers that want the guarantee explicitly.
+    idempotency_key: str | None = None
 
 
 class RolloutCreateIn(BaseModel):

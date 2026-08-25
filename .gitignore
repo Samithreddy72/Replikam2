@@ -14,3 +14,11 @@ __pycache__/
 
 # app update-signing PRIVATE key never belongs in the repo (lives in ~/.netbridge/keys/)
 *signing-key*.pem
+
+# The backend creates this on first run (DATABASE_URL defaults to sqlite:///./bridge.db).
+# It was tracked, so a normal local run dirtied the tree -- and one run against real data
+# would have put device token hashes, user emails, sessions and the audit log into git
+# history permanently. The committed copy was empty; that was luck, not design.
+control-plane/backend/*.db
+control-plane/backend/*.db-journal
+control-plane/backend/*.db-wal

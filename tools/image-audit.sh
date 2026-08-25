@@ -77,7 +77,7 @@ done
 IDX=$(mktemp); CAT=$(mktemp -d)
 if [ $have_root -eq 1 ]; then
   for d in /usr/local/bin /etc/systemd/system /etc/systemd/system/multi-user.target.wants \
-           /etc/bridge /data; do
+           /etc/bridge /etc/default /data; do
     "$DEBUGFS" -R "ls -l $d" "$ROOTDEV" 2>/dev/null | sed "s|^|$d |" >>"$IDX"
   done
   for f in /etc/rc.local /boot/cmdline.txt /etc/fstab \
@@ -451,6 +451,30 @@ printf '  fleet commands the agent accepts: %s\n' \
   "$(grep -oE '\"[a-z][a-z-]{3,}\"' "$CAT/bridge-agent.py" | sort -u | wc -l | tr -d ' ')"
 
 echo
+# ---------------------------------------------------------------- baked secrets
+sec "Secrets that are deliberately baked in are still locked down"
+# /etc/default/bridge-agent carries the FLEET-WIDE bootstrap token. It is meant to be there --
+# a shipped bridge cannot self-enrol without it -- but at 0644 any local account on the device
+# could read it, and anyone who obtained a card could enrol rogue devices against the fleet.
+#
+# It shipped at 0644 because two places write this file: bridge-firstboot.sh uses umask 077 +
+# chmod 600, while the CI image build baked it at 0644, and the CI path is the one that
+# actually ships. The builder is fixed; this checks the ARTIFACT, which is the only claim
+# that counts.
+agentline=$(grep -E '^/etc/default .*bridge-agent$' "$IDX" 2>/dev/null | head -1)
+if [ -z "$agentline" ]; then
+  warn "no /etc/default/bridge-agent in the image — a fresh card cannot self-enrol"
+else
+  # debugfs `ls -l` prints: <inode>  <mode>  <uid>  <gid>  <size> <date> <name>
+  amode=$(printf '%s' "$agentline" | awk '{print $3}')
+  case "$amode" in
+    *100600|*600) ok "/etc/default/bridge-agent is 0600 (bootstrap token not world-readable)" ;;
+    "")           warn "could not read the mode of /etc/default/bridge-agent" ;;
+    *)            no "/etc/default/bridge-agent is mode $amode — the fleet bootstrap token is
+        readable by any local account, and by anyone holding this card" ;;
+  esac
+fi
+
 printf '\033[1m  %d passed, %d failed, %d warnings\033[0m\n' "$PASS" "$FAIL" "$WARN"
 [ "$FAIL" -eq 0 ] && echo "  → safe to flash" || echo "  → DO NOT FLASH"
 rm -rf "$IDX" "$CAT"

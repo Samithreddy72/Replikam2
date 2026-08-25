@@ -256,7 +256,18 @@ if [ -n "${FLEET_CONTROL_URL:-}" ]; then
     printf 'CONTROL_URL=%s\n' "$FLEET_CONTROL_URL"
     [ -n "${FLEET_BOOTSTRAP_TOKEN:-}" ] && printf 'BOOTSTRAP_TOKEN=%s\n' "$FLEET_BOOTSTRAP_TOKEN"
   } > /etc/default/bridge-agent
-  chmod 0644 /etc/default/bridge-agent
+  # 0600, NOT 0644.
+  #
+  # This file carries the FLEET-WIDE bootstrap token. At 0644 any local account on the bridge
+  # could read it, and anyone who obtained a card could extract it and enrol rogue devices
+  # against the fleet. bridge-agent runs as root (no User= in its unit), so nothing legitimate
+  # needs group or world access; bridge-web runs as `pi` and does not read this file at all.
+  #
+  # It was also inconsistent: bridge-firstboot.sh writes exactly this file with `umask 077`
+  # and `chmod 600`, but that path only runs when a provision conf is present -- and the
+  # documented normal case is "all identical, no per-device config file", so the 0644 baked
+  # here is what actually shipped. Two writers, two permissions, and the weaker one won.
+  chmod 0600 /etc/default/bridge-agent
 else
   # No fleet configured for this build: ship an EMPTY file, not a missing one. The agent
   # exits 0 when unprovisioned, and /etc/default/bridge-agent is a /data bind target -
@@ -280,6 +291,20 @@ if [ -n "$LEAKS" ]; then
    echo "  SECRET SWEEP FAILED — per-device secrets survived generalization:" >&2
    while IFS= read -r f; do echo "  LEAK: $f" >&2; done <<< "$LEAKS"
    exit 1
+fi
+# The sweep above hunts secrets that should not be here AT ALL. The bootstrap token is
+# different: it is deliberately baked in (fleet-wide, and J4 "a shipped bridge shows up as
+# unclaimed" depends on it). But a deliberate secret still has to be protected, and a sweep
+# that stays silent about it cannot tell "intentionally present and locked down" from
+# "intentionally present and world-readable" -- which is exactly how it shipped at 0644.
+if [ -s /etc/default/bridge-agent ] && grep -q '^BOOTSTRAP_TOKEN=.' /etc/default/bridge-agent; then
+  mode="$(stat -c '%a' /etc/default/bridge-agent 2>/dev/null || echo '?')"
+  if [ "$mode" != "600" ]; then
+    echo "  SECRET SWEEP FAILED — /etc/default/bridge-agent holds the fleet bootstrap token" >&2
+    echo "  but is mode $mode (expected 600). Any local account could read it." >&2
+    exit 1
+  fi
+  log "bootstrap token present and correctly restricted (0600)"
 fi
 log "secret sweep clean"
 # ---------------- PREFLIGHT: image contains everything its own code calls ----------

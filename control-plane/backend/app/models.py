@@ -149,6 +149,11 @@ class Command(Base):
     # nothing in the UI to say so. `expired` and `cancelled` exist so that every command
     # reaches a terminal state and an operator can tell WHY it did.
     status: Mapped[str] = mapped_column(String, default="pending")
+    # Caller-supplied retry key. Two POSTs with the same key for the same device return the
+    # SAME command instead of queuing a second one -- a retried `reboot` must not become two
+    # reboots. Nullable because it is optional: the in-flight guard in issue_command protects
+    # the dangerous types without any client change.
+    idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     output: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     # When the device actually took it. The gap between created_at and sent_at is queue wait;

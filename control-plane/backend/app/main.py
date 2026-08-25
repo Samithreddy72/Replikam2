@@ -89,6 +89,14 @@ DEFAULT_TIMEOUT_S = 240
 CONFIRM_REQUIRED = {"reboot", "update", "deploy-script", "revert-script",
                     "unquarantine", "golden-restore", "reset-clock"}
 
+# Commands where running the same thing twice is materially worse than running it once, so an
+# identical one already pending or sent is handed back rather than queued again. Read-only
+# commands are absent on purpose: asking twice is free, and an operator refreshing diagnostics
+# should get a fresh answer instead of a stale row.
+NO_DOUBLE_EXECUTE = {"reboot", "restart", "update", "deploy-script", "revert-script",
+                     "golden-restore", "golden-save", "unquarantine", "reset-clock",
+                     "set-pin", "profile", "gadget-tune", "gadget-tune-clear"}
+
 
 def _timeout_for(ctype: str) -> int:
     return TIMEOUT_S.get(ctype, DEFAULT_TIMEOUT_S)
@@ -196,6 +204,11 @@ def _migrate():
         # than 0, so an old row inherited by the sweeper is never expired the instant it loads.
         if "commands" in insp.get_table_names():
             ccols = cols("commands")
+            if "idempotency_key" not in ccols:
+                # Added 2026-08-26 with the retry-safety work. create_all() never ALTERs an
+                # existing table, so without this the deployed control plane keeps a commands
+                # table with no such column and every insert fails.
+                conn.execute(_text("ALTER TABLE commands ADD COLUMN idempotency_key VARCHAR"))
             if "sent_at" not in ccols:
                 conn.execute(_text("ALTER TABLE commands ADD COLUMN sent_at DATETIME"))
             if "timeout_s" not in ccols:
@@ -786,8 +799,48 @@ def issue_command(device_id: str, body: IssueCommandIn, actor=Depends(auth.requi
             "detail": ("this command interrupts service or changes what code runs; "
                        "re-issue it with confirm=true"),
         })
+    # RETRY SAFETY.
+    #
+    # Nothing here used to prevent the same command being queued twice. A POST that timed out
+    # in the client, a double-clicked button, or a proxy retry produced a SECOND row, and the
+    # agent executed both. For `reboot` that is two reboots; for `deploy-script` it is the
+    # same code deployed twice; for `golden-restore` it is a second restore over the first.
+    # The confirm gate does not help -- a retry carries confirm=true as faithfully as the
+    # original.
+    #
+    # Two layers, because they cover different callers:
+    #
+    #  1. An explicit idempotency_key, when the caller supplies one. Same key + same device
+    #     returns the ORIGINAL command, whatever its state.
+    #  2. An in-flight guard for commands that must not double-execute: if an identical one is
+    #     already pending or sent for this device, hand back that one instead of queuing
+    #     another. This needs no client change, which is what makes it actually protective.
+    #
+    # Read-only commands (diagnose, running, logs, read-file, *-show) are deliberately NOT
+    # deduplicated: asking twice is harmless and an operator refreshing diagnostics should get
+    # a fresh answer, not a stale row.
+    if body.idempotency_key:
+        prior = db.scalars(
+            select(Command).where(Command.device_id == device_id,
+                                  Command.idempotency_key == body.idempotency_key)
+            .order_by(Command.id.desc()).limit(1)).first()
+        if prior is not None:
+            return {"id": prior.id, "status": prior.status, "timeout_s": prior.timeout_s,
+                    "deduplicated": "idempotency_key"}
+
+    if body.type in NO_DOUBLE_EXECUTE:
+        inflight = db.scalars(
+            select(Command).where(Command.device_id == device_id,
+                                  Command.type == body.type,
+                                  Command.status.in_(("pending", "sent")))
+            .order_by(Command.id.desc()).limit(1)).first()
+        if inflight is not None:
+            return {"id": inflight.id, "status": inflight.status,
+                    "timeout_s": inflight.timeout_s, "deduplicated": "already_in_flight"}
+
     c = Command(device_id=device_id, type=body.type, args=body.args or {},
-                timeout_s=_timeout_for(body.type))
+                timeout_s=_timeout_for(body.type),
+                idempotency_key=body.idempotency_key)
     db.add(c)
     db.commit()
     # audit: never include args (set-pin/unlock carry the PIN)
@@ -801,9 +854,26 @@ def broadcast_command(body: IssueCommandIn, actor=Depends(auth.require_admin),
     """Queue the same command for every device IN THE CALLER'S ORG."""
     if body.type not in ALLOWED_COMMANDS:
         raise HTTPException(400, "unsupported command type")
+    # THE CONFIRM GATE APPLIES HERE TOO.
+    #
+    # issue_command has required explicit confirmation for destructive types since the audit
+    # in which an unconfirmed `reboot` reached a live bridge. Broadcast checked ALLOWED_COMMANDS
+    # and nothing else -- so the single-device path refused an unconfirmed reboot while the
+    # path that reboots EVERY DEVICE IN THE ORG accepted it. The stricter gate was on the
+    # smaller blast radius.
+    if body.type in CONFIRM_REQUIRED and not getattr(body, "confirm", False):
+        raise HTTPException(400, {
+            "error": "confirmation required",
+            "type": body.type,
+            "detail": ("this command interrupts service on EVERY device in the org; "
+                       "re-issue it with confirm=true"),
+        })
     ids = []
     for dev in db.scalars(select(Device).where(Device.org_id == actor.org)).all():
-        c = Command(device_id=dev.id, type=body.type, args=body.args or {})
+        # timeout_s was omitted here, so broadcast commands fell back to the column default
+        # instead of the per-class table the single-device path uses.
+        c = Command(device_id=dev.id, type=body.type, args=body.args or {},
+                    timeout_s=_timeout_for(body.type))
         db.add(c)
         db.flush()
         ids.append({"device": dev.name or dev.id, "command_id": c.id})
