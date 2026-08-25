@@ -229,6 +229,15 @@ jobs:
           python - "${{ matrix.asset }}.zip" "${files[@]}" <<'ZIPPY'
           import os, sys, zipfile
           out, names = sys.argv[1], sys.argv[2:]
+          # Say what we are looking at BEFORE failing on it. The first Windows attempt died
+          # with a bare FileNotFoundError naming nothing useful, and each diagnostic round
+          # trip through CI costs eight minutes.
+          print("cwd:", os.getcwd())
+          print("requested:", names)
+          print("present:", sorted(os.listdir(".")))
+          missing = [n for n in names if not os.path.isfile(n)]
+          if missing:
+              sys.exit("FATAL: asked to package files that do not exist: %s" % missing)
           with zipfile.ZipFile(os.path.join("../../..", out), "w", zipfile.ZIP_DEFLATED) as z:
               for n in names:
                   zi = zipfile.ZipInfo.from_file(n, n)
