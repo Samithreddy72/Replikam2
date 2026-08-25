@@ -212,7 +212,37 @@ jobs:
           for extra in netbridge-mesh netbridge-mesh.exe app-pubkey.pem; do
             [ -f "$extra" ] && files+=("$extra")
           done
-          zip -r "../../../${{ matrix.asset }}.zip" "${files[@]}"
+          # python's zipfile, NOT `zip`.
+          #
+          # GitHub's windows-latest image has no `zip` in Git Bash, so this step died with
+          # "zip: command not found" the very first time a Windows build ever got this far.
+          # It had never got this far before: the build used to fail earlier at GStreamer, so
+          # fixing the build simply moved the failure one step later into code nobody had
+          # exercised. A platform that never reaches a step cannot tell you the step is broken.
+          #
+          # One code path for both platforms, deliberately. This project has been bitten twice
+          # by maintaining a second implementation for Windows -- the plugin allow-list that
+          # drifted, and this. Python is already installed on both runners.
+          #
+          # The executable bit MUST survive: a macOS user who unzips a non-executable binary
+          # gets "permission denied" with nothing explaining why.
+          python - "${{ matrix.asset }}.zip" "${files[@]}" <<'ZIPPY'
+          import os, sys, zipfile
+          out, names = sys.argv[1], sys.argv[2:]
+          with zipfile.ZipFile(os.path.join("../../..", out), "w", zipfile.ZIP_DEFLATED) as z:
+              for n in names:
+                  zi = zipfile.ZipInfo.from_file(n, n)
+                  mode = os.stat(n).st_mode
+                  zi.external_attr = (mode & 0xFFFF) << 16      # keep the executable bit
+                  zi.compress_type = zipfile.ZIP_DEFLATED
+                  with open(n, "rb") as fh, z.open(zi, "w") as w:
+                      while True:
+                          buf = fh.read(1 << 20)
+                          if not buf:
+                              break
+                          w.write(buf)
+          print("zipped %d file(s) -> %s" % (len(names), out))
+          ZIPPY
           cd ../../..
           gh release view "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
             gh release create "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" \
@@ -230,7 +260,8 @@ jobs:
           #
           # Everything here is derived from the run that produced the artifact -- none of it
           # is typed by a human, which is the property that makes it trustworthy.
-          SUM=$(shasum -a 256 "${{ matrix.asset }}.zip" | cut -d" " -f1)
+          # shasum is absent from Git Bash on Windows too; python again, one path.
+          SUM=$(python -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "${{ matrix.asset }}.zip")
           cat > "${{ matrix.asset }}.manifest.json" <<MANIFEST
           {
             "artifact":     "${{ matrix.asset }}.zip",
