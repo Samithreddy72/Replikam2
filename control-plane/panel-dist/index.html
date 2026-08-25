@@ -460,20 +460,33 @@ async function doAction(devId, devName, value, isLive){
     args = {key: "UAC2_C_SYNC", value: mode};
     if (!confirm(`Set the audio sync mode on ${devName} to "${mode}"?\n\nThis writes a setting; it does NOT change anything yet. Reboot the bridge when you are ready for it to take effect.`)) return;
   }
-  if (type === "golden-save"){
-    // Overwriting a baseline is quiet and irreversible — the old one is simply gone — and
-    // the whole value of the feature is that the baseline was taken when things were GOOD.
-    // So confirm against the state the operator can actually see, and make the note
-    // mandatory in spirit by defaulting it to something dated and useful.
-    const cur = cfgState(DEVS.find(x=>x.id===devId) || {});
-    if (cur && cur !== "no baseline" &&
-        !confirm(`${devName} already has a baseline (currently: ${cur}).\n\nSaving replaces it with the CURRENT config. Only do this when you have just confirmed the audio is good.\n\nReplace it?`)) return;
-    const note = prompt(
-      `Label this known-good state for ${devName}:\n\nSomething you will recognise later — what you verified, and how.`,
-      `verified good ${new Date().toISOString().slice(0,10)}`);
-    if (note === null) return;
-    args = note ? {note} : {};
-  }
+    if (type === "golden-save"){
+      // A BASELINE IS A CLAIM THAT SOMEONE LISTENED.
+      //
+      // On 2026-08-24 a golden-save was queued by accident and the fleet then showed
+      // "known-good" for a state nobody had heard. Everything downstream is measured against
+      // that record — drift, golden-restore, "worse than yesterday" — so an unverified
+      // baseline is worse than none: it looks like knowledge. The device now refuses to
+      // overwrite a confirmed baseline with an unconfirmed one, and this asks for the one
+      // thing no device can check for itself.
+      const cur = cfgState(DEVS.find(x=>x.id===devId) || {});
+      if (cur && cur !== "no baseline" &&
+          !confirm(`${devName} already has a baseline (currently: ${cur}).\n\nSaving replaces it with the CURRENT config. Only do this when you have just confirmed the audio is good.\n\nReplace it?`)) return;
+      const heard = confirm(
+        `Confirm you have JUST verified this session on ${devName}:\n\n` +
+        `  • video is arriving\n` +
+        `  • the room can hear the presenter\n` +
+        `  • the presenter can hear the room\n` +
+        `  • no clicks, bursts or jitter you can hear\n\n` +
+        `OK  = yes, I verified it — save as a CONFIRMED baseline\n` +
+        `Cancel = save it unconfirmed (recorded as such)`);
+      const note = prompt(
+        `Label this known-good state for ${devName}:\n\nSomething you will recognise later — what you verified, and how.`,
+        `${heard ? "verified" : "UNCONFIRMED"} ${new Date().toISOString().slice(0,10)}`);
+      if (note === null) return;
+      args = {note: note || "", confirmed: heard, by: (typeof WHO !== "undefined" && WHO) || "operator",
+              verified: heard ? "video,audio-to-room,audio-from-room,no-artifacts" : ""};
+    }
   if (type === "golden-restore"){
     const cur = cfgState(DEVS.find(x=>x.id===devId) || {});
     if (cur === "no baseline"){

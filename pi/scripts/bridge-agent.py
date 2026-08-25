@@ -61,7 +61,14 @@ ALLOWED = {
     # the reference; 'restore' puts the RESTORABLE fields back and reports what it could not
     # fix. Neither touches the USB gadget, and restore is a no-op when nothing has drifted,
     # so clicking it on a healthy bridge costs nothing.
-    "golden-save":    lambda a: ["sudo", "/usr/local/bin/bridge-golden.py", "save"]
+    # Provenance travels with the command. An operator who confirmed in the panel is recorded
+    # as having done so; a caller that says nothing produces an UNCONFIRMED baseline rather
+    # than silently inheriting the authority of a verified one.
+    "golden-save":    lambda a: ["sudo", "/usr/local/bin/bridge-golden.py", "save", "--json"]
+                                + (["--by", _plain(a.get("by"))] if a.get("by") else [])
+                                + (["--confirmed"] if a.get("confirmed") else [])
+                                + (["--verified", _plain(a.get("verified"))] if a.get("verified") else [])
+                                + (["--force"] if a.get("force") else [])
                                 + (["--note", _note(a["note"])] if a.get("note") else []),
     "golden-restore": lambda a: ["sudo", "/usr/local/bin/bridge-golden.py", "restore", "--json"],
     "set-pin":     lambda a: ["sudo", "bridge-pin", "set", _pin(a.get("pin"))],
@@ -139,6 +146,15 @@ def _script_name(v):
     if not re.fullmatch(r"[a-zA-Z0-9._-]+\.sh", v) or v.startswith("."):
         raise ValueError("bad script name")
     return v
+
+def _plain(v):
+    """Free text that will become a command-line argument. Shape only, and deliberately
+    narrow: this reaches an argv list rather than a shell, so injection is already
+    impossible, but a 200-character cap and a conservative character class keep a mistyped
+    payload from ending up embedded in a baseline that outlives the session."""
+    v = str(v or "")[:200]
+    return re.sub(r"[^A-Za-z0-9 @._,:+-]", "", v)
+
 
 def _readpath(v):
     """Shape only — the DEVICE enforces the roots, the credential refusals and the redaction.

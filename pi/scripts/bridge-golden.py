@@ -179,11 +179,99 @@ def load():
     return None
 
 
-def save(note=None, factory=False, state=None):
+def _live_health():
+    """What the DEVICE can check for itself before a baseline is trusted.
+
+    Asks bridge-web on localhost rather than re-deriving USB state, service health and the
+    brownout rate here. Duplicating that logic would give two answers that drift apart, and
+    the whole point of a baseline is that it agrees with what the fleet reports.
+
+    The device cannot judge the one thing that matters most - whether the audio SOUNDED right.
+    Only a person can, which is why operator confirmation is a separate field and not
+    something inferred from green checks.
+    """
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:8080/api/status", timeout=6) as r:
+            d = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception as e:
+        return {"reachable": False, "error": str(e)[:80]}
+    pw = d.get("power") or {}
+    usb = d.get("usb") or {}
+    svc = dict(d.get("services") or [])
+    return {
+        "reachable": True,
+        "usb": usb.get("diagnosis") or d.get("udc"),
+        "usb_ok": (usb.get("diagnosis") or "") == "USB_CONNECTED_HEALTHY"
+                  or d.get("udc") == "configured",
+        "services_ok": all(v == "active" for v in svc.values()) if svc else False,
+        "services": svc,
+        "brownout_live": pw.get("live"),
+        "brownout_pct": (pw.get("rate") or {}).get("pct"),
+        "power_ok": pw.get("live") is False,
+        "streams": d.get("streams"),
+        "image_version": d.get("version"),
+        "settling": d.get("settling"),
+    }
+
+
+def _trusted(existing):
+    """Was the existing baseline confirmed by a human?"""
+    return bool((existing or {}).get("operator_confirmed"))
+
+
+def save(note=None, factory=False, state=None, by=None, confirmed=False,
+         verified=None, force=False):
     """Write a baseline. `factory` targets the read-only root and is only writable at image
     build time; `state` lets the builder supply values it cannot measure on a build host."""
     target = FACTORY if factory else GOLDEN
+
+    # A BASELINE NOBODY CONFIRMED IS NOT A BASELINE
+    #
+    # On 2026-08-24 a golden-save was queued by accident while probing which commands the
+    # backend accepted. It succeeded, and the fleet then showed "known-good" for a state
+    # nobody had listened to. Everything downstream - drift detection, golden-restore, "audio
+    # suddenly worse than yesterday" - is measured against that record, so an unverified one
+    # is worse than none: it looks like knowledge.
+    health = {} if factory else _live_health()
+    existing = None if factory else load()
+
+    # Refuse to replace a human-confirmed baseline with an unconfirmed one. The reverse is
+    # always allowed: confirming something is never destructive.
+    if existing and _trusted(existing) and not confirmed and not force:
+        return {"ok": False, "error": "refused",
+                "detail": ("a baseline confirmed by %s on %s is already stored; saving an "
+                           "unconfirmed one over it would replace knowledge with a guess. "
+                           "Re-run with confirmation, or force to overwrite deliberately."
+                           % (existing.get("saved_by") or "an operator",
+                              time.strftime("%Y-%m-%d %H:%M",
+                                            time.localtime(existing.get("saved_at", 0)))))}
+
+    # Device-side preconditions. These cannot prove the audio was good; they can prove it
+    # certainly was not worth recording.
+    problems = []
+    if not factory and health.get("reachable"):
+        if not health.get("usb_ok"):
+            problems.append("USB is not connected and configured (%s)" % health.get("usb"))
+        if not health.get("services_ok"):
+            problems.append("not every media service is active")
+        if health.get("settling"):
+            problems.append("the bridge is still doing post-flash work")
+        if health.get("brownout_live"):
+            problems.append("the board is browning out right now")
+    if problems and not force:
+        return {"ok": False, "error": "not healthy enough to baseline",
+                "problems": problems,
+                "detail": "fix these first, or force if you know why they are acceptable"}
+
     prof = {"saved_at": int(time.time()), "note": note or "",
+            # Who stood behind it, and what they actually checked. `operator_confirmed` is the
+            # field that separates a baseline from a snapshot: it means a person listened.
+            "saved_by": by or "unknown",
+            "operator_confirmed": bool(confirmed),
+            "verified": verified or {},
+            "forced": bool(force),
+            "health_at_save": health,
             "state": state if state is not None else collect()}
     tmp = target + ".tmp"
     os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -278,12 +366,36 @@ def main():
     ap.add_argument("action", choices=("save", "show", "diff", "restore"))
     ap.add_argument("--note", default=None)
     ap.add_argument("--json", action="store_true")
+    # Provenance. Defaults are the SAFE direction: an unconfirmed save is the assumption, so a
+    # caller that says nothing cannot silently acquire the authority of a verified baseline.
+    ap.add_argument("--by", default=None, help="who is standing behind this baseline")
+    ap.add_argument("--confirmed", action="store_true",
+                    help="an operator has verified video, both audio directions and heard no artifacts")
+    ap.add_argument("--verified", default=None,
+                    help="comma-separated list of what was checked, e.g. video,audio-out,audio-in")
+    ap.add_argument("--force", action="store_true",
+                    help="save anyway, over a confirmed baseline or with health problems")
     a = ap.parse_args()
 
     if a.action == "save":
-        p = save(a.note)
+        ver = {}
+        for k in (a.verified or "").split(","):
+            k = k.strip()
+            if k:
+                ver[k] = True
+        p = save(a.note, by=a.by, confirmed=a.confirmed, verified=ver, force=a.force)
+        if p.get("ok") is False:
+            # A refusal is an error exit, so the fleet records it as failed rather than
+            # letting the panel report a save that never happened.
+            print(json.dumps(p, indent=2) if a.json else
+                  "  REFUSED: %s\n  %s" % (p.get("error"), p.get("detail") or
+                                            "; ".join(p.get("problems", []))))
+            return 1
         print(json.dumps(p, indent=2) if a.json else
-              "  saved golden profile (%d tracked fields)" % len(_flatten(p["state"])))
+              "  saved golden profile (%d tracked fields)%s"
+              % (len(_flatten(p["state"])),
+                 "" if p.get("operator_confirmed") else
+                 "  [UNCONFIRMED - no operator has verified this session]"))
     elif a.action == "show":
         p = load()
         if not p:
