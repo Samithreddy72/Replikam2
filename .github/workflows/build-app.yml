@@ -208,10 +208,15 @@ jobs:
           # given a signing key, which CI is not - the key that matters is already pinned
           # INSIDE the binary by --add-data, so its absence here is correct, not a gap. Naming
           # a missing file made zip warn on every run and would have hidden a real omission.
-          files=("${{ matrix.bin }}")
-          for extra in netbridge-mesh netbridge-mesh.exe app-pubkey.pem; do
-            [ -f "$extra" ] && files+=("$extra")
-          done
+          # DO NOT use `[ -f name ]` to decide this on Windows.
+          #
+          # Git Bash resolves a bare executable name to its .exe, so `[ -f netbridge-mesh ]`
+          # returns TRUE on a runner where only netbridge-mesh.exe exists. The release step
+          # then asked python to package "netbridge-mesh", which genuinely does not exist, and
+          # died. The shell test lied about a filename -- on macOS the same line is honest,
+          # which is why this only ever failed on the platform that had never reached the step.
+          #
+          # python's os.path.isfile does no .exe resolution, so the selection happens there.
           # python's zipfile, NOT `zip`.
           #
           # GitHub's windows-latest image has no `zip` in Git Bash, so this step died with
@@ -226,18 +231,26 @@ jobs:
           #
           # The executable bit MUST survive: a macOS user who unzips a non-executable binary
           # gets "permission denied" with nothing explaining why.
-          python - "${{ matrix.asset }}.zip" "${files[@]}" <<'ZIPPY'
+          python - "${{ matrix.asset }}.zip" "${{ matrix.bin }}" <<'ZIPPY'
           import os, sys, zipfile
-          out, names = sys.argv[1], sys.argv[2:]
+          out, required = sys.argv[1], sys.argv[2]
+          # The main binary is REQUIRED. The rest travel only if they were actually produced:
+          # app-pubkey.pem exists only when build.py is given a signing key, which CI is not,
+          # and the mesh helper carries a platform-specific name.
+          OPTIONAL = ("netbridge-mesh", "netbridge-mesh.exe", "app-pubkey.pem")
+          names = [required] + [n for n in OPTIONAL if os.path.isfile(n)]
           # Say what we are looking at BEFORE failing on it. The first Windows attempt died
           # with a bare FileNotFoundError naming nothing useful, and each diagnostic round
           # trip through CI costs eight minutes.
           print("cwd:", os.getcwd())
           print("requested:", names)
           print("present:", sorted(os.listdir(".")))
-          missing = [n for n in names if not os.path.isfile(n)]
-          if missing:
-              sys.exit("FATAL: asked to package files that do not exist: %s" % missing)
+          if not os.path.isfile(required):
+              sys.exit("FATAL: the main binary %r was not produced by the build" % required)
+          if len(names) < 2:
+              sys.exit("FATAL: no mesh helper alongside %r. Shipping the app without it "
+                       "produces a build where the room sees and hears the presenter and the "
+                       "presenter hears nothing back." % required)
           with zipfile.ZipFile(os.path.join("../../..", out), "w", zipfile.ZIP_DEFLATED) as z:
               for n in names:
                   zi = zipfile.ZipInfo.from_file(n, n)
