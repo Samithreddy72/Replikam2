@@ -266,9 +266,28 @@ grepf bridge-web.py '_stream_live\("return"' \
 # The field that identifies an image must survive first boot. It did not: firstboot wrote
 # "dev" over the baked version on every card, which is why a running bridge had to be
 # identified by fingerprinting an unrelated bug in its status output.
-grepf bridge-firstboot.sh 'if \[ -n "\$\{BRIDGE_VERSION:-\}" \]' \
-  && ok "firstboot only overwrites the version when provisioning supplies one" \
-  || no "firstboot still clobbers the baked version with 'dev' — images become unidentifiable"
+# THE WRITE MOVED, SO CHECK WHERE IT LIVES NOW.
+#
+# This used to require a `if [ -n "${BRIDGE_VERSION:-}" ]` guard inside firstboot. Firstboot no
+# longer writes the version AT ALL -- the whole job moved to bridge-identity.sh, which runs at
+# EVERY boot rather than once, because on a read-only root the hostname and version have to be
+# re-applied each time. Demanding the old guard failed a strictly better design, and would have
+# blocked a good image with DO NOT FLASH.
+#
+# The bug the original check existed to catch is still caught, in two places: firstboot must not
+# write the version unconditionally (checked below), and the surviving write must only fall back
+# to "dev" when there is genuinely no seed to use.
+if grepf bridge-firstboot.sh '^[^#]*>/etc/bridge/version'; then
+  no "firstboot writes the version again — that job belongs to bridge-identity.sh, which runs
+        every boot; firstboot runs once and cannot maintain it on a read-only root"
+else
+  ok "firstboot no longer writes the version (bridge-identity.sh owns it)"
+fi
+if grepf bridge-identity.sh 'elif \[ ! -s /etc/bridge/version \]'; then
+  ok "the version only falls back to 'dev' when no seed exists at all"
+else
+  no "bridge-identity.sh may clobber a good version with 'dev' — images become unidentifiable"
+fi
 if grepf bridge-firstboot.sh 'echo "\$\{BRIDGE_VERSION:-dev\}" >/etc/bridge/version'; then
   no "the unconditional 'dev' write is still there"
 else
@@ -303,13 +322,27 @@ grepf bridge-firstboot.sh 'NEWHOST="netbridge-' \
   && ok "hostname is derived from the pairing code" || no "no hostname rename"
 # Both used to sit BELOW the provision-conf early exit, which fires on every one of these
 # images, so neither ever ran: every card stayed "raspberrypi" and reported version "dev".
+# IDENTITY MUST NOT DEPEND ON A PROVISION CONF.
+#
+# The original failure: firstboot exits early when no provision conf is present -- which is
+# EVERY normal card -- so any identity work sitting after that line never ran. This used to
+# require the hostname AND version writes to appear before that exit inside firstboot.
+#
+# The version write has since left firstboot entirely, so requiring it there failed a good
+# image. What actually has to be true is unchanged in substance: identity work must happen on
+# a card that has no provision conf. Check both halves of how that is now guaranteed.
 if [ "$(python3 -c "
 t=open('$CAT/bridge-firstboot.sh').read()
-ex=t.find('no provision conf found'); ho=t.find('hostnamectl set-hostname'); ve=t.find('>/etc/bridge/version')
-print('ok' if (ex>0 and 0<ho<ex and 0<ve<ex) else 'bad')" 2>/dev/null)" = "ok" ]; then
-  ok "hostname and version are set BEFORE the provision-conf early exit"
+ex=t.find('no provision conf found'); ho=t.find('hostnamectl set-hostname')
+print('ok' if (ex>0 and 0<ho<ex) else 'bad')" 2>/dev/null)" = "ok" ]; then
+  ok "firstboot sets the hostname BEFORE its provision-conf early exit"
 else
-  no "identity work still sits after the early exit — it will never run"
+  no "firstboot's hostname work sits after the early exit — it will never run on a normal card"
+fi
+if grepf bridge-identity.service 'ConditionPathExists=/data/provision' ; then
+  no "bridge-identity only runs when a provision conf exists — it must run on every card"
+else
+  ok "bridge-identity runs regardless of any provision conf"
 fi
 if [ -n "$DATADEV" ]; then
   V=$("$DEBUGFS" -R "cat /etc-bridge/version" "$DATADEV" 2>/dev/null | tr -d '\r\n ')
