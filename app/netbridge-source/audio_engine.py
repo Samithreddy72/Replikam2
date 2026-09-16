@@ -4,6 +4,7 @@ PyGObject is optional for legacy packages. Source runs with GI use this engine b
 No custom drift servo is layered over GStreamer's existing clock synchronization.
 """
 import collections
+import ctypes
 import json
 import os
 import pathlib
@@ -21,13 +22,8 @@ def gst_runtime():
     return Gst
 
 
-def mac_microphone_argv(executable, name, host, port, gain_db=0):
-    """Resolve a CoreAudio input by name, never an AVFoundation device index.
-
-    CoreAudio's ring buffer avoids AVFoundation's single pending sample buffer.
-    Keep device discovery in the matched GI runtime; the child uses its own
-    matching plugin environment supplied by the caller.
-    """
+def mac_microphone_uid(name):
+    """Resolve the currently attached input, rejecting absent/ambiguous names."""
     Gst = gst_runtime()
     monitor = Gst.DeviceMonitor()
     monitor.add_filter('Audio/Source', None)
@@ -43,7 +39,13 @@ def mac_microphone_argv(executable, name, host, port, gain_db=0):
             raise RuntimeError('Microphone has no CoreAudio unique ID')
     finally:
         monitor.stop()
-    argv = [executable, '-e', 'osxaudiosrc', 'unique-id=' + json.dumps(uid),
+    return uid
+
+
+def mac_microphone_argv(executable, name, host, port, gain_db=0):
+    """Use CoreAudio's capture ring and resolve identity on every launch."""
+    device_id = mac_microphone_device_id(name)
+    argv = [executable, '-e', 'osxaudiosrc', 'device=%d' % device_id,
             'buffer-time=40000', 'latency-time=10000', '!',
             'audioconvert', '!', 'audioresample', '!',
             'audio/x-raw,rate=48000,channels=2,format=F32LE', '!']
@@ -55,6 +57,46 @@ def mac_microphone_argv(executable, name, host, port, gain_db=0):
                    'rtpopuspay', 'pt=97', '!', 'udpsink',
                    'host=' + json.dumps(host), 'port=%d' % int(port), 'sync=false',
                    'async=false']
+
+
+def mac_microphone_device_id(name):
+    """Resolve the current CoreAudio object ID, which changes on USB reattach.
+
+    A nonzero explicit device prevents capture from following the default input.
+    """
+    C = ctypes
+    class Address(C.Structure):
+        _fields_ = [('selector', C.c_uint32), ('scope', C.c_uint32), ('element', C.c_uint32)]
+    if name == 'System default microphone':
+        ca = C.CDLL('/System/Library/Frameworks/CoreAudio.framework/CoreAudio')
+        device = C.c_uint32()
+        address = Address(int.from_bytes(b'dIn ', 'big'), int.from_bytes(b'glob', 'big'), 0)
+        size = C.c_uint32(C.sizeof(device))
+        status = ca.AudioObjectGetPropertyData(1, C.byref(address), 0, None,
+                                               C.byref(size), C.byref(device))
+        if status or not device.value:
+            raise RuntimeError('No system default microphone is available')
+        return device.value
+    uid = mac_microphone_uid(name)
+    cf = C.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
+    ca = C.CDLL('/System/Library/Frameworks/CoreAudio.framework/CoreAudio')
+    cf.CFStringCreateWithCString.argtypes = [C.c_void_p, C.c_char_p, C.c_uint32]
+    cf.CFStringCreateWithCString.restype = C.c_void_p
+    cf.CFRelease.argtypes = [C.c_void_p]
+    uid_ref = C.c_void_p(cf.CFStringCreateWithCString(None, uid.encode(), 0x08000100))
+    if not uid_ref.value:
+        raise RuntimeError('Unable to resolve microphone UID')
+    try:
+        device = C.c_uint32()
+        address = Address(int.from_bytes(b'uidd', 'big'), int.from_bytes(b'glob', 'big'), 0)
+        size = C.c_uint32(C.sizeof(device))
+        status = ca.AudioObjectGetPropertyData(1, C.byref(address), C.sizeof(uid_ref),
+                                               C.byref(uid_ref), C.byref(size), C.byref(device))
+        if status or not device.value:
+            raise RuntimeError('Selected microphone is not attached: ' + name)
+        return device.value
+    finally:
+        cf.CFRelease(uid_ref)
 
 
 class AudioEngine:

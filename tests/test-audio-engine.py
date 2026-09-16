@@ -10,8 +10,7 @@ import tempfile
 import time
 import unittest
 import wave
-import types
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'app/netbridge-source'))
@@ -67,20 +66,13 @@ class Media(unittest.TestCase):
     def test_forward_microphone_codec_caps_and_contiguous_rtp(self):
         # Device discovery is mocked; the generated conversion/Opus/RTP chain
         # runs for real. This catches incompatible encoder caps before deployment.
-        device = Mock()
-        device.get_display_name.return_value = 'Test microphone'
-        device.get_properties.return_value.get_string.return_value = 'test-uid'
-        monitor = Mock()
-        monitor.start.return_value = True
-        monitor.get_devices.return_value = [device]
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
             receiver.bind(('127.0.0.1', 0))
             receiver.settimeout(.2)
-            with patch('audio_engine.gst_runtime', return_value=types.SimpleNamespace(
-                    DeviceMonitor=lambda: monitor)):
+            with patch('audio_engine.mac_microphone_device_id', return_value=42):
                 argv = mac_microphone_argv('gst-launch', 'Test microphone',
                                           '127.0.0.1', receiver.getsockname()[1])
-            monitor.stop.assert_called_once()
+            # Physical CoreAudio identity resolution is covered by the live device test.
             # Replace only the physical capture device, keeping its downstream chain.
             sender = self.Gst.parse_launchv([
                 'audiotestsrc', 'is-live=true', 'num-buffers=100',

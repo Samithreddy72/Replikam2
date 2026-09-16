@@ -493,6 +493,15 @@ def _locked(fn):
     return wrap
 
 
+class WaitingMicrophone:
+    """A stopped voice leg awaiting its explicitly selected USB input."""
+    pid = None
+    stdin = None
+
+    def poll(self):
+        return 1
+
+
 class Session:
     """Owns the live ffmpeg legs + the return listener."""
 
@@ -618,14 +627,23 @@ class Session:
             "-f", "rtp", "rtp://%s:%d" % (pi_host, RTP_VOICE)]
 
         self.voice_backend = "ffmpeg"
+        self.voice_capture = (mic_name, pi_host, mic_gain)
         self.leg_env = {}
         if IS_MAC and mic_name and _gst():
             try:
                 from audio_engine import mac_microphone_argv
                 a = mac_microphone_argv(_gst(), mic_name, pi_host, RTP_VOICE, mic_gain)
+                self.voice_device_id = int(a[3].split("=", 1)[1])
                 self.leg_env["voice"] = _gst_env()
                 self.voice_backend = "gstreamer-coreaudio"
-            except Exception as exc:
+            except RuntimeError as exc:
+                # If macOS has no input at all, keep video running until one exists.
+                a = []
+                self.voice_backend = "gstreamer-coreaudio"
+                self.voice_device_id = None
+                self.leg_env["voice"] = _gst_env()
+                print("[mic] Waiting for an available microphone: %s" % exc)
+            except ImportError as exc:
                 print("[mic] CoreAudio capture unavailable; using legacy FFmpeg: %s" % exc)
 
         # Keep each leg's stderr so a dead leg can be explained instead of guessed at.
@@ -641,6 +659,10 @@ class Session:
         self.leg_proc = {}
         logdir = _logdir()
         for name, argv in (("video", v), ("voice", a)):
+            if name == "voice" and not argv:
+                self.voice_proc = WaitingMicrophone()
+                self.leg_proc[name] = self.voice_proc
+                continue
             lf = open(os.path.join(str(logdir), "netbridge-source-%s.log" % name), "w")
             self.logs.append(lf)
             # stdin is a PIPE so this leg can be asked to quit POLITELY later. ffmpeg exits
@@ -659,6 +681,20 @@ class Session:
         self.return_player = self._start_return(return_port) if self.return_on else "off"
 
     @_locked
+    def suspend_voice(self):
+        """Stop a disconnected CoreAudio input without touching video/return."""
+        if not self.wanted or getattr(self, "voice_backend", None) != "gstreamer-coreaudio":
+            return
+        proc = self.leg_proc.get("voice")
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+
+    @_locked
     def respawn_leg(self, name):
         """Restart ONE media leg in place. Returns True if it came back.
 
@@ -671,7 +707,7 @@ class Session:
         if not getattr(self, "wanted", False):
             return False
         argv = (getattr(self, "leg_argv", {}) or {}).get(name)
-        if not argv:
+        if not argv and not (name == "voice" and getattr(self, "voice_backend", None) == "gstreamer-coreaudio"):
             return False
         old = (getattr(self, "leg_proc", {}) or {}).get(name)
         if old is not None:
@@ -682,6 +718,14 @@ class Session:
             if old in self.procs:
                 self.procs.remove(old)
         try:
+            if name == "voice" and getattr(self, "voice_backend", None) == "gstreamer-coreaudio":
+                # USB reattachment can change the CoreAudio unique ID. Resolve
+                # the selected device again instead of retrying a stale argv.
+                from audio_engine import mac_microphone_argv
+                mic_name, host, gain = self.voice_capture
+                argv = mac_microphone_argv(_gst(), mic_name, host, RTP_VOICE, gain)
+                self.voice_device_id = int(argv[3].split("=", 1)[1])
+                self.leg_argv[name] = argv
             lf = open(os.path.join(str(_logdir()), "netbridge-source-%s.log" % name), "w")
             self.logs.append(lf)
             proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
@@ -1505,11 +1549,13 @@ class StreamGuard:
         self.last = None           # human-readable last action
         self.live_since = 0.0
         self.giving_up = []        # legs that exceeded MAX_PER_LEG
+        self.waiting_for_mic = False
 
     def snapshot(self):
         with self.lock:
             return {"repairs": dict(self.repairs), "last": self.last,
-                    "abandoned": list(self.giving_up)}
+                    "abandoned": list(self.giving_up),
+                    "waiting_for_mic": self.waiting_for_mic}
 
     def _tick(self):
         # `wanted` first, and separately from `live`. A leg can still be dying while the
@@ -1520,6 +1566,7 @@ class StreamGuard:
         if not getattr(SESSION, "wanted", False) or not SESSION.live:
             with self.lock:
                 self.live_since = 0.0
+                self.waiting_for_mic = False
                 if self.repairs or self.giving_up:
                     self.repairs, self.giving_up, self.last = {}, [], None
             return
@@ -1531,6 +1578,31 @@ class StreamGuard:
             abandoned = list(self.giving_up)
 
         for name, alive in (SESSION.leg_status() or {}).items():
+            if name == "voice" and getattr(SESSION, "voice_backend", None) == "gstreamer-coreaudio":
+                from audio_engine import mac_microphone_device_id
+                try:
+                    current_device = mac_microphone_device_id(SESSION.voice_capture[0])
+                except RuntimeError:
+                    # An unplugged mic is not a crash loop. Keep watching without
+                    # launching children or consuming the retry budget.
+                    SESSION.suspend_voice()
+                    with self.lock:
+                        self.waiting_for_mic = True
+                        self.last = "Microphone disconnected — waiting for " + SESSION.voice_capture[0]
+                    continue
+                # A fast unplug/replug can happen between polls while the old
+                # process stays alive. Its CoreAudio object must not be reused.
+                if current_device != getattr(SESSION, "voice_device_id", None):
+                    SESSION.suspend_voice()
+                    alive = False
+                    with self.lock:
+                        self.waiting_for_mic = True
+                with self.lock:
+                    if self.waiting_for_mic:
+                        self.waiting_for_mic = False
+                        self.repairs.pop("voice", None)
+                        self.giving_up = [leg for leg in self.giving_up if leg != "voice"]
+                        abandoned = [leg for leg in abandoned if leg != "voice"]
             if alive is not False or name in abandoned:
                 continue          # True = healthy, None = deliberately off
             with self.lock:
@@ -2050,7 +2122,8 @@ class Handler(BaseHTTPRequestHandler):
                 "control_url": st.get("control_url", ""),
                 "last_bridge": st.get("bridge_id"),
                 "last_camera": st.get("camera_name"),
-                "last_mic": st.get("mic_name"),
+                "last_mic": "System default microphone" if IS_MAC else st.get("mic_name"),
+                "system_default_mic": IS_MAC,
                 "voice_backend": getattr(SESSION, "voice_backend", None),
                 "live": SESSION.live,
                 "legs": LEGS.snapshot(),
@@ -2291,7 +2364,11 @@ class Handler(BaseHTTPRequestHandler):
                                    "note": "already live — nothing to do"})
             devs = av_devices()
             vidx, vname, _ = resolve_by_name(devs.get("video", []), b.get("camera_name"))
-            aidx, aname, _ = resolve_by_name(devs.get("audio", []), b.get("mic_name"), "0")
+            if IS_MAC and _gst():
+                # Follow macOS input preference, including USB disconnect/reconnect.
+                aidx, aname = "default", "System default microphone"
+            else:
+                aidx, aname, _ = resolve_by_name(devs.get("audio", []), b.get("mic_name"), "0")
             port = int(b.get("return_port") or 5004)
             # Route over the mesh when the bridge has a tailnet address. Media then targets
             # 127.0.0.1 (the helper's local proxies) and the bridge is told to return audio
@@ -2541,7 +2618,7 @@ async function load(s){
   if(s.last_bridge)$('bridge').value=s.last_bridge;
   const d=await j('/api/devices');
   $('cam').innerHTML=(d.video||[]).map(x=>`<option>${x.name}</option>`).join('');
-  $('mic').innerHTML=(d.audio||[]).map(x=>`<option>${x.name}</option>`).join('');
+  $('mic').innerHTML=(s.system_default_mic?[{name:'System default microphone'}]:(d.audio||[])).map(x=>`<option>${x.name}</option>`).join('');
   if(s.last_camera)$('cam').value=s.last_camera; if(s.last_mic)$('mic').value=s.last_mic;
   for(const el of ['bridge','cam','mic'])$(el).onchange=remember;
 }
@@ -2706,7 +2783,10 @@ async function poll(){
   if(firstBad){ greenSince=null; }
   else if(greenSince===null){ greenSince=Date.now(); }
 
-  if(firstBad){
+  if(guard.waiting_for_mic){
+    $('ckfix').textContent='No microphone is available. Audio resumes when the computer has an input device.';
+    $('ckfix').style.display='';
+  } else if(firstBad){
     // One instruction at a time — a wall of five red fixes is noise. The first broken link
     // in the chain is almost always the cause of the ones after it.
     $('ckfix').textContent=FIXES[firstBad]||'';

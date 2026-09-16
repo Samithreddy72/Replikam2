@@ -1,0 +1,17 @@
+--- a/drivers/usb/gadget/function/uvc_video.c
++++ b/drivers/usb/gadget/function/uvc_video.c
+@@ -399,6 +399,14 @@
+ 	case 0:
+ 		break;
+ 
++	/* DWC2 reports an elapsed isochronous deadline as ENODATA.
++	 * Treat it like the missed-transfer status from other controllers so
++	 * subsequent headers mark the partial frame as erroneous.
++	 */
++	case -ENODATA:
++		uvcg_warn(&video->uvc->func,
++			  "VS request missed transfer (-61); dropping incomplete frame.\n");
++		fallthrough;
+ 	case -EXDEV:
+ 		uvcg_dbg(&video->uvc->func, "VS request missed xfer.\n");
+ 		if (req->length != 0)

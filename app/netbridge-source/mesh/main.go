@@ -6,21 +6,24 @@
 // it here; this process joins the tailnet as tag:source and proxies the media UDP between
 // ffmpeg/gstreamer on 127.0.0.1 and the bridge across the mesh:
 //
-//   forward  ffmpeg  -> 127.0.0.1:5000/5002  --[tailnet]-->  bridge:5000/5002
-//   return   bridge  --[tailnet]--> us:5004  ->  127.0.0.1:5004  gstreamer
+//	forward  ffmpeg  -> 127.0.0.1:5000/5002  --[tailnet]-->  bridge:5000/5002
+//	return   bridge  --[tailnet]--> us:5004  ->  127.0.0.1:5004  gstreamer
 //
 // So the presenter installs NOTHING and never sees a 100.x address. Being tag:source, it
 // is covered by the tailnet's existing tag:source->tag:bridge (and bridge->tag:source
 // :5004) grants — no per-presenter ACL widening.
 //
 // On success it prints ONE json line to stdout and keeps running:
-//   {"ready":true,"tailnet_ip":"100.x.y.z"}
+//
+//	{"ready":true,"tailnet_ip":"100.x.y.z"}
+//
 // The app reads tailnet_ip to register the return-audio peer, then points ffmpeg at
 // 127.0.0.1. The node is ephemeral: it self-removes from the tailnet when this exits.
 package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -83,12 +86,12 @@ func main() {
 	}
 
 	s := &tsnet.Server{
-		Hostname:     *hostname,
-		AuthKey:      *authKey,
-		Dir:          dir,
-		Ephemeral:    true,                    // node auto-removes on disconnect
-		ControlURL:   *control,                // "" => tailscale.com default
-		Logf:         meshLogf,                // NB_MESH_DEBUG=1 -> stderr; else quiet
+		Hostname:   *hostname,
+		AuthKey:    *authKey,
+		Dir:        dir,
+		Ephemeral:  true,     // node auto-removes on disconnect
+		ControlURL: *control, // "" => tailscale.com default
+		Logf:       meshLogf, // NB_MESH_DEBUG=1 -> stderr; else quiet
 	}
 	defer s.Close()
 
@@ -158,6 +161,13 @@ func forward(s *tsnet.Server, port, bridge string) error {
 	if err != nil {
 		return fmt.Errorf("local listen: %w", err)
 	}
+	// Encoders emit a frame's RTP packets in a burst, especially keyframes.
+	// Socket capacity absorbs scheduling bursts; it is not a playout delay.
+	if udp, ok := local.(*net.UDPConn); ok {
+		if err := udp.SetReadBuffer(1 << 20); err != nil {
+			fmt.Fprintf(os.Stderr, "forward %s: receive buffer: %v\n", port, err)
+		}
+	}
 	// Dial the bridge over the mesh once; a UDP "conn" here is just an addressed sender.
 	mesh, err := s.Dial(context.Background(), "udp", net.JoinHostPort(bridge, port))
 	if err != nil {
@@ -168,13 +178,40 @@ func forward(s *tsnet.Server, port, bridge string) error {
 		defer local.Close()
 		defer mesh.Close()
 		buf := make([]byte, 1500)
+		var packets, missing uint64
+		var previous uint16
+		var previousSSRC uint32
+		var havePrevious bool
+		var maxWrite time.Duration
+		reportAt := time.Now()
 		for {
 			n, _, err := local.ReadFrom(buf)
 			if err != nil {
 				return
 			}
+			packets++
+			if n >= 12 && buf[0]>>6 == 2 {
+				seq := binary.BigEndian.Uint16(buf[2:4])
+				ssrc := binary.BigEndian.Uint32(buf[8:12])
+				if havePrevious && ssrc == previousSSRC {
+					delta := uint16(seq - previous)
+					if delta > 1 && delta < 32768 {
+						missing += uint64(delta - 1)
+					}
+				}
+				previous, previousSSRC, havePrevious = seq, ssrc, true
+			}
+			start := time.Now()
 			if _, err := mesh.Write(buf[:n]); err != nil {
+				fmt.Fprintf(os.Stderr, "forward %s: mesh write failed after %d packets: %v\n", port, packets, err)
 				return
+			}
+			if elapsed := time.Since(start); elapsed > maxWrite {
+				maxWrite = elapsed
+			}
+			if time.Since(reportAt) >= 10*time.Second {
+				fmt.Fprintf(os.Stderr, "forward %s: packets=%d input_sequence_gaps=%d max_write_ms=%.3f\n", port, packets, missing, float64(maxWrite)/float64(time.Millisecond))
+				reportAt, maxWrite = time.Now(), 0
 			}
 		}
 	}()

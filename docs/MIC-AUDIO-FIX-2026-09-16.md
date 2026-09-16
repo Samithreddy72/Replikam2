@@ -62,14 +62,14 @@ sequence gaps, one legitimate startup pre-skip step, and 482 steps of exactly 96
 samples. The live app was restarted and reports `gstreamer-coreaudio` with SIMGOT.
 A real conversion/Opus/RTP regression test also passes without a physical mic.
 
-Transport remains a separate unresolved issue: a subsequent 20-second passive
-capture at the Pi observed 936 packets, 68 sequence gaps, zero reordering, and a
-435 ms maximum arrival pause. The capture socket reported zero kernel drops.
-All consecutive-packet timestamp steps were now 960 samples, confirming that the
-capture timing defect was removed while transport loss remained. The prior
-FFmpeg trial had nonuniform 960/1472/1984-sample steps as well as sequence gaps.
-No claim is made that FEC can repair long bursts or that microphone quality is
-fully fixed. Listening feedback on the new backend is pending.
+The initial AF_PACKET transport counters were incorrect: Linux UDP receive
+aggregation combined multiple RTP datagrams into a single captured buffer. Parsing
+only the first RTP header produced apparent sequence gaps. A corrected capture
+using PACKET_VNET_HDR and the UDP segmentation size measured 2,740 video packets
+and 750 audio packets over 15 seconds with zero sequence gaps and zero capture
+socket drops. Prior 36/68-packet audio gap counts and large video loss estimates
+must not be treated as actual network loss. The independent AVFoundation sample
+capture gaps remain valid; they do not depend on this packet counter.
 
 The Pi's mesh peer was direct over LAN (~6 ms ping), Wi-Fi power saving was off,
 and Wi-Fi reported 5 GHz / -53 dBm. These checks do not locate the packet loss

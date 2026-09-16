@@ -9,7 +9,7 @@ import tempfile
 import unittest
 import time
 import types
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -19,6 +19,90 @@ spec.loader.exec_module(app)
 
 
 class ReturnPlayback(unittest.TestCase):
+    def test_system_default_change_restarts_only_voice(self):
+        session = Mock(wanted=True, live=True, voice_backend='gstreamer-coreaudio',
+                       voice_device_id=42,
+                       voice_capture=('System default microphone', '127.0.0.1', 0))
+        session.leg_status.return_value = {'video': True, 'voice': True, 'return': True}
+        session.respawn_leg.return_value = True
+        guard = app.StreamGuard()
+        guard.live_since = time.time() - 60
+        resolve = Mock(return_value=42)
+        with patch.object(app, 'SESSION', session), patch.dict(sys.modules, {
+                'audio_engine': types.SimpleNamespace(mac_microphone_device_id=resolve)}):
+            guard._tick()
+            session.suspend_voice.assert_not_called()
+            resolve.return_value = 113  # macOS falls back after USB disconnect.
+            guard._tick()
+        resolve.assert_called_with('System default microphone')
+        session.suspend_voice.assert_called_once()
+        session.respawn_leg.assert_called_once_with('voice')
+        self.assertFalse(guard.snapshot()['waiting_for_mic'])
+
+    def test_quick_replug_restarts_alive_capture_with_changed_device(self):
+        session = Mock(wanted=True, live=True, voice_backend='gstreamer-coreaudio',
+                       voice_device_id=42, voice_capture=('Selected USB mic', '127.0.0.1', 0))
+        session.leg_status.return_value = {'video': True, 'voice': True, 'return': True}
+        session.respawn_leg.return_value = True
+        guard = app.StreamGuard()
+        guard.live_since = time.time() - 60
+        with patch.object(app, 'SESSION', session), patch.dict(sys.modules, {
+                'audio_engine': types.SimpleNamespace(mac_microphone_device_id=lambda name: 43)}):
+            guard._tick()
+        session.suspend_voice.assert_called_once()
+        session.respawn_leg.assert_called_once_with('voice')
+
+    def test_unplug_waits_and_reconnect_resumes_without_retry_exhaustion(self):
+        session = Mock()
+        session.wanted = session.live = True
+        session.voice_backend = 'gstreamer-coreaudio'
+        session.voice_capture = ('Selected USB mic', '127.0.0.1', 0)
+        session.voice_device_id = 42
+        session.leg_status.return_value = {'video': True, 'voice': False, 'return': True}
+        session.respawn_leg.return_value = True
+        guard = app.StreamGuard()
+        guard.live_since = time.time() - 60
+        resolve = Mock(side_effect=RuntimeError('not attached'))
+        with patch.object(app, 'SESSION', session), patch.dict(sys.modules, {
+                'audio_engine': types.SimpleNamespace(mac_microphone_device_id=resolve)}):
+            for _ in range(20):
+                guard._tick()
+            session.respawn_leg.assert_not_called()
+            self.assertTrue(guard.snapshot()['waiting_for_mic'])
+            self.assertEqual(guard.snapshot()['repairs'], {})
+            resolve.side_effect = None
+            resolve.return_value = 42
+            guard._tick()
+            session.respawn_leg.assert_called_once_with('voice')
+            self.assertFalse(guard.snapshot()['waiting_for_mic'])
+            session.wanted = False
+            session.respawn_leg.reset_mock()
+            guard._tick()
+            session.respawn_leg.assert_not_called()
+
+    def test_microphone_retry_refreshes_device_identity(self):
+        session = app.Session()
+        session.wanted = True
+        session.voice_backend = 'gstreamer-coreaudio'
+        session.voice_capture = ('Selected USB mic', '127.0.0.1', 0)
+        session.voice_device_id = 42
+        session.leg_argv = {'voice': ['test-gst', 'unique-id=disconnected-device']}
+        session.leg_proc = {}
+        session.leg_env = {'voice': {}}
+        fresh = ['test-gst', '-e', 'osxaudiosrc', 'device=42']
+        resolve = Mock(return_value=fresh)
+        child = Mock()
+        child.poll.return_value = None
+        with patch.dict(sys.modules, {'audio_engine': types.SimpleNamespace(
+                mac_microphone_argv=resolve)}), patch.object(
+                    app.subprocess, 'Popen', return_value=child) as popen:
+            self.assertTrue(session.respawn_leg('voice'))
+        resolve.assert_called_once_with('test-gst', 'Selected USB mic', '127.0.0.1', app.RTP_VOICE, 0)
+        self.assertEqual(popen.call_args.args[0], fresh)
+        self.assertEqual(session.leg_argv['voice'], fresh)
+        for handle in session.logs:
+            handle.close()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
