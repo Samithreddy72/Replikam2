@@ -209,26 +209,16 @@ case "$1" in
 	C_SYNC=$(tune_sync)
 	echo "  tuning: c_sync=$C_SYNC  req_number=$(tune_reqnum)  (edit $TUNE_FILE to change)"
 	echo "$C_SYNC" > functions/uac2.usb0/c_sync || true
-	# Deeper URB queue (default 2) rides out dwc2 scheduling latency.
-	# IN-FLIGHT USB REQUESTS. At a 1ms service interval this is literally how many
-	# milliseconds the gadget can absorb the driver being late before audio is LOST — not
-	# delayed, lost, because an isochronous slot that is missed is gone.
-	#
-	# 8 was not enough. Measured on this hardware while streaming with the meeting laptop as
-	# host and NO camera in use: 12 of 33 sample windows short of frames, 0.6ms of audio
-	# never captured per second of stream, worst single window ~5ms. Gaps of 2-5ms against
-	# 8ms of headroom is exactly what running out of queued requests looks like.
-	#
-	# dwc2 makes this worse than it sounds: it has no hardware (u)frame tracking, so any
-	# periodic endpoint forces the driver to unmask SOF interrupts — measured elsewhere at
-	# 250-300k interrupts/sec — and unlike dwc3 it has no interrupt moderation to blunt them.
-	# We cannot fix the controller, but we can give it a deeper runway.
-	#
-	# 32 = 32ms of tolerance for ~96-byte mono packets: a few KB of memory, no latency cost
-	# (these are queued requests, not added buffering in the audio path).
-	# See raspberrypi/linux#5188 and the CM4 gadget interrupt-load thread.
+	# Request depth preserves scheduling headroom; it is not a measured audio delay.
+	# Earlier one-sided capture-rate estimates did not establish dropped samples.
 	echo "$(tune_reqnum)" > functions/uac2.usb0/req_number || true
-	echo 1 > functions/uac2.usb0/c_chmask
+	# Stereo, 16-bit capture keeps the UAC2 request stride 4-byte aligned. At
+	# 48 kHz the mono descriptor reserves 98 bytes (48+1 frames), making every
+	# other request unaligned for dwc2 DMA. On the diagnostic Pi this produced
+	# stale samples repeating at the 32-request cycle and audible chipping.
+	# Stereo reserves 196 bytes; native captures no longer show that signature.
+	# See docs/USB-AUDIO-FIX-2026-09-16.md for A/B evidence and limitations.
+	echo 3 > functions/uac2.usb0/c_chmask
 	# Return path (the "Speakers/Source" the client plays into): SINGLE 48 kHz rate.
 	#
 	# It was briefly 48000,44100,32000 for walkthrough phase 6 ("at whatever rate the

@@ -110,22 +110,29 @@ case "$1" in
     # word-split into a gst-launch command line: letters/digits = _ . - ! and space only.
     #   bridge return-tune "<src props>" "<pre-resample elems>"
     #   bridge return-tune clear
-    TUNE=/etc/default/bridge-return-tune
+    TUNE=/data/config/bridge-return-tune
     if [ "$2" = "clear" ]; then
-      sudo rm -f "$TUNE"
+      # An explicit empty override also masks a legacy config on read-only /etc.
+      printf 'RETURN_SRC_PROPS=""\nRETURN_PRE_RESAMPLE=""\n' | sudo tee "$TUNE" >/dev/null \
+        || { echo "return-tune: could not clear $TUNE" >&2; exit 1; }
       echo "return-tune cleared; restarting return-audio..."
-      sudo systemctl restart bridge-return-audio; sleep 1
+      sudo systemctl restart bridge-return-audio || exit 1
+      sleep 1
       line "return tune" "(defaults)"; exit 0
     fi
     case "$2$3" in *[!a-zA-Z0-9=_.!\ -]* )
       echo "return-tune: illegal characters (allowed: letters digits = _ . - ! space)"; exit 1 ;;
     esac
-    { printf '# pipeline experiment knobs (bridge return-tune) - safe to delete\n'
-      [ -n "$2" ] && printf 'RETURN_SRC_PROPS="%s"\n' "$2"
-      [ -n "$3" ] && printf 'RETURN_PRE_RESAMPLE="%s"\n' "$3"
-    } | sudo tee "$TUNE" >/dev/null
+    if ! { printf '# pipeline experiment knobs (bridge return-tune) - safe to delete\n'
+      printf 'RETURN_SRC_PROPS="%s"\n' "$2"
+      printf 'RETURN_PRE_RESAMPLE="%s"\n' "$3"
+    } | sudo tee "$TUNE" >/dev/null; then
+      echo "return-tune: could not write $TUNE; tuning was NOT applied and audio was not restarted" >&2
+      exit 1
+    fi
     echo "return-tune set; restarting return-audio..."
-    sudo systemctl restart bridge-return-audio; sleep 1
+    sudo systemctl restart bridge-return-audio || exit 1
+    sleep 1
     line "src props" "${2:-—}"; line "pre-resample" "${3:-—}" ;;
   profile )
     # Switch the rtpjitterbuffer latency profile. Restarts ONLY the two feeders

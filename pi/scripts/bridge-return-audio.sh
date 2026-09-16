@@ -8,6 +8,8 @@ export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 # `bridge return-tune` (bridge-web /api/return-tune) — remote pipeline experiments without
 # card surgery.
 [ -f /etc/default/bridge-return-tune ] && . /etc/default/bridge-return-tune
+# Canonical writable configuration on read-only images; legacy config remains readable.
+[ -f /data/config/bridge-return-tune ] && . /data/config/bridge-return-tune
 # No hardcoded fallback IP. 192.168.29.49 was one developer's laptop on one LAN in one
 # month; on every other card it meant the bridge quietly streamed the client's audio to a
 # stranger's address on the local network and reported no error. If no peer is set, send

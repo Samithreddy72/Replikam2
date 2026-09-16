@@ -1,0 +1,22 @@
+# Dedicated, explicitly installed diagnostic access. No password or forwarding.
+Port 2222
+HostKey /data/diagnostics/ssh/ssh_host_ed25519_key
+PidFile /run/netbridge-diagnostics-sshd.pid
+AuthorizedKeysFile /etc/netbridge/diagnostics_authorized_keys
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin prohibit-password
+AllowUsers root
+UsePAM yes
+DisableForwarding yes
+X11Forwarding no
+PermitTunnel no
+PermitUserEnvironment no
+StrictModes yes
+MaxAuthTries 3
+LoginGraceTime 30
+PrintMotd no
+Subsystem sftp internal-sftp

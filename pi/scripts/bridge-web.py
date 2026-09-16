@@ -1151,6 +1151,21 @@ class H(http.server.BaseHTTPRequestHandler):
         elif path == "/api/health":
             self._send(json.dumps({"ok": True, "ts": int(time.time())}).encode("utf-8"),
                        "application/json; charset=utf-8")
+        elif path == "/api/return-tune":
+            # Read back what the receiver will actually source. Never execute config
+            # contents in the web process. New writable config overrides legacy fields.
+            values = {"props": "", "pre": ""}
+            source = None
+            for config in ("/etc/default/bridge-return-tune", "/data/config/bridge-return-tune"):
+                if not os.path.isfile(config):
+                    continue
+                source = config
+                for line in read(config).splitlines():
+                    match = re.fullmatch(r'\s*(RETURN_SRC_PROPS|RETURN_PRE_RESAMPLE)="([a-zA-Z0-9=_.! -]*)"\s*', line)
+                    if match:
+                        values["props" if match[1] == "RETURN_SRC_PROPS" else "pre"] = match[2]
+            self._send(json.dumps(dict(values, source=source, writable_path="/data/config/bridge-return-tune")).encode(),
+                       "application/json; charset=utf-8")
         elif path == "/api/lock-state":
             # Is this bridge currently PIN-gated? Read straight from the device gate.
             st = sh("sudo -n /usr/local/bin/bridge-pin state")
@@ -1233,14 +1248,18 @@ class H(http.server.BaseHTTPRequestHandler):
                 return
             args = (["return-tune", "clear"] if clear
                     else ["return-tune", props, pre])
+            error = None
             try:
                 r = subprocess.run(["sudo", "-n", "/usr/local/bin/bridge"] + args,
                                    capture_output=True, text=True, timeout=25)
                 ok = r.returncode == 0
-            except Exception:
+                if not ok:
+                    error = (r.stderr or r.stdout or "return-tune failed")[-2000:].strip()
+            except Exception as e:
                 ok = False
+                error = "return-tune failed: %s" % type(e).__name__
             self._send(json.dumps({"ok": ok, "clear": clear, "props": props,
-                                   "pre": pre}).encode("utf-8"),
+                                   "pre": pre, "error": error}).encode("utf-8"),
                        "application/json; charset=utf-8")
         elif path == "/api/unlock":
             # The PIN is verified ON THE DEVICE ITSELF — it is never forwarded to

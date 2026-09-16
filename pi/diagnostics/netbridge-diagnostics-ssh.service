@@ -1,0 +1,12 @@
+[Unit]
+Description=NetBridge optional key-only diagnostic SSH (port 2222)
+After=local-fs.target network.target
+RequiresMountsFor=/data
+ConditionPathIsMountPoint=/data
+ConditionPathExists=/etc/netbridge/diagnostics_authorized_keys
+[Service]
+ExecStart=/usr/local/bin/netbridge-diagnostics-sshd
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target

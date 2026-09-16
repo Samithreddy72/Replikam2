@@ -1,3 +1,4 @@
 dist/
 build/
 _bundle/
+.venv-gi/

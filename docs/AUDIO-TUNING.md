@@ -1,5 +1,12 @@
 # RepliKam Audio — The Complete Picture (2026-07-05)
 
+> Historical standalone-script recipe. The current app uses the embedded mesh and
+> follows the meeting host's USB rate on the Pi. As of 2026-09-16 the Mac app defaults
+> to synchronized playback, unity gain and dynamics off after a listening trial showed
+> partial improvement. The standalone `mac-return-listen.sh` below still uses its older
+> defaults. See [the current audio review](AUDIO-REVIEW-2026-09.md) for architecture,
+> remaining uncertainty and the next diagnostic steps.
+
 Both audio directions, every processing stage, every tuning knob, and why each exists.
 Everything here is **deployed and verified live** on the current stack (kernel 6.12.93, video41 pipeline).
 

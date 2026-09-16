@@ -485,11 +485,16 @@ def main():
                     help="do not bundle GStreamer (return audio then needs one on PATH)")
     ap.add_argument("--no-mesh", action="store_true",
                     help="do not bundle the embedded mesh client (needs host Tailscale then)")
+    ap.add_argument("--persistent-audio", action="store_true",
+                    help="include GI/GStreamer bindings for the persistent audio engine")
     ap.add_argument("--version", help="stamp APP_VERSION (also the version the updater compares)")
     ap.add_argument("--signing-key",
                     help="EC private key (PEM) to sign the update manifest with. Without it "
                          "the build still works, it just publishes no update manifest.")
     args = ap.parse_args()
+    if args.persistent_audio:
+        from audio_engine import gst_runtime
+        gst_runtime()  # fail the build early if its GI runtime is unavailable
 
     try:
         import PyInstaller  # noqa: F401
@@ -544,6 +549,9 @@ def main():
     # bridge list comes back empty. The import lives inside a function, so name it
     # explicitly rather than relying on PyInstaller's static analysis to spot it.
     cmd += ["--hidden-import", "certifi", "--collect-data", "certifi"]
+    if args.persistent_audio:
+        cmd += ["--hidden-import", "gi.repository.Gst", "--hidden-import", "audio_engine",
+                "--hidden-import", "audio_diagnostics"]
     if IS_MAC:
         # ALWAYS build the .app, not just when an env var happens to be set.
         #

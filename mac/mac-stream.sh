@@ -23,9 +23,8 @@ PI="${PI:-100.91.108.50}"         # Pi's TAILSCALE IPv4 — STABLE on every netw
                                   #   PI=100.x.y.z ./mac-stream.sh
 VIDEO_DEV="${VIDEO_DEV:-0}"       # avfoundation video index (0 = FaceTime HD Camera)
 AUDIO_DEV="${AUDIO_DEV:-1}"       # avfoundation audio index (1 = Bassheads headset mic; go-live auto-detects)
-MIC_GAIN_DB="${MIC_GAIN_DB:-8}"   # forward-voice MAC-side pre-gain (dB) before Opus. Pi then adds
-                                  # volume=6.0 (+15.6dB) + limiters => gain on BOTH ends, clip-safe.
-                                  # Too loud/pumping? lower it: MIC_GAIN_DB=4 ./mac-stream.sh  (0 = off)
+MIC_GAIN_DB="${MIC_GAIN_DB:-0}"   # Pi WebRTC AGC owns voice level; avoid stacked gain.
+                                  # Explicit sender gain remains available for unusual inputs.
 FPS="${FPS:-20}"                  # output frame rate. 20 = ceiling; 15 is smoother on a shallow
                                   # loopback buffer (steady 15 beats a starving 20).  FPS=15 ./mac-stream.sh
 
@@ -64,7 +63,7 @@ fi
     mic_t=$SECONDS
     ffmpeg -hide_banner -loglevel warning \
       -f avfoundation -i "none:${AUDIO_DEV}" \
-      -af "volume=${MIC_GAIN_DB}dB,alimiter=limit=0.9" \
+      -af "volume=${MIC_GAIN_DB}dB,alimiter=limit=0.9:level=false" \
       -c:a libopus -b:a 64k -ar 48000 -ac 2 -application lowdelay \
       -payload_type 97 -f rtp "rtp://${PI}:5002" || true
     mic_n=$((mic_n+1)); mic_d=$(( SECONDS - mic_t ))

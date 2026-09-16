@@ -313,13 +313,18 @@ def _is_exe(path):
     return True if IS_WIN else os.access(path, os.X_OK)
 
 
+def _media_base():
+    """Allow source runs to reuse a release's media tools without packaging Python."""
+    return os.environ.get("NB_MEDIA_DIR") or getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+
+
 def _ffmpeg():
     """Prefer an ffmpeg shipped next to this app, fall back to one on PATH.
 
     A packaged build bundles its own binary so a presenter installs nothing (walkthrough
     J3 step 1: "the app brings everything"). Running from source, the system one is fine.
     """
-    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    base = _media_base()
     local = os.path.join(base, "ffmpeg.exe" if IS_WIN else "ffmpeg")
     if _is_exe(local):
         return local
@@ -328,7 +333,7 @@ def _ffmpeg():
 
 def _gst():
     """Path to gst-launch-1.0 — the bundled copy if we shipped one, else the system's."""
-    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    base = _media_base()
     for cand in (os.path.join(base, "gst", "gst-launch-1.0.exe" if IS_WIN else "gst-launch-1.0"),
                  os.path.join(base, "gst-launch-1.0.exe" if IS_WIN else "gst-launch-1.0")):
         if _is_exe(cand):
@@ -345,7 +350,7 @@ def _gst_env():
     install rather than a missing search path.
     """
     env = dict(os.environ)
-    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    base = _media_base()
     gstdir = os.path.join(base, "gst")
     plug = os.path.join(gstdir, "plugins")
     if os.path.isdir(plug):
@@ -515,20 +520,16 @@ class Session:
         # Return-audio tunables, seeded from env and changeable mid-session (see
         # set_return_tuning). Kept on the session, not read from os.environ at each start,
         # so a presenter can correct pumping or jitter without quitting a live meeting.
-        self.return_gain = os.environ.get("NB_RETURN_GAIN", "2.0")
+        self.return_gain = os.environ.get("NB_RETURN_GAIN", "1.0" if IS_MAC else "2.0")
         self.return_jitter_ms = os.environ.get("NB_RETURN_JITTER_MS", "250")
-        # Compressor+limiter chain. On by default (it is what keeps voices audible over
-        # loud rooms), but switchable: the dynamics stage is the prime suspect whenever the
-        # artifact appears only on loud material, and bypassing it is the decisive test.
-        self.return_dynamics = os.environ.get("NB_RETURN_DYNAMICS", "1") != "0"
-        # Sink clock mode. sync=false was adopted as an anti-click fix (the sink's default
-        # drift correction was skipping samples audibly) — but that was tuned when the return
-        # path was direct. With sync=false the sink plays buffers as fast as they arrive while
-        # the audio device consumes at its own crystal rate; the two clocks are never exactly
-        # equal, so the ring buffer slowly drifts and periodically jumps. GStreamer documents
-        # this as "periodic fast-forwarding every few seconds" — which is what a listener
-        # calls jitter. Switchable so the two modes can be judged by ear on the real path.
-        self.return_sink_sync = os.environ.get("NB_RETURN_SINK_SYNC", "0") != "0"
+        self.return_jitter_manual = False
+        self.return_clock_mode = "slave"  # experimental alternative is opt-in only
+        # Mac listening trial, 2026-09-16: synchronization helped, then bypassing
+        # compression and the 2x boost helped further. Chipping remains unresolved;
+        # these defaults preserve that improvement, not a proven clock diagnosis.
+        # Other platforms retain their existing defaults. All three remain overridable.
+        self.return_dynamics = os.environ.get("NB_RETURN_DYNAMICS", "0" if IS_MAC else "1") != "0"
+        self.return_sink_sync = os.environ.get("NB_RETURN_SINK_SYNC", "1" if IS_MAC else "0") != "0"
         # Loss concealment: opusdec use-inband-fec + plc, and rtpjitterbuffer do-lost.
         #
         # DEFAULT OFF, and that default is the whole point of this line. The field-proven
@@ -577,7 +578,7 @@ class Session:
         return bool(self.voice_proc and self.voice_proc.poll() is None)
 
     @_locked
-    def start(self, pi_host, video_idx, audio_idx, fps=20, mic_gain=8, return_port=5004):
+    def start(self, pi_host, video_idx, audio_idx, fps=20, mic_gain=0, return_port=5004, mic_name=None):
         self.stop()
         self.bridge, self.return_port = pi_host, return_port
         ff = _ffmpeg()
@@ -609,10 +610,23 @@ class Session:
             "-b:v", STREAM_BITRATE, "-g", str(fps), "-bsf:v", "dump_extra=freq=keyframe", "-an",
             "-f", "rtp", "rtp://%s:%d?pkt_size=1100" % (pi_host, RTP_VIDEO)]
         a = common + ain + [
-            "-af", "volume=%ddB,alimiter=limit=0.9" % mic_gain,
+            # The Pi owns voice AGC. Avoid stacked boosts; disable the limiter's
+            # automatic makeup gain so this safety ceiling really stays at 0.9.
+            "-af", "volume=%ddB,alimiter=limit=0.9:level=false" % mic_gain,
             "-c:a", "libopus", "-b:a", "64k", "-ar", "48000", "-ac", "2",
             "-application", "lowdelay", "-payload_type", "97",
             "-f", "rtp", "rtp://%s:%d" % (pi_host, RTP_VOICE)]
+
+        self.voice_backend = "ffmpeg"
+        self.leg_env = {}
+        if IS_MAC and mic_name and _gst():
+            try:
+                from audio_engine import mac_microphone_argv
+                a = mac_microphone_argv(_gst(), mic_name, pi_host, RTP_VOICE, mic_gain)
+                self.leg_env["voice"] = _gst_env()
+                self.voice_backend = "gstreamer-coreaudio"
+            except Exception as exc:
+                print("[mic] CoreAudio capture unavailable; using legacy FFmpeg: %s" % exc)
 
         # Keep each leg's stderr so a dead leg can be explained instead of guessed at.
         self.logs = []
@@ -635,7 +649,8 @@ class Session:
             # the device afterwards but never delivering frames. That happened on 2026-08-14
             # and cost a live session. See _quit().
             proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
-                                    stdout=subprocess.DEVNULL, stderr=lf)
+                                    stdout=subprocess.DEVNULL, stderr=lf,
+                                    env=self.leg_env.get(name))
             self.procs.append(proc)
             self.leg_proc[name] = proc
             if name == "voice":
@@ -670,7 +685,8 @@ class Session:
             lf = open(os.path.join(str(_logdir()), "netbridge-source-%s.log" % name), "w")
             self.logs.append(lf)
             proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
-                                    stdout=subprocess.DEVNULL, stderr=lf)
+                                    stdout=subprocess.DEVNULL, stderr=lf,
+                                    env=getattr(self, "leg_env", {}).get(name))
         except Exception:
             return False
         self.procs.append(proc)
@@ -741,8 +757,22 @@ class Session:
             if self.return_on else None      # None = deliberately off, not a fault
         return out
 
+    def audio_settings(self):
+        return {"gain": float(self.return_gain), "jitter_ms": int(self.return_jitter_ms),
+                "dynamics": self.return_dynamics, "sink_sync": self.return_sink_sync,
+                "fec": self.return_fec, "plc": self.return_plc,
+                "clock_mode": self.return_clock_mode}
+
+    def audio_snapshot(self):
+        player = self.return_proc
+        if player and hasattr(player, "snapshot"):
+            return player.snapshot()
+        return {"backend": self.return_player, "running": bool(player and player.poll() is None),
+                "detail": getattr(self, "audio_backend_note", "Start return playback to view diagnostics")}
+
+    @_locked
     def set_return_tuning(self, gain=None, jitter_ms=None, dynamics=None, sink_sync=None, conceal=None,
-                          fec=None, plc=None):
+                          fec=None, plc=None, clock_mode=None):
         """Change return-audio gain / buffer depth WITHOUT ending the session.
 
         These were env-vars read once at app launch, so trying a different value meant
@@ -750,11 +780,24 @@ class Session:
         documented failure modes both live here: loud media "pumping" through the
         compressor (lower the gain) and Wi-Fi timing bursts (raise the buffer). A presenter
         should be able to fix what they are hearing while they are hearing it."""
+        def settings():
+            # Canonicalize numeric strings: a repeated 1.0 -> "1.00" update is
+            # not a reason to interrupt audio. Invalid launch overrides remain
+            # comparable so a valid live update can still repair them.
+            def number(value):
+                try: return float(value)
+                except (TypeError, ValueError): return value
+            return (number(self.return_gain), number(self.return_jitter_ms),
+                    self.return_dynamics, self.return_sink_sync,
+                    self.return_fec, self.return_plc, self.return_clock_mode)
+        before = settings()
+        if clock_mode in ("slave", "none"):
+            self.return_clock_mode = clock_mode
         if gain is not None:
             try: self.return_gain = "%.2f" % max(0.2, min(4.0, float(gain)))
             except (TypeError, ValueError): pass
         if jitter_ms is not None:
-            try: self.return_jitter_ms = str(int(max(60, min(1000, int(jitter_ms)))))
+            try: self.return_jitter_ms = str(int(max(0, min(1000, int(jitter_ms)))))
             except (TypeError, ValueError): pass
         if dynamics is not None:
             self.return_dynamics = bool(dynamics)
@@ -773,13 +816,18 @@ class Session:
             self.return_fec = bool(fec)
         if plc is not None:
             self.return_plc = bool(plc)
-        if self.return_on:            # re-open the player so the new values take effect
-            self.set_return(False)
-            self.set_return(True)
+        if self.return_on and settings() != before:
+            if self.return_proc and hasattr(self.return_proc, "tune") and self.return_proc.poll() is None:
+                self.return_proc.tune(self.audio_settings())
+            else:
+                # Legacy runtime cannot change element properties in place.
+                self.set_return(False)
+                self.set_return(True)
         return {"gain": self.return_gain, "jitter_ms": self.return_jitter_ms,
                 "dynamics": self.return_dynamics, "sink_sync": self.return_sink_sync,
                 "conceal": self.return_conceal, "fec": self.return_fec,
-                "plc": self.return_plc, "player": self.return_player}
+                "plc": self.return_plc, "player": self.return_player,
+                "clock_mode": self.return_clock_mode}
 
     @_locked
     def set_return(self, on):
@@ -822,30 +870,31 @@ class Session:
         skipped entirely, with no error and no sound. Silence that looks like success is
         the worst outcome here, because the presenter cannot tell it from a quiet room.
         """
+        if os.environ.get("NB_AUDIO_ENGINE", "persistent") != "legacy":
+            try:
+                from audio_engine import AudioEngine
+                engine = AudioEngine(port, self.audio_settings(), _logdir())
+                self.procs.append(engine)
+                self.return_proc = engine
+                return "gstreamer-persistent"
+            except ImportError as exc:
+                self.audio_backend_note = "Persistent receiver unavailable: %s; using legacy player" % exc
+            except Exception as exc:
+                self.audio_backend_note = "Persistent receiver failed: %s" % exc
+                print("[audio] %s" % self.audio_backend_note, flush=True)
+                return "none"
+        else:
+            self.audio_backend_note = "Legacy receiver explicitly selected; live telemetry unavailable"
         caps = ("application/x-rtp,media=audio,encoding-name=OPUS,"
                 "payload=97,clock-rate=48000")
         gst = _gst()
         if gst:
             try:
-                # Return-audio pipeline ported from the FIELD-PROVEN mac-return-listen.sh
-                # (docs/AUDIO-TUNING.md, "0 late / 0 lost / 0 dropouts"). The app had drifted
-                # from that recipe, and every deviation added the warble Samith heard:
-                #   • opusdec plc=true + inband-fec + do-lost SYNTHESIZE audio to conceal loss —
-                #     "tested cleaner" WITHOUT it (PLC's guesses are the artifacts). Use plain opusdec.
-                #   • audioresample quality=10 = SoX-grade, transparent to the 48k output.
-                #   • gentle soft-knee voice compressor + brick-wall hard-knee limiter (voices
-                #     clear & boosted, loud media capped, never clips).
-                #   • a decoupling queue so the sink never back-pressures the decoder.
-                #   • osxaudiosink sync=false buffer-time/latency-time = THE anti-click sink: its
-                #     DEFAULT drift-correction skips samples ~100x/s (audible clicking); sync=false
-                #     plays the jitterbuffer's already-paced stream untouched.
-                # This only works now because return audio is LAN-DIRECT — the nb-mesh relay that
-                # previously masked the fix is out of the return path. Knobs via env for tuning
-                # without a rebuild: NB_RETURN_JITTER_MS (buffer depth), NB_RETURN_GAIN (loudness).
-                # Live values (seeded from env at startup, changeable mid-session via
-                # /api/return-tuning) — see set_return_tuning for why.
+                # Return RTP reaches localhost through the embedded mesh helper.
+                # Keep timing, gain and dynamics independently tunable so listening
+                # comparisons do not conflate clock correction with processing artifacts.
                 lat = getattr(self, "return_jitter_ms", None) or os.environ.get("NB_RETURN_JITTER_MS", "250")
-                gain = getattr(self, "return_gain", None) or os.environ.get("NB_RETURN_GAIN", "2.0")
+                gain = getattr(self, "return_gain", None) or os.environ.get("NB_RETURN_GAIN", "1.0" if IS_MAC else "2.0")
                 # LOSS AND LATENESS ARE DIFFERENT FAULTS, AND ONE FLAG WAS DECIDING BOTH.
                 #
                 # `return_conceal` switched three things at once: do-lost, use-inband-fec and
@@ -876,7 +925,7 @@ class Session:
                                + (["plc=true"] if plc else []) + ["!",
                     "audioconvert", "!", "audioresample", "quality=10", "!",
                 ]
-                if getattr(self, "return_dynamics", True):
+                if getattr(self, "return_dynamics", not IS_MAC):
                     chain += [
                         "audiodynamic", "mode=compressor", "characteristics=soft-knee",
                             "ratio=0.1", "threshold=0.12", "!",
@@ -888,14 +937,32 @@ class Session:
                 chain += [
                     "audioconvert", "!",
                     "queue", "max-size-time=400000000", "!"]
-                sync = "true" if getattr(self, "return_sink_sync", False) else "false"
+                sync = "true" if getattr(self, "return_sink_sync", IS_MAC) else "false"
                 if IS_MAC:
                     chain += ["osxaudiosink", "sync=" + sync,
                               "buffer-time=200000", "latency-time=20000"]
                 else:
                     chain += ["autoaudiosink", "sync=" + sync]
-                p = subprocess.Popen(chain, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL, env=_gst_env())
+                # Preserve warnings/errors instead of discarding the evidence needed
+                # to distinguish sink failures from damaged incoming audio. Keep the
+                # previous run across a tuning restart, and close the parent's handle.
+                log_path = _logdir() / "netbridge-source-return.log"
+                if log_path.exists():
+                    try:
+                        log_path.replace(log_path.with_suffix(".log.previous"))
+                    except OSError:
+                        # Windows may still have the terminated child's file open.
+                        # A failed archive must not prevent return playback restarting.
+                        pass
+                env = _gst_env()
+                env.setdefault("GST_DEBUG", "2")
+                env.setdefault("GST_DEBUG_NO_COLOR", "1")
+                with log_path.open("w") as lf:
+                    lf.write("Return playback: gain=%s dynamics=%s sync=%s jitter_ms=%s fec=%s plc=%s\n" %
+                             (gain, getattr(self, "return_dynamics", not IS_MAC), sync, lat, fec, plc))
+                    lf.flush()
+                    p = subprocess.Popen(chain, stdout=subprocess.DEVNULL,
+                                         stderr=lf, env=env)
                 self.procs.append(p)
                 self.return_proc = p
                 return "gstreamer"
@@ -973,6 +1040,9 @@ def _quit(p, timeout=4.0):
     nothing.
     """
     if p is None:
+        return
+    if hasattr(p, "snapshot") and hasattr(p, "tune"):
+        p.terminate()
         return
     try:
         if p.poll() is not None:
@@ -1058,7 +1128,7 @@ def _mesh_bin():
     cands = []
     if getattr(sys, "frozen", False):                 # packaged app: sidecar next to the exe
         cands.append(os.path.join(os.path.dirname(os.path.abspath(sys.executable)), name))
-    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    base = _media_base()
     cands.append(os.path.join(base, name))            # bundled (processed — last resort)
     cands.append(os.path.join(base, "mesh", name))    # dev tree
     for cand in cands:
@@ -1371,7 +1441,13 @@ class LegWatch:
             young = (time.time() - self.live_since) < self.GRACE_S
         if young:
             return                                     # still binding; not our business yet
-        gone = [p for p in (RTP_VIDEO, RTP_VOICE, SESSION.return_port) if not _leg_bound(p)]
+        # The helper binds the forward ports locally; the RETURN port belongs
+        # to GStreamer, not the helper (its return listener is inside tsnet).
+        # Turning local playback off deliberately releases that port.
+        expected = [RTP_VIDEO, RTP_VOICE]
+        if SESSION.return_on:
+            expected.append(SESSION.return_port)
+        gone = [p for p in expected if not _leg_bound(p)]
         with self.lock:
             if gone:
                 self.strikes += 1
@@ -1379,7 +1455,7 @@ class LegWatch:
                     self.missing = gone
                     self.since = time.time()
                     self.drops += 1
-                    print("[legs] lost: %s — helper alive but not listening"
+                    print("[legs] local UDP listener missing: %s (forward ports: mesh helper; return port: audio player)"
                           % ", ".join(str(p) for p in gone), flush=True)
                 elif self.missing:
                     self.missing = gone
@@ -1600,7 +1676,7 @@ class BridgeWatch:
         Applied at most once per (ts, values) change. Re-applying rebuilds the return
         pipeline, which costs about a second of room audio; doing that every 10s because a
         file merely exists would be its own fault. The bridge is a courier, so the values are
-        treated as untrusted input and clamped by set_return_tuning (60-1000ms) — a bridge
+        treated as untrusted input and clamped by set_return_tuning (0-1000ms) — a bridge
         must not be able to make this machine do something unbounded.
         """
         if not isinstance(want, dict):
@@ -1612,7 +1688,7 @@ class BridgeWatch:
             return
         if stamp == getattr(self, "_tuning_stamp", None):
             return
-        jitter = want.get("jitter_ms")
+        jitter = None if getattr(SESSION, "return_jitter_manual", False) else want.get("jitter_ms")
         if jitter is None and want.get("conceal") is None and want.get("gain") is None:
             self._tuning_stamp = stamp
             return
@@ -1726,9 +1802,10 @@ class BridgeWatch:
                 # applying a fix it can see had no effect is just noise, and it hid the real
                 # cause behind its own chatter.
                 self.give_up.add("return_audio")
-                return ("room audio is not coming back, and the bridge is already pointed at "
-                        "%s — so this is not a mesh problem. The meeting laptop is most likely "
-                        "not capturing the NetBridge microphone; select it there." % me)
+                return ("room audio is not coming back; the bridge destination is already %s. "
+                        "That does not verify packet delivery. Check that the meeting laptop "
+                        "plays to the NetBridge speaker, then check USB capture, mesh delivery "
+                        "and the local return player." % me)
             return "room audio was not coming back -> re-pointed the bridge at %s" % me
         return None
 
@@ -1953,6 +2030,16 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------- GET
     def do_GET(self):
         self._body_cache = None
+        if self.path == "/api/audio/diagnostics":
+            return self._send(SESSION.audio_snapshot())
+        match = re.fullmatch(r"/api/audio/captures/([a-f0-9]{32})/(decoded.wav|input.rtpdump|manifest.json|timing.jsonl)", self.path)
+        if match:
+            path = _logdir() / "captures" / match[1] / match[2]
+            try:
+                data = path.read_bytes()
+                return self._send(data, ctype="audio/wav" if match[2].endswith(".wav") else "application/octet-stream")
+            except OSError:
+                return self._send({"error": "Capture file unavailable"}, 404)
         if self.path == "/":
             return self._send(UI.encode(), ctype="text/html; charset=utf-8")
         st = load_state()
@@ -1964,6 +2051,7 @@ class Handler(BaseHTTPRequestHandler):
                 "last_bridge": st.get("bridge_id"),
                 "last_camera": st.get("camera_name"),
                 "last_mic": st.get("mic_name"),
+                "voice_backend": getattr(SESSION, "voice_backend", None),
                 "live": SESSION.live,
                 "legs": LEGS.snapshot(),
                 # Reported SEPARATELY from legs, because a dead helper used to make the legs
@@ -1973,7 +2061,8 @@ class Handler(BaseHTTPRequestHandler):
                 "mesh": MESH.health(),
                 "guard": GUARD.snapshot(),
                 "bridge_checks": BRIDGEWATCH.snapshot(),
-                "return_on": SESSION.return_on, "return_gain": SESSION.return_gain, "return_jitter_ms": SESSION.return_jitter_ms, "return_sink_sync": SESSION.return_sink_sync, "return_conceal": SESSION.return_conceal, "return_fec": SESSION.return_fec, "return_plc": SESSION.return_plc,
+                "return_jitter_manual": SESSION.return_jitter_manual,
+                "return_on": SESSION.return_on, "return_gain": SESSION.return_gain, "return_dynamics": SESSION.return_dynamics, "return_jitter_ms": SESSION.return_jitter_ms, "return_sink_sync": SESSION.return_sink_sync, "return_conceal": SESSION.return_conceal, "return_fec": SESSION.return_fec, "return_plc": SESSION.return_plc,
                 "version": APP_VERSION,
                 "update_note": _update_note,
             })
@@ -2216,7 +2305,7 @@ class Handler(BaseHTTPRequestHandler):
             me = route["return_peer"]
             peer = api("POST", route["base"] + "/api/set-peer",
                        body={"ip": me, "port": port}, timeout=15) if me else {"_error": "no route"}
-            SESSION.start(route["media_host"], vidx, aidx, return_port=port)
+            SESSION.start(route["media_host"], vidx, aidx, return_port=port, mic_name=aname)
             st.update({"bridge_host": host, "camera_name": vname, "mic_name": aname})
             save_state(st)
             player = SESSION.return_player
@@ -2224,6 +2313,7 @@ class Handler(BaseHTTPRequestHandler):
                                "return_peer": me, "return_port": port, "peer_result": peer,
                                "via": route.get("via"), "return_player": player,
                                "return_note": {
+                                   "gstreamer-persistent": "room audio: persistent GStreamer receiver",
                                    "gstreamer": "room audio: GStreamer (best — jitter-buffered)",
                                    "ffmpeg": "room audio: ffmpeg fallback — install GStreamer for smoother playback",
                                    "none": "NO ROOM AUDIO — neither GStreamer nor ffmpeg could start a player",
@@ -2239,8 +2329,47 @@ class Handler(BaseHTTPRequestHandler):
             # loud media pumping through the compressor (lower gain) and Wi-Fi timing
             # bursts (raise the buffer). No restart, no terminal, no lost session.
             b = self._body()
-            return self._send({"ok": True,
-                               **SESSION.set_return_tuning(b.get("gain"), b.get("jitter_ms"), b.get("dynamics"), b.get("sink_sync"), b.get("conceal"), b.get("fec"), b.get("plc"))})
+            with SESSION._lock:
+                if b.get("auto_jitter") is True:
+                    SESSION.return_jitter_manual = False
+                    st.pop("return_manual_jitter_ms", None)
+                    BRIDGEWATCH._tuning_stamp = None
+                    save_state(st)
+                elif b.get("jitter_ms") is not None:
+                    try:
+                        pinned = max(0, min(1000, int(b["jitter_ms"])))
+                    except (TypeError, ValueError, OverflowError):
+                        return self._send({"error": "jitter_ms must be an integer"}, 400)
+                    SESSION.return_jitter_manual = True
+                    st["return_manual_jitter_ms"] = pinned
+                    save_state(st)
+                result = SESSION.set_return_tuning(b.get("gain"), b.get("jitter_ms"), b.get("dynamics"), b.get("sink_sync"), b.get("conceal"), b.get("fec"), b.get("plc"), b.get("clock_mode"))
+            return self._send({"ok": True, **result, "manual_jitter": SESSION.return_jitter_manual})
+
+        if self.path == "/api/audio/capture":
+            try:
+                with SESSION._lock:
+                    if not SESSION.return_proc or not hasattr(SESSION.return_proc, "start_capture"):
+                        return self._send({"error": "Persistent return playback is required"}, 409)
+                    result = SESSION.return_proc.start_capture(float(self._body().get("seconds", 15)))
+                return self._send(result)
+            except (ValueError, TypeError, RuntimeError) as exc:
+                return self._send({"error": str(exc)}, 400)
+
+        if self.path == "/api/audio/recover":
+            with SESSION._lock:
+                if not SESSION.wanted or not SESSION.return_on:
+                    return self._send({"error": "Return playback is not enabled in a live session"}, 409)
+                now = time.monotonic()
+                if now - getattr(SESSION, "last_audio_recovery", -30) < 30:
+                    return self._send({"error": "Wait 30 seconds between recovery attempts"}, 429)
+                SESSION.last_audio_recovery = now
+                SESSION.set_return(False)
+                SESSION.set_return(True)
+                result = SESSION.audio_snapshot()
+                if not result.get("running"):
+                    return self._send({**result, "error": "Return audio could not restart; inspect diagnostics"}, 503)
+                return self._send(result)
 
         if self.path == "/api/return":
             # "Play meeting audio here" toggle — starts/stops the local return player only.
@@ -2328,12 +2457,44 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
   <div class=trow><span>Play meeting audio here</span>
     <label class=sw><input type=checkbox id=playhere checked onchange=togglePlay()><span class=sl></span></label></div>
 </div>
+<details class=card style="margin-top:12px"><summary>Audio diagnostics</summary>
+<p id=audioSummary>Waiting for receiver…</p>
+<button onclick="captureAudio()">Record 15-second diagnostic</button>
+<button onclick="recoverAudio()">Restart return audio</button>
+<p>Recording includes meeting audio and incoming packets. Saved on this laptop only.</p>
+<p id=audioAction></p><a id=audioDownload hidden>Play captured audio</a>
+<pre id=audioStats style="white-space:pre-wrap;max-height:260px;overflow:auto;font-size:11px"></pre>
+</details>
 <div style="text-align:center;font-size:11.5px;color:var(--faint);margin-top:10px">
   <span id=updnote></span> <span id=ver style="opacity:.6"></span></div>
 </div>
 <script>
 const $=id=>document.getElementById(id); let BR=[],timer=null;
 const j=(u,o)=>fetch(u,o).then(r=>r.json());
+async function refreshAudio(){
+ try{
+  const a=await j('/api/audio/diagnostics');
+  $('audioSummary').textContent=a.backend==='gstreamer-persistent'
+   ? `${a.running?'Running':'Stopped'} · ${a.settings.jitter_ms} ms receive buffer · lost ${a.jitter['num-lost']||0} · late ${a.jitter['num-late']||0}`
+   : (a.detail||'Persistent receiver not active');
+  $('audioStats').textContent=JSON.stringify(a,null,2);
+  if(a.capture){
+   const c=a.capture;
+   $('audioAction').textContent=c.active?'Recording…':c.valid?'Capture complete':'Capture incomplete: '+(c.error||'missing audio or dropped capture buffers');
+   $('audioDownload').hidden=!c.valid;
+   if(c.valid)$('audioDownload').href='/api/audio/captures/'+c.id+'/decoded.wav';
+  }
+ }catch(e){$('audioSummary').textContent='Diagnostics unavailable';}
+}
+async function captureAudio(){
+ const r=await j('/api/audio/capture',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({seconds:15})});
+ $('audioAction').textContent=r.error||'Recording started'; await refreshAudio();
+}
+async function recoverAudio(){
+ const r=await j('/api/audio/recover',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+ $('audioAction').textContent=r.error||'Return audio restarted'; await refreshAudio();
+}
+setInterval(refreshAudio,2000);refreshAudio();
 function host(){const b=BR.find(x=>x.id===$('bridge').value);return b?(b.tailscale_ip||b.ip||''):''}
 async function boot(){
   const s=await j('/api/state');
@@ -2570,6 +2731,14 @@ boot();
 
 
 def main():
+    # Explicit operator latency choice survives reconnects and fleet auto-tuning.
+    saved_jitter = load_state().get("return_manual_jitter_ms")
+    if saved_jitter is not None:
+        try:
+            SESSION.return_jitter_ms = str(max(0, min(1000, int(saved_jitter))))
+            SESSION.return_jitter_manual = True
+        except (ValueError, TypeError, OverflowError):
+            pass
     # FIRST: install anything staged by a previous run. This happens before any port is
     # bound or any device is opened, so the app replaces itself with nothing in flight —
     # and re-execs, meaning this function runs again as the new build.
