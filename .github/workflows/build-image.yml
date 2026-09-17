@@ -98,6 +98,28 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" /mnt/work/out
           ls -la /mnt/work/out
 
+      # A SUCCESSFUL BUILD MUST NEVER BE LOST TO A FAILED UPLOAD.
+      #
+      # On 2026-09-17 two consecutive builds of 84d4389 built and signed correctly, then lost
+      # everything at publish: uploads.github.com returned "HTTP 500: Error saving asset" for
+      # the ~1.1-1.3 GB files after ~40 minutes, and the image existed nowhere else. This keeps
+      # the flashable set (image + signed manifest + pubkey) as a short-lived Actions artifact,
+      # stored by a different service, so the image can still be downloaded, verified and
+      # flashed. continue-on-error: an artifact-storage quota must not block a release.
+      - name: Keep flashable image as a build artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: netbridge-os-${{ steps.ver.outputs.version }}-flashable
+          path: |
+            /mnt/work/out/*.img.xz
+            /mnt/work/out/manifest-disk.txt
+            /mnt/work/out/manifest-disk.txt.sig
+            /mnt/work/out/ota-pubkey.pem
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -117,8 +139,22 @@ jobs:
           # records. Anyone tracing that release back through its tag lands on source the
           # artifact was never built from. The version string's SHA suffix was telling the
           # truth while the git tag quietly disagreed.
-          gh release create "v${V}" --repo "$REPO" --target "${{ github.sha }}" \
+          # DRAFT FIRST, UPLOAD WITH RETRIES, PUBLISH LAST.
+          # The old form was `gh release create … ./* || gh release upload … --clobber`. When an upload
+          # failed, `create` deleted its own draft, so the fallback always ended in "release not found":
+          # the retry could never succeed. Now the draft is created once (or reused on a re-run), each
+          # file gets up to 3 time-limited attempts, and the release only becomes visible when every
+          # asset is there — a half-uploaded release is never marked Latest.
+          gh release view "v${V}" --repo "$REPO" >/dev/null 2>&1 || \
+          gh release create "v${V}" --repo "$REPO" --target "${{ github.sha }}" --draft \
             --title "NetBridge OS ${V} — FLASHABLE SD-card image (use the .img.xz)" \
-            --notes "FLASH THIS: netbridge-os-${V}.img.xz — the full SD-card image. Raspberry Pi Imager → Choose OS → Use custom → pick that file. Change NO settings; the card configures itself. ⛔ DO NOT FLASH rootfs.tar.zst — it sits next to the image and is nearly the same size, but it is the over-the-air payload bridge-update.sh writes to a standby A/B slot on a RUNNING bridge; flashing it produces a dead card. Verify first: shasum -a 256 must match sha256= in manifest-disk.txt, and the byte size must match size= (a truncated download is the most common failure). Signature: openssl dgst -sha256 -verify ota-pubkey.pem -signature manifest-disk.txt.sig manifest-disk.txt. After flashing: boot, wait ~90s, join BridgeSetup-XXXX from a phone, give it the venue Wi-Fi, then Claim it on the fleet and set a PIN. ⚠️ Test-boot on a SPARE card first — a boot-layout bug in this this project history produced five un-bootable images. ⚠️ This image contains a fleet enrolment token; treat the file as confidential. Signed: ${{ steps.pkg.outputs.signed }}." \
-            ./* \
-          || gh release upload "v${V}" --repo "$REPO" ./* --clobber
+            --notes "FLASH THIS: netbridge-os-${V}.img.xz — the full SD-card image. Raspberry Pi Imager → Choose OS → Use custom → pick that file. Change NO settings; the card configures itself. ⛔ DO NOT FLASH rootfs.tar.zst — it sits next to the image and is nearly the same size, but it is the over-the-air payload bridge-update.sh writes to a standby A/B slot on a RUNNING bridge; flashing it produces a dead card. Verify first: shasum -a 256 must match sha256= in manifest-disk.txt, and the byte size must match size= (a truncated download is the most common failure). Signature: openssl dgst -sha256 -verify ota-pubkey.pem -signature manifest-disk.txt.sig manifest-disk.txt. After flashing: boot, wait ~90s, join BridgeSetup-XXXX from a phone, give it the venue Wi-Fi, then Claim it on the fleet and set a PIN. ⚠️ Test-boot on a SPARE card first — a boot-layout bug in this this project history produced five un-bootable images. ⚠️ This image contains a fleet enrolment token; treat the file as confidential. Signed: ${{ steps.pkg.outputs.signed }}."
+          for f in ./*; do
+            for attempt in 1 2 3; do
+              if timeout 1200 gh release upload "v${V}" --repo "$REPO" "$f" --clobber; then break; fi
+              echo "::warning::upload of $f failed (attempt $attempt/3)"
+              [ "$attempt" = 3 ] && { echo "::error::giving up on $f — the image is still in the build artifact"; exit 1; }
+              sleep 60
+            done
+          done
+          gh release edit "v${V}" --repo "$REPO" --draft=false --latest
