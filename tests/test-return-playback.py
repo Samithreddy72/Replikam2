@@ -94,12 +94,36 @@ class ReturnPlayback(unittest.TestCase):
         child = Mock()
         child.poll.return_value = None
         with patch.dict(sys.modules, {'audio_engine': types.SimpleNamespace(
-                mac_microphone_argv=resolve)}), patch.object(
+                mac_microphone_argv=resolve, mac_microphone_device_id=Mock(return_value=42))}), patch.object(
                     app.subprocess, 'Popen', return_value=child) as popen:
             self.assertTrue(session.respawn_leg('voice'))
         resolve.assert_called_once_with('test-gst', 'Selected USB mic', '127.0.0.1', app.RTP_VOICE, 0)
         self.assertEqual(popen.call_args.args[0], fresh)
         self.assertEqual(session.leg_argv['voice'], fresh)
+        for handle in session.logs:
+            handle.close()
+
+    def test_default_retry_tracks_parent_identity_separately_from_capture(self):
+        session = app.Session()
+        session.wanted = True
+        session.voice_backend = 'gstreamer-coreaudio'
+        session.voice_capture = ('System default microphone', '127.0.0.1', 0)
+        session.voice_device_id = 42
+        session.leg_argv = {'voice': ['test-gst', 'unique-id=disconnected-device']}
+        session.leg_proc = {}
+        session.leg_env = {'voice': {}}
+        fresh = ['test-gst', '-e', 'osxaudiosrc', 'device=0']
+        resolve = Mock(return_value=fresh)
+        child = Mock()
+        child.poll.return_value = None
+        with patch.dict(sys.modules, {'audio_engine': types.SimpleNamespace(
+                mac_microphone_argv=resolve, mac_microphone_device_id=Mock(return_value=42))}), patch.object(
+                    app.subprocess, 'Popen', return_value=child) as popen:
+            self.assertTrue(session.respawn_leg('voice'))
+        resolve.assert_called_once_with('test-gst', 'System default microphone', '127.0.0.1', app.RTP_VOICE, 0)
+        self.assertEqual(popen.call_args.args[0], fresh)
+        self.assertEqual(session.leg_argv['voice'], fresh)
+        self.assertEqual(session.voice_device_id, 42)
         for handle in session.logs:
             handle.close()
 

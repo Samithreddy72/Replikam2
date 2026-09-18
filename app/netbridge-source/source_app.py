@@ -524,6 +524,7 @@ class Session:
         self.return_port = 5004
         self.return_player = "none"
         self.voice_proc = None
+        self.voice_muted = False
         self.return_proc = None     # the return-audio player, tracked so it can be toggled
         self.return_on = True
         # Return-audio tunables, seeded from env and changeable mid-session (see
@@ -631,9 +632,9 @@ class Session:
         self.leg_env = {}
         if IS_MAC and mic_name and _gst():
             try:
-                from audio_engine import mac_microphone_argv
+                from audio_engine import mac_microphone_argv, mac_microphone_device_id
                 a = mac_microphone_argv(_gst(), mic_name, pi_host, RTP_VOICE, mic_gain)
-                self.voice_device_id = int(a[3].split("=", 1)[1])
+                self.voice_device_id = mac_microphone_device_id(mic_name) if mic_name == "System default microphone" else int(a[3].split("=", 1)[1])
                 self.leg_env["voice"] = _gst_env()
                 self.voice_backend = "gstreamer-coreaudio"
             except RuntimeError as exc:
@@ -681,6 +682,29 @@ class Session:
         self.return_player = self._start_return(return_port) if self.return_on else "off"
 
     @_locked
+    def set_voice_muted(self, muted):
+        """Mute capture deliberately; supervisors must never undo the user's intent."""
+        if not self.wanted:
+            raise RuntimeError("Start a session before changing the microphone")
+        self.voice_muted = bool(muted)
+        if self.voice_muted:
+            proc = getattr(self, "leg_proc", {}).get("voice")
+            if proc is not None:
+                _quit(proc)
+                try:
+                    proc.wait(timeout=1)
+                except Exception:
+                    pass
+                if proc.poll() is None:
+                    self.voice_muted = False
+                    raise RuntimeError("Microphone did not stop; end the session to retry")
+        elif not self.voice_sending() and not self.respawn_leg("voice"):
+            # Keep the privacy state truthful if capture cannot be restarted.
+            self.voice_muted = True
+            raise RuntimeError("Microphone could not restart; check your input device")
+        return self.voice_muted
+
+    @_locked
     def suspend_voice(self):
         """Stop a disconnected CoreAudio input without touching video/return."""
         if not self.wanted or getattr(self, "voice_backend", None) != "gstreamer-coreaudio":
@@ -706,6 +730,8 @@ class Session:
         # silently undoes a deliberate stop, which is how the camera stayed on.
         if not getattr(self, "wanted", False):
             return False
+        if name == "voice" and getattr(self, "voice_muted", False):
+            return False
         argv = (getattr(self, "leg_argv", {}) or {}).get(name)
         if not argv and not (name == "voice" and getattr(self, "voice_backend", None) == "gstreamer-coreaudio"):
             return False
@@ -721,10 +747,10 @@ class Session:
             if name == "voice" and getattr(self, "voice_backend", None) == "gstreamer-coreaudio":
                 # USB reattachment can change the CoreAudio unique ID. Resolve
                 # the selected device again instead of retrying a stale argv.
-                from audio_engine import mac_microphone_argv
+                from audio_engine import mac_microphone_argv, mac_microphone_device_id
                 mic_name, host, gain = self.voice_capture
                 argv = mac_microphone_argv(_gst(), mic_name, host, RTP_VOICE, gain)
-                self.voice_device_id = int(argv[3].split("=", 1)[1])
+                self.voice_device_id = mac_microphone_device_id(mic_name) if mic_name == "System default microphone" else int(argv[3].split("=", 1)[1])
                 self.leg_argv[name] = argv
             lf = open(os.path.join(str(_logdir()), "netbridge-source-%s.log" % name), "w")
             self.logs.append(lf)
@@ -797,6 +823,8 @@ class Session:
         out = {}
         for name, p in (getattr(self, "leg_proc", {}) or {}).items():
             out[name] = bool(p and p.poll() is None)
+        if self.voice_muted:
+            out["voice"] = None
         out["return"] = bool(self.return_proc and self.return_proc.poll() is None) \
             if self.return_on else None      # None = deliberately off, not a fault
         return out
@@ -1048,6 +1076,7 @@ class Session:
         # Record the intent FIRST. If this were set after the kills, a supervisor tick landing
         # in between would see dead legs, believe they crashed, and restart them.
         self.wanted = False
+        self.voice_muted = False
         # Ask every leg to quit and release its device, in parallel, before escalating. The
         # old version went terminate -> kill on a 4s budget shared across ALL processes, so
         # the last leg in the list could be SIGKILLed almost immediately - and a SIGKILLed
@@ -1578,6 +1607,8 @@ class StreamGuard:
             abandoned = list(self.giving_up)
 
         for name, alive in (SESSION.leg_status() or {}).items():
+            if name == "voice" and getattr(SESSION, "voice_muted", False) is True:
+                continue
             if name == "voice" and getattr(SESSION, "voice_backend", None) == "gstreamer-coreaudio":
                 from audio_engine import mac_microphone_device_id
                 try:
@@ -1938,6 +1969,10 @@ class BridgeWatch:
             self.power = power if isinstance(power, dict) else None
 
         for key, val in checks.items():
+            if key == "voice_arriving" and getattr(SESSION, "voice_muted", False) is True:
+                with self.lock:
+                    self.strikes[key] = 0
+                continue
             if not isinstance(val, dict) or key not in ("video_arriving", "voice_arriving",
                                                         "return_audio"):
                 continue
@@ -2126,6 +2161,8 @@ class Handler(BaseHTTPRequestHandler):
                 "system_default_mic": IS_MAC,
                 "voice_backend": getattr(SESSION, "voice_backend", None),
                 "live": SESSION.live,
+                "wanted": SESSION.wanted,
+                "voice_muted": SESSION.voice_muted and not SESSION.voice_sending(),
                 "legs": LEGS.snapshot(),
                 # Reported SEPARATELY from legs, because a dead helper used to make the legs
                 # look healthy. The UI must be able to say APP OK / MESH OK / BRIDGE OK /
@@ -2447,6 +2484,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not result.get("running"):
                     return self._send({**result, "error": "Return audio could not restart; inspect diagnostics"}, 503)
                 return self._send(result)
+
+        if self.path == "/api/microphone":
+            if not isinstance(b.get("muted"), bool):
+                return self._send({"error": "muted must be a boolean"}, 400)
+            try:
+                muted = SESSION.set_voice_muted(b["muted"])
+                return self._send({"ok": True, "voice_muted": muted})
+            except RuntimeError as exc:
+                return self._send({"error": str(exc)}, 409)
 
         if self.path == "/api/return":
             # "Play meeting audio here" toggle — starts/stops the local return player only.

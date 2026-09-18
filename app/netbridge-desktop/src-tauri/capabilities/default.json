@@ -1,0 +1,11 @@
+{
+  "identifier": "main",
+  "description": "Local studio window only; no shell or filesystem access from web content.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-destroy"
+  ]
+}

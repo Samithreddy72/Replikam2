@@ -44,7 +44,10 @@ def mac_microphone_uid(name):
 
 def mac_microphone_argv(executable, name, host, port, gain_db=0):
     """Use CoreAudio's capture ring and resolve identity on every launch."""
-    device_id = mac_microphone_device_id(name)
+    # CoreAudio object IDs resolved in the frozen parent can differ from the
+    # gst subprocess (observed parent=114, child=113). Let osxaudiosrc resolve
+    # the default input in its own process; retain explicit selection for named inputs.
+    device_id = 0 if name == 'System default microphone' else mac_microphone_device_id(name)
     argv = [executable, '-e', 'osxaudiosrc', 'device=%d' % device_id,
             'buffer-time=40000', 'latency-time=10000', '!',
             'audioconvert', '!', 'audioresample', '!',

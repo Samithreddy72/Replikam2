@@ -1,0 +1,60 @@
+import {test,expect} from '@playwright/test';
+test('browser preview shows honest states and navigates without overflow',async({page})=>{
+ const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto('/');
+ await expect(page.getByRole('heading',{name:'Ready when you are.'})).toBeVisible();
+ await expect(page.getByRole('button',{name:'Go live',exact:true})).toBeDisabled();
+ await page.screenshot({path:'test-results/studio.png',fullPage:true});
+ await page.getByRole('button',{name:/Personas/}).first().click();
+ await expect(page.getByRole('heading',{name:'Show up your way.'})).toBeVisible();
+ await page.getByRole('button',{name:'Robot',exact:true}).click();
+ await expect(page.getByRole('img',{name:'robot persona preview'}).first()).toBeVisible();
+ await page.screenshot({path:'test-results/personas.png',fullPage:true});
+ await page.getByRole('button',{name:'Connection health',exact:true}).click();
+ await expect(page.getByText('Not streaming',{exact:true})).toHaveCount(4);
+ await page.getByRole('button',{name:'Close diagnostics'}).click();
+ for(const name of ['Bridges','Sessions','Settings']){await page.getByRole('button',{name,exact:true}).first().click();await expect(page.locator('h1')).toBeVisible()}
+ await page.setViewportSize({width:960,height:680});
+ expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBeTruthy();
+ expect(errors).toEqual([]);
+});
+
+test('desktop UI unlocks before streaming, handles mute, and ends session',async({page})=>{
+ await page.addInitScript(()=>{
+  const w=window as any;w.isTauri=true;w.calls=[];
+  const state={signed_in:true,email:'developer@example.test',control_url:'https://fleet.example.test',last_bridge:'room',last_camera:'Test camera',last_mic:'Test mic',live:false,wanted:false,voice_muted:false,return_on:true,return_gain:'1.0',return_jitter_ms:'250',version:'test'};
+  w.__TAURI_INTERNALS__={metadata:{currentWindow:{label:'main'},currentWebview:{label:'main'}},transformCallback:()=>1,unregisterCallback:()=>{},invoke:async(cmd:string,args:any)=>{
+   if(cmd!=='engine_request')return 1;
+   w.calls.push({path:args.path,body:args.body});
+   switch(args.path){
+    case '/api/state':return {...state};
+    case '/api/bridges':return [{id:'room',name:'Test room',online:true,tailscale_ip:'100.1.2.3'}];
+    case '/api/devices':return {video:[{name:'Test camera',index:'0'}],audio:[{name:'Test mic',index:'0'}]};
+    case '/api/unlock':return {ok:args.body.pin==='123456',message:'Wrong PIN'};
+    case '/api/golive':state.live=true;state.wanted=true;return {ok:true};
+    case '/api/microphone':state.voice_muted=args.body.muted;return {ok:true};
+    case '/api/return':state.return_on=args.body.on;return {ok:true};
+    case '/api/stop':state.live=false;state.wanted=false;return {ok:true};
+    default:return {ok:true};
+   }
+  }};
+ });
+ await page.goto('/');
+ await expect(page.getByRole('button',{name:'Go live',exact:true})).toBeEnabled();
+ await page.getByPlaceholder('Enter your bridge PIN').fill('000000');
+ await page.getByRole('button',{name:'Go live',exact:true}).click();
+ await expect(page.getByText('Wrong PIN',{exact:true})).toBeVisible();
+ expect(await page.evaluate(()=>(window as any).calls.some((c:any)=>c.path==='/api/golive'))).toBeFalsy();
+ await page.getByPlaceholder('Enter your bridge PIN').fill('123456');
+ await page.getByRole('button',{name:'Go live',exact:true}).click();
+ await expect(page.getByRole('button',{name:'End session',exact:true})).toBeEnabled();
+ await page.getByRole('button',{name:'Close diagnostics'}).click();
+ await page.getByRole('button',{name:'Mute microphone',exact:true}).click();
+ await expect(page.getByRole('button',{name:'Unmute microphone',exact:true})).toBeEnabled();
+ await page.getByRole('button',{name:'Mute meeting audio',exact:true}).click();
+ await expect(page.getByRole('button',{name:'Enable meeting audio',exact:true})).toBeEnabled();
+ await page.getByRole('button',{name:'End session',exact:true}).click();
+ await expect(page.getByRole('button',{name:'Go live',exact:true})).toBeEnabled();
+ await page.getByRole('button',{name:'Sessions',exact:true}).click();
+ await expect(page.getByText('Test room',{exact:true})).toBeVisible();
+});

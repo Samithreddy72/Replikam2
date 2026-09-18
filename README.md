@@ -30,6 +30,14 @@ else — the mesh, the fleet, the self-provisioning image — exists to keep tha
 
 ---
 
+## Desktop Studio (developer preview)
+
+The new Tauri app brings the studio UI, device setup, bridge sign-in, microphone mute,
+return-audio controls, diagnostics, and local persona previews into one desktop window.
+See [NetBridge Studio](app/netbridge-desktop/README.md) for building, validation, and
+release requirements. The current macOS build is for development; avatar/screen
+transmission and customer signing/notarization are not complete.
+
 ## Features
 
 | | |
