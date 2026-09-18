@@ -163,11 +163,15 @@ jobs:
           fi
           npm run package --prefix app/netbridge-desktop -- --bundles '${{ matrix.bundles }}'
           python app/netbridge-desktop/scripts/smoke-engine.py app/netbridge-desktop/src-tauri/resources/NetBridgeEngine
-      - name: Verify macOS signature and notarization
-        if: runner.os == 'macOS' && inputs.macos_sign
+      - name: Verify macOS bundle signature (including developer builds)
+        if: runner.os == 'macOS'
         run: |
           app='app/netbridge-desktop/src-tauri/target/release/bundle/macos/NetBridge Studio.app'
           codesign --verify --deep --strict --verbose=2 "$app"
+      - name: Verify macOS notarization
+        if: runner.os == 'macOS' && inputs.macos_sign
+        run: |
+          app='app/netbridge-desktop/src-tauri/target/release/bundle/macos/NetBridge Studio.app'
           spctl --assess --type execute --verbose=2 "$app"
           xcrun stapler validate "$app"
       - name: Collect artifacts and checksums

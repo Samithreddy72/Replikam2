@@ -6,6 +6,13 @@ import fs from "node:fs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const source = path.resolve(root, "../netbridge-source");
 const windows = process.platform === "win32";
+// Seal the entire bundle even without an Apple certificate. The linker's
+// executable-only signature leaves downloaded apps looking damaged to macOS.
+// Tauri signs before creating the DMG/updater archives. Preserve a configured
+// Developer ID identity for signed and notarized releases.
+if (process.platform === "darwin" && !process.env.APPLE_SIGNING_IDENTITY) {
+  process.env.APPLE_SIGNING_IDENTITY = "-";
+}
 const python =
   process.env.NB_PYTHON ||
   path.join(source, windows ? ".venv/Scripts/python.exe" : ".venv/bin/python");

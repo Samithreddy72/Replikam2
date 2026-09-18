@@ -63,6 +63,14 @@ Apple signing/notarization environment (`APPLE_SIGNING_IDENTITY`, Apple credenti
 and verify all nested Python/media binaries before distributing. The app has camera,
 microphone, and local-network usage descriptions and media entitlements.
 
+Without an Apple signing identity, packaging uses an ad-hoc bundle signature, and
+CI verifies bundle integrity before collecting artifacts. For a trusted test build,
+try opening the installed app once, then use **System Settings → Privacy & Security
+→ Open Anyway** if macOS offers the override. Managed Macs may prohibit this.
+Ad-hoc signing does not verify the publisher or provide notarization. A “damaged”
+message should be investigated as a packaging/integrity failure, not treated as the
+normal developer warning; use a corrected build instead.
+
 ## Signed updates
 
 Set `NB_UPDATE_ENDPOINT` (HTTPS manifest URL), `NB_UPDATE_PUBLIC_KEY` (Tauri public
