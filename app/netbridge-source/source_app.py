@@ -1695,7 +1695,8 @@ class BridgeWatch:
     failure this class exists to prevent.
     """
 
-    PERIOD_S = 10.0        # the bridge samples CPU over 2s per call; do not hammer it
+    PERIOD_S = 5.0         # includes the bridge's 2s sample, rather than adding to it
+    REPAIR_PERIOD_S = 10.0 # faster display must not accelerate automatic repairs
     GRACE_S = 30.0         # longer than StreamGuard: the far end has to see traffic first
     STRIKES = 2            # one bad poll is a sample, two is a symptom
     MAX_REPAIRS = 3
@@ -1705,6 +1706,8 @@ class BridgeWatch:
 
     def __init__(self):
         self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.last_repair_poll = None
         self.last_checks = None      # raw /api/checks, for the UI
         self.last_poll = 0.0
         self.reachable = None        # None = never polled this session
@@ -1714,6 +1717,9 @@ class BridgeWatch:
         self.live_since = 0.0
         self.power = None
         self.give_up = set()   # symptoms a repair has proven it cannot fix
+
+    def request_refresh(self):
+        self.wake.set()
 
     def snapshot(self):
         with self.lock:
@@ -1740,6 +1746,7 @@ class BridgeWatch:
     def _reset(self):
         with self.lock:
             self.live_since = 0.0
+            self.last_repair_poll = None
             self.strikes, self.repairs, self.give_up = {}, {}, set()
             self.last_checks, self.reachable, self.last_poll = None, None, 0.0
             self.last = None
@@ -1923,8 +1930,6 @@ class BridgeWatch:
         with self.lock:
             if not self.live_since:
                 self.live_since = time.time()
-            if (time.time() - self.live_since) < self.GRACE_S:
-                return
 
         checks = self._fetch()
         with self.lock:
@@ -1936,6 +1941,15 @@ class BridgeWatch:
         if not checks:
             # Say so, but do not act. The stream may be perfectly fine.
             return
+
+        # Publish measurements during startup; only corrective actions need grace.
+        now = time.monotonic()
+        with self.lock:
+            if (time.time() - self.live_since) < self.GRACE_S:
+                return
+            if self.last_repair_poll is not None and now - self.last_repair_poll < self.REPAIR_PERIOD_S:
+                return
+            self.last_repair_poll = now
 
         # Adopt any tuning the fleet has asked this machine for. Runs BEFORE the repair logic
         # below so a deliberate operator change is never mistaken for a symptom.
@@ -2006,11 +2020,14 @@ class BridgeWatch:
 
     def run(self):
         while True:
+            self.wake.clear()
+            started = time.monotonic()
             try:
                 self._tick()
             except Exception:
                 pass
-            time.sleep(self.PERIOD_S)
+            # One request at a time; slow samples never overlap or queue up.
+            self.wake.wait(max(0.1, self.PERIOD_S - (time.monotonic() - started)))
 
 
 BRIDGEWATCH = BridgeWatch()
@@ -2422,6 +2439,7 @@ class Handler(BaseHTTPRequestHandler):
             SESSION.start(route["media_host"], vidx, aidx, return_port=port, mic_name=aname)
             st.update({"bridge_host": host, "camera_name": vname, "mic_name": aname})
             save_state(st)
+            BRIDGEWATCH.request_refresh()
             player = SESSION.return_player
             return self._send({"ok": True, "camera": vname, "mic": aname,
                                "return_peer": me, "return_port": port, "peer_result": peer,

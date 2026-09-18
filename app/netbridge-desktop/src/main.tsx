@@ -165,7 +165,7 @@ function App() {
     const poll = async () => {
       if (gone) return;
       await refresh();
-      if (!gone) timer = window.setTimeout(poll, 2500);
+      if (!gone) timer = window.setTimeout(poll, 1000);
     };
     let timer = window.setTimeout(poll, 0);
     return () => {

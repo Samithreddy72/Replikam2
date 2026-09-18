@@ -106,3 +106,14 @@ Hardware release gate: a real presenter → mesh → Pi → USB meeting test, ca
 permission prompts on a clean Mac, return audio, device unplug/replug, mute privacy,
 sleep/wake, app quit, and a signed update/rollback rehearsal. These cannot be replaced
 by a UI screenshot or a successful compiler run.
+
+## Connection health timing
+
+Go live wakes the bridge sampler immediately. The bridge takes about two seconds
+per measurement; subsequent samples target a five-second cadence, including that
+sampling time. Studio reads the cached result every second. Slow network requests
+can take longer, and measurements are never fabricated while waiting.
+
+The 30-second startup grace applies only to corrective actions. Automatic repair
+evaluation remains limited to once per ten seconds, with the existing consecutive
+failure requirement, so faster display updates do not cause more media restarts.
