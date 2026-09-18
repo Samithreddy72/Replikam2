@@ -1,3 +1,4 @@
+import { version as studioVersion } from "../package.json";
 import { invoke } from "@tauri-apps/api/core";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { createRoot } from "react-dom/client";
@@ -387,7 +388,7 @@ function App() {
     setAudioDetails(a);
     const report = {
       generated_at: new Date().toISOString(),
-      desktop_version: "0.1.0",
+      desktop_version: studioVersion,
       engine_version: state?.version,
       live: state?.live,
       delivery: Object.fromEntries(
@@ -1316,7 +1317,7 @@ function App() {
                 <div className="separator" />
                 <h3>App updates</h3>
                 <p className="field-note">
-                  Studio 0.1.0 · Engine {state?.version || "—"}
+                  Studio {studioVersion} · Engine {state?.version || "—"}
                 </p>
                 <p className="field-note">
                   Signed updates replace the complete app and its media engine.
@@ -1426,7 +1427,7 @@ function App() {
                   : "Design preview"}
             </span>
             <span>
-              NETBRIDGE STUDIO <b>0.1.0</b>
+              NETBRIDGE STUDIO <b>{studioVersion}</b>
             </span>
             <button
               onClick={() => {

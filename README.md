@@ -197,6 +197,8 @@ between the current build and a normal macOS install.
 
 ## Documentation
 
+For Pi flashing and Studio version releases, follow the [release runbook](release.md).
+
 | Document | What it covers |
 |---|---|
 | [SETUP-GUIDE.md](docs/SETUP-GUIDE.md) | **Start here.** Blank SD card → working bridge, in ten phases |

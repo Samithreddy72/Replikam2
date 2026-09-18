@@ -1,6 +1,6 @@
-name: build-image
+name: Release NetBridge Pi image
 
-# Builds a flashable, signed, SECRET-FREE NetBridge OS image (Journey 1 of the product
+# Builds a flashable, signed NetBridge OS image (contains a fleet enrollment token) (Journey 1 of the product
 # walkthrough) in CI — replacing the manual factory/GOLDEN-IMAGE.md dd process.
 # Trigger: push a tag `vX.Y.Z`, or run manually (workflow_dispatch).
 
@@ -10,21 +10,42 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Image version, e.g. 2.0.1 (defaults to 2.0.0)'
+        description: 'Image version, e.g. 2.1.1 (blank uses repository VERSION)'
         required: false
         default: ''
+      draft:
+        description: 'Keep release as draft until spare-card testing passes'
+        type: boolean
+        default: true
 
 permissions:
   contents: write        # publish the release
 
+concurrency:
+  group: release-pi-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check release credentials before building
+        env:
+          OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
+          FLEET_BOOTSTRAP_TOKEN: ${{ secrets.FLEET_BOOTSTRAP_TOKEN }}
+          FLEET_CONTROL_URL: ${{ vars.FLEET_CONTROL_URL }}
+        run: |
+          test -n "$OTA_SIGNING_KEY" || { echo 'Missing OTA_SIGNING_KEY'; exit 1; }
+          test -n "$FLEET_BOOTSTRAP_TOKEN" || { echo 'Missing FLEET_BOOTSTRAP_TOKEN'; exit 1; }
+          case "$FLEET_CONTROL_URL" in https://*) ;; *) echo 'Configure HTTPS FLEET_CONTROL_URL'; exit 1 ;; esac
+
       - name: Compute version
         id: ver
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           # THE VERSION COMES FROM THE REPOSITORY, NOT FROM A TEXT BOX.
           #
@@ -37,8 +58,8 @@ jobs:
           # ./VERSION is reviewed like any other file, so changing it is a commit, not a
           # keystroke at dispatch time. A tag push takes its version from the tag. The dispatch
           # input survives only as a deliberate override for one-off builds.
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            V="${{ github.event.inputs.version }}"
+          if [ -n "$REQUESTED_VERSION" ]; then
+            V="$REQUESTED_VERSION"
             echo "::warning::version overridden at dispatch to $V (repository VERSION says $(cat VERSION))"
           elif [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             V="${GITHUB_REF_NAME#v}"
@@ -46,6 +67,7 @@ jobs:
             V="$(tr -d ' \n\r' < VERSION)"
           fi
           [ -n "$V" ] || { echo "::error::no version could be determined"; exit 1; }
+          [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Use a numeric version such as 2.1.1"; exit 1; }
           # The identity is the SHA; the semantic part is a label for humans.
           echo "version=${V}-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
@@ -88,8 +110,8 @@ jobs:
             KEYARG="--signing-key $TMPDIR/ota-key.pem"
             echo "signed=yes" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::OTA_SIGNING_KEY secret not set — publishing UNSIGNED. Add the repo secret to enable signing."
-            echo "signed=no" >> "$GITHUB_OUTPUT"
+            echo "::error::OTA_SIGNING_KEY is required for image releases"
+            exit 1
           fi
           sudo TMPDIR=/mnt/work bash factory/ci-disk-from-image.sh \
             --image "${{ steps.build.outputs.image }}" \
@@ -123,9 +145,11 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
+          RELEASE_DRAFT: ${{ github.event_name != 'workflow_dispatch' || inputs.draft }}
         run: |
           set -euo pipefail
-          V="${{ steps.ver.outputs.version }}"
+          V="$RELEASE_VERSION"
           REPO="${{ github.repository }}"
           cd /mnt/work/out
           # --repo is REQUIRED here: we cd'd out of the checkout, so gh can't infer the
@@ -145,6 +169,26 @@ jobs:
           # the retry could never succeed. Now the draft is created once (or reused on a re-run), each
           # file gets up to 3 time-limited attempts, and the release only becomes visible when every
           # asset is there — a half-uploaded release is never marked Latest.
+          python3 - <<'PYTAG'
+          import os, subprocess
+          tag = 'refs/tags/v' + os.environ['RELEASE_VERSION']
+          # Use the checkout's origin and credentials even though the assets are in /mnt.
+          refs = subprocess.check_output(['git', '-C', os.environ['GITHUB_WORKSPACE'],
+              'ls-remote', '--tags', 'origin', tag, tag + '^{}'], text=True)
+          targets = {line.split()[1]: line.split()[0] for line in refs.splitlines()}
+          tagged = targets.get(tag + '^{}', targets.get(tag))
+          if tagged and tagged != os.environ['GITHUB_SHA']:
+              raise SystemExit('Existing image tag points at a different commit')
+          PYTAG
+          # Retries may replace draft assets, but never overwrite a published image.
+          if gh release view "v${V}" --repo "$REPO" --json isDraft,targetCommitish > /tmp/pi-release.json 2>/dev/null; then
+            python3 - <<'PYRELEASE'
+          import json, os
+          release = json.load(open('/tmp/pi-release.json'))
+          if not release['isDraft'] or release['targetCommitish'] != os.environ['GITHUB_SHA']:
+              raise SystemExit('Refusing to overwrite a published release or a different commit')
+          PYRELEASE
+          fi
           gh release view "v${V}" --repo "$REPO" >/dev/null 2>&1 || \
           gh release create "v${V}" --repo "$REPO" --target "${{ github.sha }}" --draft \
             --title "NetBridge OS ${V} — FLASHABLE SD-card image (use the .img.xz)" \
@@ -157,4 +201,8 @@ jobs:
               sleep 60
             done
           done
-          gh release edit "v${V}" --repo "$REPO" --draft=false --latest
+          if [ "$RELEASE_DRAFT" = false ]; then
+            gh release edit "v${V}" --repo "$REPO" --draft=false --latest
+          else
+            echo "Draft image release ready: v${V}. Verify and boot-test a spare card before publishing."
+          fi

@@ -93,7 +93,10 @@ if (process.env.NB_UPDATE_ENDPOINT || process.env.NB_UPDATE_PUBLIC_KEY) {
 }
 const configPath = path.join(root, "src-tauri/target/package-config.json");
 fs.writeFileSync(configPath, JSON.stringify(config));
-run(path.join(root, "node_modules/.bin", windows ? "tauri.cmd" : "tauri"), [
+// Invoke the JS entry point directly: Windows .cmd shims cannot be spawned
+// as executables without a shell. Keep paths and arguments separate on all OSes.
+run(process.execPath, [
+  path.join(root, "node_modules/@tauri-apps/cli/tauri.js"),
   "build",
   "--config",
   configPath,

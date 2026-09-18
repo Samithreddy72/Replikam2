@@ -117,3 +117,14 @@ can take longer, and measurements are never fabricated while waiting.
 The 30-second startup grace applies only to corrective actions. Automatic repair
 evaluation remains limited to once per ten seconds, with the existing consecutive
 failure requirement, so faster display updates do not cause more media restarts.
+
+## GitHub Actions releases
+
+Run **Release NetBridge Studio (Windows + macOS)** (`release-studio.yml`) with a
+new version. It prepares media runtimes, builds both platforms, tests them, and
+creates one draft release with installers and checksums. No runtime ZIP is needed.
+Optional inputs enable Apple signing/notarization and updater signatures when
+credentials are configured. Windows installers remain unsigned pending customer
+signing integration. Real Pi/meeting qualification is still required.
+See [the release runbook](../../release.md#trigger-releases-from-github-actions-recommended).
+Mobile is outside the current scope.
