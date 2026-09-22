@@ -249,8 +249,33 @@ def load_conf():
     return d
 
 
+LOCAL_STATUS = "http://127.0.0.1:8080/api/status"
+
+
 def telemetry():
-    """Reuse bridge-web.py's gather() so there's one source of truth."""
+    """The same dict bridge-web.py serves at /api/status - one source of truth.
+
+    Asked of the RUNNING bridge-web first. This agent is a fresh process every 15 s, so
+    building the answer in-process meant a cold gather() on every tick: ~24 program launches
+    (tailscale twice, systemctl, vcgencmd, pgrep, ...) that no cache could ever serve, hidden
+    from per-service CPU accounting because the oneshot's cgroup vanishes when it exits
+    (2026-09-22). A cold gather() also has no previous poll to compare against, so every
+    stream-liveness field it produced was False. bridge-web keeps both the cache and that
+    history. If it is down or answers with something unusable, build it here as before.
+
+    bridge-web runs as 'pi', this agent as root. Every field was checked for a root-only
+    source; the one that could plausibly differ is the tailnet address (`tailscale ip`),
+    and enrolment reports it to the fleet. So an answer without one is not trusted: build
+    it here as root, which costs exactly what every tick cost before.
+    """
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(LOCAL_STATUS, timeout=5) as r:
+            d = json.loads(r.read().decode())
+        if isinstance(d, dict) and d.get("device_id") and d.get("tailscale_ip"):
+            return d
+    except Exception:
+        pass
     spec = importlib.util.spec_from_file_location("bridge_web", WEB_PY)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)

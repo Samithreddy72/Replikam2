@@ -4,8 +4,9 @@ Before=bridge-uvcd.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/bridge-idle-frame.sh
-# NOT RemainAfterExit: bridge-idle-frame.timer re-triggers this unit every 20s to
-# keep the Wi-Fi/Internet/USB ticks live, and a unit left "active" after exiting
-# is never re-run by its timer.
+# Runs once at boot. The frame is now plain black (render-idle-frame.py), so nothing on it
+# changes: bridge-idle-frame.timer, which re-ran this every 20s for the old status ticks, is
+# no longer enabled (2026-09-22 CPU sweep). The timer file stays installed; enabling it again
+# is harmless - an unchanged frame is not rewritten.
 [Install]
 WantedBy=multi-user.target

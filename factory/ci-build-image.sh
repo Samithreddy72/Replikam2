@@ -101,8 +101,12 @@ initramfs initramfs612 followkernel
 # turbo rail at all, which is where the worst transient lives.
 arm_boost=0
 # Headless: no display pipeline and no analog audio (the UAC2 gadget is the only audio
-# path). Minimum gpu_mem also hands ~112MB of RAM back to the system.
-gpu_mem=16
+# path).
+# gpu_mem=64, not the 16 minimum: at 16 the firmware loads the cut-down start4cd.elf with the
+# codec blocks OFF, so /dev/video10 (bcm2835-codec) never appears and bridge-feeder-net.sh
+# falls back to decoding the presenter's H.264 on the CPU - ~52% of a core on a 900 MHz
+# bridge (2026-09-22). 64MB is what turns the hardware decoder on.
+gpu_mem=64
 dtparam=audio=off
 # LEDs dark from boot rather than from whenever powertrim runs — a few mA, but free, and it
 # covers the one window powertrim cannot reach.
@@ -218,7 +222,7 @@ log "enable units"
 for u in bridge-gadget bridge-feeder-net bridge-uvcd bridge-feeder-audio bridge-return-audio \
          wifi-guardian bridge-powertrim flight-recorder jitter-sentry bridge-supervisor \
          bridge-watchdog.timer bridge-web bridge-wifi-portal bridge-idle-frame \
-         bridge-idle-frame.timer gadget-clean-detach bridge-agent.timer \
+         gadget-clean-detach bridge-agent.timer \
          bridge-ab-healthcheck bridge-wifi-unblock bridge-firstdiag \
          bridge-firstboot bridge-regen-hostkeys bridge-identity; do
   systemctl enable "$u" 2>/dev/null || echo "WARN: could not enable $u"

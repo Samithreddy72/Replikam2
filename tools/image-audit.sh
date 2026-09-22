@@ -95,6 +95,7 @@ if [ $have_root -eq 1 ]; then
            /usr/local/bin/bridge-pin /usr/local/bin/bridge-derive-pass \
            /usr/local/bin/bridge-status.sh /usr/local/bin/bridge-diagnose.sh \
            /usr/local/bin/bridge-crackle-sentry.sh /usr/local/bin/flight-recorder.sh \
+           /usr/local/bin/flight-recorder.py /usr/local/bin/bridge-feeder-net.sh \
            /usr/local/bin/wifi-guardian.sh /usr/lib/os-release /etc/default/bridge-agent \
            /etc/netbridge/control-url /etc/bridge/control-url; do
     "$DEBUGFS" -R "cat $f" "$ROOTDEV" >"$CAT/$(basename "$f")" 2>/dev/null
@@ -106,6 +107,8 @@ if [ $have_root -eq 1 ]; then
   # Enablement lives in the .wants symlink farm — listed ONCE, not once per unit.
   "$DEBUGFS" -R "ls /etc/systemd/system/multi-user.target.wants" "$ROOTDEV" \
     >"$CAT/.wants" 2>/dev/null
+  "$DEBUGFS" -R "ls /etc/systemd/system/timers.target.wants" "$ROOTDEV" \
+    >"$CAT/.timers" 2>/dev/null
 fi
 has() { [ -s "$CAT/$1" ]; }
 grepf() { grep -qE "$2" "$CAT/$1" 2>/dev/null; }
@@ -123,6 +126,11 @@ grep -q "dwc2" "$MNT/config.txt" 2>/dev/null && ok "dwc2 overlay enabled (USB ga
   || no "no dwc2 overlay — it cannot be a USB device"
 grep -q "modules-load=dwc2" "$MNT/cmdline.txt" 2>/dev/null && ok "dwc2 loads at boot" \
   || warn "dwc2 not in modules-load — relies on the overlay alone"
+# The LAST gpu_mem line wins. At 16 the firmware boots start4cd.elf with the codec blocks off,
+# /dev/video10 never appears, and the presenter's H.264 is decoded on the CPU (~52% of a core).
+GPU=$(grep -E '^gpu_mem=' "$MNT/config.txt" 2>/dev/null | tail -1 | cut -d= -f2)
+[ "${GPU:-0}" -ge 64 ] 2>/dev/null && ok "gpu_mem=$GPU — hardware H.264 decoder available" \
+  || no "gpu_mem=${GPU:-unset} — hardware H.264 decoder OFF, video decodes on the CPU"
 
 sec "The root filesystem is readable"
 if [ $have_root -eq 1 ] && [ -s "$IDX" ]; then
@@ -214,6 +222,29 @@ grepf bridge-web.py 'd\["pcm"\] *= *_return_pcm\(\)' && ok "status exposes the c
 
 sec "Stage 6 — it keeps running"
 has bridge-watchdog.sh && ok "watchdog present" || warn "no watchdog script"
+# 2026-09-22 CPU sweep: each of these was measured costing CPU on a live bridge.
+has flight-recorder.py && grepf flight-recorder.sh 'exec /usr/bin/python3 /usr/local/bin/flight-recorder.py' \
+  && ok "flight recorder is the no-launch Python loop" \
+  || no "flight recorder is the old shell loop (~10 launches/s, whole-system sync every second)"
+grepf bridge-uvcd.sh '^  > >\(exec grep --line-buffered -v' \
+  && ok "camera EAGAIN flood filtered on stdout (where libuvcgadget prints it)" \
+  || no "camera EAGAIN flood not filtered on stdout — journald floods again"
+grepf bridge-feeder-net.sh 'v4l2h264dec' && ok "video feeder uses the hardware decoder when present" \
+  || no "video feeder is software-decode only"
+grepf bridge-agent.py 'LOCAL_STATUS = "http://127.0.0.1:8080/api/status"' \
+  && ok "fleet agent reuses the running status page (no cold rebuild every 15 s)" \
+  || no "fleet agent rebuilds the full status in a fresh process every 15 s"
+grepf bridge-web.py '^def _cached\(' && ok "status page caches its answer" \
+  || no "status page launches ~20 programs per request"
+# Judged only when the timer list could be read at all (it must at least hold the agent's
+# timer) - an unreadable list must not pass as "not enabled".
+if ! grep -q "bridge-agent.timer" "$CAT/.timers" 2>/dev/null; then
+  warn "could not list enabled timers — idle-frame timer state not checked"
+elif grep -q "bridge-idle-frame.timer" "$CAT/.timers"; then
+  no "idle-frame timer enabled — re-renders a constant black frame every 20 s"
+else
+  ok "idle-frame timer not enabled (the frame is constant)"
+fi
 has flight-recorder.sh && ok "flight recorder present (the persistent black box)" \
   || no "no flight recorder — brownouts would be invisible again"
 grep -q "flight-recorder" "$CAT/.wants" 2>/dev/null && ok "flight recorder is enabled" \

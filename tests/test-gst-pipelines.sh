@@ -146,12 +146,15 @@ capture() {                     # capture <staged> [env assignments...]
 # real command with only the hardware removed. Properties are consumed along with the
 # element name: `fakesink device=plughw:...` is an unknown-property error, not a link test.
 defake() {
+  # Replace an element's own property=value words only. The first version ate everything up to
+  # the next '!', which for a tee branch includes the NEXT branch's pad name ("... spk.") and
+  # linked the fake sink into the following queue - a failure of the test, not the pipeline.
   sed -E \
-    -e 's#alsasink[^!]*#fakesink #g' \
-    -e 's#alsasrc[^!]*#audiotestsrc num-buffers=1 #g' \
-    -e 's#v4l2sink[^!]*#fakesink #g' \
-    -e 's#v4l2src[^!]*#videotestsrc num-buffers=1 #g' \
-    -e 's#udpsink[^!]*#fakesink #g'
+    -e 's#alsasink( +[a-z-]+=[^ !]+)*#fakesink#g' \
+    -e 's#alsasrc( +[a-z-]+=[^ !]+)*#audiotestsrc num-buffers=1#g' \
+    -e 's#v4l2sink( +[a-z-]+=[^ !]+)*#fakesink#g' \
+    -e 's#v4l2src( +[a-z-]+=[^ !]+)*#videotestsrc num-buffers=1#g' \
+    -e 's#udpsink( +[a-z-]+=[^ !]+)*#fakesink#g'
 }
 
 # Construct a pipeline for real and judge the result.
@@ -223,7 +226,8 @@ S=$(stage pi/scripts/bridge-feeder-audio.sh)
 if [ "$S" = "STAGE-FAILED" ] || [ -z "$S" ]; then
   no "bridge-feeder-audio.sh — could not stage"
 else
-  FA="$(capture "$S")"
+  # AEC on: the reference branch is built and must be S16BE.
+  FA="$(capture "$S" RETURN_AEC=1)"
   # Plugin-INDEPENDENT assertion on the captured argv. The full construction below SKIPs on
   # a machine without webrtcdsp (macOS), and a skip must never be the only thing standing
   # between this project and the exact regression that took the audio down. Endianness is
@@ -234,7 +238,16 @@ else
     no "bridge-feeder-audio.sh — L16 reference branch is NOT S16BE; rtpL16pay will refuse to link"
     echo "          $(grep -oE '.{0,30}rtpL16pay.{0,10}' <<<"$FA" | head -1)"
   fi
-  check "bridge-feeder-audio.sh (presenter voice + L16 reference)" "$(defake <<<"$FA")"
+  check "bridge-feeder-audio.sh AEC on (presenter voice + L16 reference)" "$(defake <<<"$FA")"
+  # AEC off (the shipped default): nothing listens on the reference port, so the branch must
+  # not be built at all - and the voice path must still link on its own.
+  FA0="$(capture "$S" RETURN_AEC=0)"
+  if [ -n "$FA0" ] && ! grep -q 'rtpL16pay' <<<"$FA0" && grep -q 'alsasink' <<<"$FA0"; then
+    ok "bridge-feeder-audio.sh — AEC off builds no reference branch (voice path only)"
+  else
+    no "bridge-feeder-audio.sh — AEC off still builds the reference branch (or no voice path)"
+  fi
+  check "bridge-feeder-audio.sh AEC off (presenter voice only)" "$(defake <<<"$FA0")"
 fi
 
 # bridge-return-audio.sh has THREE distinct pipelines. The old harness saw none of them.

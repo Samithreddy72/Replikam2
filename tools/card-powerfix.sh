@@ -100,7 +100,8 @@ else
 # 22 undervoltage events/boot were logged at 13.7/21.8/31.9s — cores ramping, USB gadget
 # enumerating, Wi-Fi coming up. bridge-powertrim starts at ~12s and cannot cover that window.
 arm_boost=0
-gpu_mem=16
+# 64, not 16: at 16 the H.264 decoder is off (see factory/ci-build-image.sh)
+gpu_mem=64
 dtparam=audio=off
 dtparam=act_led_trigger=none
 dtparam=act_led_activelow=off

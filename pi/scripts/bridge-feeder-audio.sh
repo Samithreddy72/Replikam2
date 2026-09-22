@@ -19,13 +19,28 @@
 # So this tee sends a copy of exactly what reaches the speaker to a LOCAL udp port, and the
 # return service can consume it as the reference. If the reference branch stalls, the
 # leaky queue drops it rather than back-pressuring the leg that matters.
+#
+# The reference branch is built ONLY when echo cancellation is on (RETURN_AEC=1, read from the
+# same files bridge-return-audio.sh reads, in the same order). With AEC off - the shipped
+# default - nothing listens on that port, and the branch converted, byte-swapped, packetised
+# and sent every buffer of the presenter's voice to nobody (2026-09-22 CPU sweep). Turning AEC
+# on therefore needs BOTH audio services restarted (`bridge restart`), not just the return leg.
 export PATH=/usr/local/bin:/usr/bin:/bin
 [ -f /etc/default/bridge-net ] && . /etc/default/bridge-net
+[ -f /etc/default/bridge-return-audio ] && . /etc/default/bridge-return-audio
+[ -f /etc/default/bridge-return-tune ] && . /etc/default/bridge-return-tune
+[ -f /data/config/bridge-return-tune ] && . /data/config/bridge-return-tune
+
+AEC_REF=""
+if [ "${RETURN_AEC:-0}" = "1" ]; then
+  AEC_REF="spk. ! queue max-size-time=200000000 leaky=downstream ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2,format=S16BE ! rtpL16pay ! udpsink host=127.0.0.1 port=${AEC_REF_PORT:-5006} sync=false async=false"
+fi
 
 # One voice gain controller, with a -6 dBFS target. Suppression is off while diagnosing lost syllables.
 # The old S16LE volume=6 stage clipped BEFORE the following compressor could act.
 # Do not append integer gain after this limiter or add a default boost at the sender.
-# Echo cancellation remains off; the reference branch alone does not implement AEC.
+# AEC_REF is deliberately unquoted: it is a list of gst-launch tokens (none contain spaces or globs).
+# shellcheck disable=SC2086
 exec gst-launch-1.0 udpsrc port=5002 caps="application/x-rtp,media=audio,encoding-name=OPUS,payload=97,clock-rate=48000" ! rtpjitterbuffer latency=${NET_AUDIO_LATENCY:-120} do-lost=true ! rtpopusdepay ! opusdec plc=true use-inband-fec=true ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2,format=S16LE ! webrtcdsp echo-cancel=false high-pass-filter=true noise-suppression=false noise-suppression-level=moderate gain-control=true compression-gain-db=6 target-level-dbfs=6 limiter=true ! audioconvert ! tee name=spk \
   spk. ! queue max-size-time=400000000 max-size-bytes=0 max-size-buffers=0 leaky=downstream ! alsasink device=plughw:UAC2Gadget sync=false buffer-time=200000 latency-time=40000 \
-  spk. ! queue max-size-time=200000000 leaky=downstream ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2,format=S16BE ! rtpL16pay ! udpsink host=127.0.0.1 port=${AEC_REF_PORT:-5006} sync=false async=false
+  $AEC_REF

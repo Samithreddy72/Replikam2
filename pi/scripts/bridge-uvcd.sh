@@ -20,8 +20,11 @@ fi
 # writes on them, flight-recorder greps this journal every second, and they pushed the useful
 # "pump:" telemetry out of every log tail. Drop exactly that line (errno 11 only); every other
 # line, including dequeue failures with any other errno, still reaches the journal.
+# It is a printf() in libuvcgadget's v4l2.c, so it arrives on STDOUT; the "pump:" telemetry is
+# fprintf(stderr) and is left untouched. (The first version of this filter sat on stderr and
+# removed nothing - found on the live bridge 2026-09-22.)
 # SIGPIPE is ignored (inherited across exec) so that if the filter ever died, uvc-gadget would
-# get EPIPE on its stderr writes instead of being killed.
+# get EPIPE on its stdout writes instead of being killed.
 trap '' PIPE
 exec stdbuf -oL -eL /usr/local/bin/uvc-gadget -d /dev/video40 uvc.0 \
-  2> >(exec grep --line-buffered -v 'unable to dequeue buffer index [0-9]*/[0-9]* (11)$' >&2)
+  > >(exec grep --line-buffered -v 'unable to dequeue buffer index [0-9]*/[0-9]* (11)$')
