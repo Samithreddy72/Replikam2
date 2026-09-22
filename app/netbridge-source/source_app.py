@@ -64,7 +64,7 @@ RTP_VIDEO, RTP_VOICE = 5000, 5002
 # Build stamp. build.py rewrites this line, and it is what the updater compares against
 # the signed manifest — so a build that forgets to bump it simply never updates, rather
 # than update-looping.
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.1"
 
 
 # --------------------------------------------------------------------------- state
@@ -610,7 +610,12 @@ class Session:
             vin = ["-f", "avfoundation", "-framerate", "30",
                    "-video_size", "1280x720", "-pixel_format", "uyvy422",
                    "-i", "%s:none" % video_idx]
-            venc = ["-c:v", "h264_videotoolbox", "-realtime", "1"]
+            # Baseline profile: CAVLC instead of the default High profile's CABAC. CABAC is the most
+            # expensive, strictly serial part of H.264 decoding, and the bridge decodes this stream
+            # in software on a 900 MHz Pi. Measured 2026-09-22 through the bridge's own pipeline at
+            # 640x360/20fps/1500k: 41% less decode+convert CPU, SSIM 0.966 vs 0.967 (not visible).
+            # (The Windows path is already CAVLC: libx264 ultrafast turns CABAC off.)
+            venc = ["-c:v", "h264_videotoolbox", "-realtime", "1", "-profile:v", "baseline"]
             ain = ["-f", "avfoundation", "-i", ":%s" % audio_idx]
 
         v = common + vin + [
