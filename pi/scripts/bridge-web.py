@@ -8,7 +8,7 @@ Serves:
   GET /api/health   tiny liveness JSON
 on http://<pi>:8080"""
 import http.server, socketserver, subprocess, os, time, socket, json, hashlib, re, glob, shlex
-import importlib.util
+import importlib.util, threading, copy
 
 PORT = 8080
 VERSION_FILE = "/etc/bridge/version"
@@ -165,10 +165,24 @@ def throttle_sources():
         if sticky != last:
             out.append(("flight-sticky", sticky))
     # 3. vcgencmd — authoritative when it works, but needs a device node `pi` may not have.
-    m = _valid_mask(sh("vcgencmd get_throttled"))
+    m = _vcgencmd_throttled_mask()
     if m is not None:
         out.append(("vcgencmd", int(m, 16)))
     return out
+
+
+def _vcgencmd_throttled_mask():
+    """vcgencmd's mask, launched at most once a second (throttle_sources runs twice per status
+    build) - and, when it fails, at most every 5 minutes. bridge-web runs as `pi`, which on
+    these images usually cannot open /dev/vcio, so vcgencmd prints an error: relaunching it on
+    every request bought nothing. The flight recorder (root) remains the primary source."""
+    now = time.monotonic()
+    hit = _CACHE.get("vcgencmd_throttled")
+    if hit is not None and now - hit[0] < (1 if hit[1] is not None else 300):
+        return hit[1]
+    m = _valid_mask(sh("vcgencmd get_throttled"))
+    _CACHE["vcgencmd_throttled"] = (now, m)
+    return m
 
 
 def soc_throttled():
@@ -638,11 +652,32 @@ def pairing_code(serial):
     h = hashlib.sha256(serial.encode("utf-8")).hexdigest()[:4].upper()
     return "BRIDGE-" + h
 
+# WHY THE CACHES (2026-09-22). Measured on a live bridge: bridge-web.py averaged ~33% of a core,
+# more than either audio pipeline, because every /api/status built its answer by launching ~20
+# programs (hostname, one systemctl per service, tailscale twice, pgrep twice, vcgencmd, sudo,
+# a refused journal pipeline plus a logger call to report the refusal). It is polled every few
+# seconds by the presenter app, the fleet agent and diagnostic tools, on a 900 MHz-capped Pi
+# that browns out under load. Values that change slowly are now remembered for a few seconds.
+_CACHE = {}
+
+def _cached(key, ttl, fn):
+    """fn() at most once per ttl seconds; a failed call is not remembered as a result."""
+    now = time.monotonic()
+    hit = _CACHE.get(key)
+    if hit is not None and now - hit[0] < ttl:
+        return hit[1]
+    v = fn()
+    _CACHE[key] = (now, v)
+    return v
+
 def tailscale_ip4():
-    return sh("tailscale ip -4").splitlines()[0] if sh("tailscale ip -4") else ""
+    # One call, not two: this used to run `tailscale ip -4` twice per request.
+    out = _cached("tailscale_ip4", 30, lambda: sh("tailscale ip -4"))
+    return out.splitlines()[0] if out else ""
 
 def svc_restarts(svc):
-    v = sh("systemctl show -p NRestarts --value %s" % svc)
+    v = _cached("nrestarts:" + svc, 10,
+                lambda: sh("systemctl show -p NRestarts --value %s" % svc))
     try:
         return int(v)
     except Exception:
@@ -664,24 +699,50 @@ def clock_verdict():
         pass
     except Exception:
         pass
-    errs = sh("journalctl -u bridge-return-audio --since '-10 min' "
-              "| grep -ci 'input/output error'")
-    try:
-        return int(errs) > 0, {"verdict": "crackle" if int(errs) > 0 else "clean",
-                               "source": "journal-heuristic"}
-    except Exception:
-        return False, {}
+    # This heuristic was a shell pipeline (journalctl | grep -ci). sh() refuses pipelines on
+    # purpose, so for months it returned "" -> {} on every request, and _log()'d the refusal
+    # by launching `logger` each time. Same question, no shell, counted in Python, and asked
+    # at most once a minute: a 10-minute window does not need re-reading every few seconds.
+    def _count():
+        out = sh(["journalctl", "-u", "bridge-return-audio", "--since", "-10 min",
+                  "--no-pager", "-o", "cat"])
+        return sum(1 for ln in out.splitlines() if "input/output error" in ln.lower())
+    errs = _cached("clock_journal_errs", 60, _count)
+    return errs > 0, {"verdict": "crackle" if errs > 0 else "clean",
+                      "source": "journal-heuristic"}
 
 
 def clock_suspect():
     return clock_verdict()[0]
 
+def _services_active():
+    """All SERVICES in ONE systemctl call (it prints one state per unit, in order)."""
+    out = sh(["systemctl", "is-active"] + list(SERVICES)).splitlines()
+    if len(out) == len(SERVICES):
+        return list(zip(SERVICES, out))
+    return [(s, sh("systemctl is-active %s" % s)) for s in SERVICES]   # unexpected output
+
+# The whole answer is rebuilt at most every _STATUS_TTL seconds; requests in between (the app,
+# the fleet agent and a diagnostic tool polling at once) share it. Short enough that every
+# consumer still sees streams change within a couple of seconds.
+_STATUS_TTL = 2.0
+_status_lock = threading.Lock()
+_status_cache = [0.0, None]
+
 def gather():
+    with _status_lock:
+        t, v = _status_cache
+        if v is None or time.monotonic() - t >= _STATUS_TTL:
+            v = _gather_uncached()
+            _status_cache[0], _status_cache[1] = time.monotonic(), v
+        return copy.deepcopy(v)     # callers may annotate their copy
+
+def _gather_uncached():
     d = {}
-    d["host"] = sh("hostname")
-    hi = sh("hostname -I")
+    d["host"] = _cached("host", 60, lambda: sh("hostname"))
+    hi = _cached("hostname_I", 15, lambda: sh("hostname -I"))
     d["ip"] = hi.split()[0] if hi else "?"
-    d["services"] = [(s, sh("systemctl is-active %s" % s)) for s in SERVICES]
+    d["services"] = _services_active()
     state = ""
     udcdir = "/sys/class/udc"
     if os.path.isdir(udcdir):
@@ -690,7 +751,10 @@ def gather():
             d["speed"] = read("%s/%s/current_speed" % (udcdir, f))
             break
     d["udc"] = state or "?"
-    d["functions"] = sh("ls /sys/kernel/config/usb_gadget/g1/functions/").replace("\n", " ")
+    try:
+        d["functions"] = " ".join(sorted(os.listdir("/sys/kernel/config/usb_gadget/g1/functions/")))
+    except Exception:
+        d["functions"] = ""
     d["video40"] = os.path.exists("/dev/video40")
     d["uac2"] = os.path.isdir("/proc/asound/UAC2Gadget")
     # AFTER functions/video40/uac2 are known - placing this above them made every reading say
@@ -700,7 +764,7 @@ def gather():
     _dg, _certain, _detail = usb_diagnosis(state, d["functions"], d["video40"], d["uac2"])
     d["usb"] = {"state": state or "?", "diagnosis": _dg,
                 "certain": _certain, "detail": _detail}
-    d["temp"] = soc_temp()
+    d["temp"] = _cached("temp", 5, soc_temp)
     d["throttled"] = soc_throttled()
     d["config"] = golden_state()
     d["pcm"] = _return_pcm()
@@ -709,7 +773,7 @@ def gather():
     # bundle to contradict.
     d["power"] = power_state(d["throttled"])
     d["wifi"] = wifi_dbm()
-    d["uptime"] = sh("uptime -p").replace("up ", "")
+    d["uptime"] = _cached("uptime", 30, lambda: sh("uptime -p")).replace("up ", "")
     peer = ""
     for ln in read("/etc/default/bridge-return-audio").splitlines():
         if ln.startswith("RETURN_DEST_IP"):
@@ -717,11 +781,12 @@ def gather():
         if ln.startswith("RETURN_DEST_PORT"):
             peer += ":" + ln.split("=", 1)[1]
     d["peer"] = peer or "?"
-    d["wd_timer"] = sh("systemctl is-active bridge-watchdog.timer")
-    d["wd_hw"] = sh("systemctl show -p RuntimeWatchdogUSec --value")
-    # PIN-gate state (rides telemetry so a brute-force lockout raises a fleet alert)
+    d["wd_timer"] = _cached("wd_timer", 30, lambda: sh("systemctl is-active bridge-watchdog.timer"))
+    d["wd_hw"] = _cached("wd_hw", 30, lambda: sh("systemctl show -p RuntimeWatchdogUSec --value"))
+    # PIN-gate state (rides telemetry so a brute-force lockout raises a fleet alert). 3 s: a
+    # lockout still shows within one fleet poll, without a sudo+script launch per request.
     try:
-        d["pin"] = json.loads(sh("sudo -n /usr/local/bin/bridge-pin state"))
+        d["pin"] = json.loads(_cached("pin", 3, lambda: sh("sudo -n /usr/local/bin/bridge-pin state")))
     except Exception:
         d["pin"] = {}
     # --- fleet identity + telemetry (consumed by the control plane) ---
@@ -762,7 +827,7 @@ def gather():
     }
     d["return_mismatch"] = _return_mismatch()   # None = healthy; dict = wrong-rate now
     d["return_rate"] = _return_opened_rate()    # what the pipeline is opened at (0=idle)
-    d["mesh_path"] = mesh_path()                # direct vs DERP relay — the big one on a long link
+    d["mesh_path"] = _cached("mesh_path", 10, mesh_path)   # direct vs DERP relay (runs `tailscale status`)
     d["quarantined"] = _quarantined()           # [] = none; names = deployed code NOT running
     suspect, detail = clock_verdict()
     d["clock_suspect"] = suspect          # bool (backward compat for the control plane)
@@ -852,9 +917,27 @@ def _udc_state():
             return read("%s/%s/state" % (udcdir, f))
     return ""
 
+_PIDS = {}
+
+def _pid_for(pattern):
+    """First pid whose command line contains `pattern`. Remembered and re-validated against
+    /proc/<pid>/cmdline, so pgrep only runs when the process has actually been replaced."""
+    pid = _PIDS.get(pattern)
+    if pid:
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as f:
+                if pattern.encode() in f.read().replace(b"\0", b" "):
+                    return pid
+        except Exception:
+            pass
+    pids = sh(["pgrep", "-f", pattern]).split()
+    _PIDS[pattern] = pids[0] if pids else None
+    return _PIDS[pattern]
+
 def _feeder_cpu_ticks():
     """(pid, utime+stime clock ticks) of the net video feeder, or (None, None)."""
-    pids = sh("pgrep -f 'udpsrc port=5000'").split()
+    pid = _pid_for("udpsrc port=5000")
+    pids = [pid] if pid else []
     if not pids:
         return None, None
     stat = read("/proc/%s/stat" % pids[0])
@@ -871,7 +954,8 @@ def _voice_feeder_cpu_ticks():
     feeder is actively decoding the presenter's mic RTP and pushing it to the gadget - i.e.
     the presenter's voice IS arriving at the bridge. Measured at the RECEIVER, like video,
     so it means "landed here", not merely "was sent"."""
-    pids = sh("pgrep -f 'udpsrc port=5002'").split()
+    pid = _pid_for("udpsrc port=5002")
+    pids = [pid] if pid else []
     if not pids:
         return None, None
     stat = read("/proc/%s/stat" % pids[0])
