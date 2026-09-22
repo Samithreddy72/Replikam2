@@ -15,4 +15,13 @@ if [ -d /sys/devices/system/cpu/cpu2 ] &&
     fi
   done
 fi
-exec stdbuf -oL -eL /usr/local/bin/uvc-gadget -d /dev/video40 uvc.0
+# The pump prints "/dev/video40: unable to dequeue buffer index N/2 (11)" every time it polls
+# before a new frame exists (EAGAIN) - dozens of lines a second. journald spent CPU and SD
+# writes on them, flight-recorder greps this journal every second, and they pushed the useful
+# "pump:" telemetry out of every log tail. Drop exactly that line (errno 11 only); every other
+# line, including dequeue failures with any other errno, still reaches the journal.
+# SIGPIPE is ignored (inherited across exec) so that if the filter ever died, uvc-gadget would
+# get EPIPE on its stderr writes instead of being killed.
+trap '' PIPE
+exec stdbuf -oL -eL /usr/local/bin/uvc-gadget -d /dev/video40 uvc.0 \
+  2> >(exec grep --line-buffered -v 'unable to dequeue buffer index [0-9]*/[0-9]* (11)$' >&2)
