@@ -102,11 +102,10 @@ initramfs initramfs612 followkernel
 arm_boost=0
 # Headless: no display pipeline and no analog audio (the UAC2 gadget is the only audio
 # path).
-# gpu_mem=64, not the 16 minimum: at 16 the firmware loads the cut-down start4cd.elf with the
-# codec blocks OFF, so /dev/video10 (bcm2835-codec) never appears and bridge-feeder-net.sh
-# falls back to decoding the presenter's H.264 on the CPU - ~52% of a core on a 900 MHz
-# bridge (2026-09-22). 64MB is what turns the hardware decoder on.
-gpu_mem=64
+# Minimum gpu_mem also hands ~112MB of RAM back to the system. (64 was tried on 2026-09-22 to
+# enable the H.264 hardware decoder; that path measured worse live, so the feeder decodes in
+# software and the codec block is not needed.)
+gpu_mem=16
 dtparam=audio=off
 # LEDs dark from boot rather than from whenever powertrim runs — a few mA, but free, and it
 # covers the one window powertrim cannot reach.
@@ -140,6 +139,7 @@ install -m 0644 pi/configs/script-pubkey.pem /etc/netbridge/script-pubkey.pem
 install -m 0644 pi/configs/v4l2loopback.conf       /etc/modprobe.d/
 install -m 0644 pi/configs/size-cap.conf           /etc/systemd/journald.conf.d/
 install -m 0644 pi/configs/journald-persistent.conf /etc/systemd/journald.conf.d/
+install -m 0644 pi/configs/no-kmsg.conf              /etc/systemd/journald.conf.d/
 install -m 0644 pi/configs/kit-watchdog.conf       /etc/systemd/system.conf.d/99-watchdog.conf
 install -m 0644 pi/configs/wifi-powersave-off.conf pi/configs/no-mac-rand.conf /etc/NetworkManager/conf.d/
 tar xzf sources/patched-uvc-gadget-sources.tgz -C /home/pi 2>/dev/null || true

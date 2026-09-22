@@ -4,7 +4,7 @@
     HH:MM:SS up=<s> udc=<state> thr=0x<mask> pull=<0|1>
 
   pull=1  the client is actively pulling video frames right now (a "pump: ok=" line from
-          bridge-uvcd in the last 3 s).
+          bridge-uvcd in the last 4 s).
 
 Why Python and not the old shell loop (2026-09-22): the loop launched ~10 programs every
 second (journalctl, grep, date, cut x2, cat, vcgencmd, sync, wc, sleep) and re-read the last
@@ -21,7 +21,9 @@ import glob, os, subprocess, threading, time
 
 F = "/home/pi/flight.txt"
 KEEP, CAP = 500, 600
-PULL_WINDOW = 3.0
+# The pump reports every 2 s and its line can reach the journal late on a busy bridge; with a 3 s
+# window that read as a false pull=0 about once a minute during a live session (2026-09-22).
+PULL_WINDOW = 4.0
 
 _last_pump = [0.0]
 _datasync = getattr(os, "fdatasync", os.fsync)     # Linux has fdatasync; fsync elsewhere

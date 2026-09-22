@@ -45,7 +45,7 @@ bad = [l for l in new if not pat.match(l)]
     "about one line a second (%d new lines in 7.5 s)" % len(new))
 pulls = [l.rsplit("=", 1)[1] for l in new]
 (ok if pulls[:2] == ["1", "1"] or pulls[1:3] == ["1", "1"] else no)("pull=1 while the pump reports (%s)" % pulls)
-(ok if pulls[-1] == "0" else no)("pull drops to 0 once the pump has been quiet > 3 s (%s)" % pulls)
+(ok if pulls[-1] == "0" else no)("pull drops to 0 once the pump has been quiet > 4 s (%s)" % pulls)
 (ok if len(lines) <= fr.CAP else no)("ring trimmed to the cap (%d lines on disk, cap %d)" % (len(lines), fr.CAP))
 (ok if link.is_symlink() else no)("rotation keeps the symlink, rewrites the real file")
 (ok if not (T / ".flight.rotate.tmp").exists() else no)("no rotation temp file left behind")

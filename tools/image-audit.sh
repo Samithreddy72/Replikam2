@@ -96,6 +96,7 @@ if [ $have_root -eq 1 ]; then
            /usr/local/bin/bridge-status.sh /usr/local/bin/bridge-diagnose.sh \
            /usr/local/bin/bridge-crackle-sentry.sh /usr/local/bin/flight-recorder.sh \
            /usr/local/bin/flight-recorder.py /usr/local/bin/bridge-feeder-net.sh \
+           /etc/systemd/journald.conf.d/no-kmsg.conf \
            /usr/local/bin/wifi-guardian.sh /usr/lib/os-release /etc/default/bridge-agent \
            /etc/netbridge/control-url /etc/bridge/control-url; do
     "$DEBUGFS" -R "cat $f" "$ROOTDEV" >"$CAT/$(basename "$f")" 2>/dev/null
@@ -126,11 +127,14 @@ grep -q "dwc2" "$MNT/config.txt" 2>/dev/null && ok "dwc2 overlay enabled (USB ga
   || no "no dwc2 overlay — it cannot be a USB device"
 grep -q "modules-load=dwc2" "$MNT/cmdline.txt" 2>/dev/null && ok "dwc2 loads at boot" \
   || warn "dwc2 not in modules-load — relies on the overlay alone"
-# The LAST gpu_mem line wins. At 16 the firmware boots start4cd.elf with the codec blocks off,
-# /dev/video10 never appears, and the presenter's H.264 is decoded on the CPU (~52% of a core).
+# The LAST gpu_mem line wins. The feeder decodes in software (hardware path measured worse live on
+# 2026-09-22), so the minimum is right; anything else is an unexplained change.
 GPU=$(grep -E '^gpu_mem=' "$MNT/config.txt" 2>/dev/null | tail -1 | cut -d= -f2)
-[ "${GPU:-0}" -ge 64 ] 2>/dev/null && ok "gpu_mem=$GPU — hardware H.264 decoder available" \
-  || no "gpu_mem=${GPU:-unset} — hardware H.264 decoder OFF, video decodes on the CPU"
+[ "${GPU:-0}" = 16 ] && ok "gpu_mem=16 (software video decoder; RAM left to the system)" \
+  || no "gpu_mem=${GPU:-unset} — expected 16"
+grep -q "ReadKMsg=no" "$CAT/no-kmsg.conf" 2>/dev/null \
+  && ok "journald does not ingest kernel messages (the -61 storm cost 30-37% of a core)" \
+  || no "journald ingests kernel messages — the USB -61 storm costs a third of a core"
 
 sec "The root filesystem is readable"
 if [ $have_root -eq 1 ] && [ -s "$IDX" ]; then
@@ -229,8 +233,12 @@ has flight-recorder.py && grepf flight-recorder.sh 'exec /usr/bin/python3 /usr/l
 grepf bridge-uvcd.sh '^  > >\(exec grep --line-buffered -v' \
   && ok "camera EAGAIN flood filtered on stdout (where libuvcgadget prints it)" \
   || no "camera EAGAIN flood not filtered on stdout — journald floods again"
-grepf bridge-feeder-net.sh 'v4l2h264dec' && ok "video feeder uses the hardware decoder when present" \
-  || no "video feeder is software-decode only"
+grepf bridge-feeder-net.sh 'avdec_h264' && ! grep -vE '^[[:space:]]*#' "$CAT/bridge-feeder-net.sh" | grep -q 'v4l2h264dec' \
+  && ok "video feeder decodes in software (the hardware path measured worse live)" \
+  || no "video feeder uses the hardware decoder path (74% vs 51% of a core live)"
+grepf bridge-feeder-net.sh 'latency=\$VLAT' && grepf bridge-feeder-net.sh '"\$VLAT" -gt 100\ ' \
+  && ok "video jitter buffer capped at 100 ms (profile stays WAN)" \
+  || no "video jitter buffer follows the 300 ms WAN profile — ~200 ms extra lag"
 grepf bridge-agent.py 'LOCAL_STATUS = "http://127.0.0.1:8080/api/status"' \
   && ok "fleet agent reuses the running status page (no cold rebuild every 15 s)" \
   || no "fleet agent rebuilds the full status in a fresh process every 15 s"
