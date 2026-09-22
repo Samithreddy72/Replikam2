@@ -1316,14 +1316,17 @@ class MeshManager:
             return {"via": "none",
                     "error": "the control plane would not issue a mesh key for this bridge"}
 
-        argv = [mesh_bin, "--authkey", key, "--bridge", tsip,
+        # The key goes in the environment, not argv: argv is readable by every process on
+        # the machine (ps), and this key admits a node to the tailnet.
+        argv = [mesh_bin, "--bridge", tsip,
                 "--hostname", _mesh_hostname(rec, st),
                 "--forward", "%d,%d" % (RTP_VIDEO, RTP_VOICE), "--return", "5004",
                 "--control", "%d:8080" % self.CTRL_LOCAL]
         if login:
             argv += ["--login-server", login]
         lf = open(os.path.join(str(_logdir()), "netbridge-source-mesh.log"), "w")
-        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=lf, text=True)
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=lf, text=True,
+                             env=dict(os.environ, NB_MESH_AUTHKEY=key))
         # read the one-line handshake (helper prints it only once the proxies are wired)
         line = ""
         try:

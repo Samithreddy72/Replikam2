@@ -71,7 +71,14 @@ func main() {
 	control := flag.String("login-server", "", "control URL (blank = tailscale.com)")
 	flag.Parse()
 
-	if *authKey == "" || *bridge == "" {
+	// The key must not ride on the command line: any process on the machine can read argv
+	// (ps). The app hands it over in NB_MESH_AUTHKEY; --authkey stays for manual runs.
+	key := *authKey
+	if key == "" {
+		key = os.Getenv("NB_MESH_AUTHKEY")
+	}
+	os.Unsetenv("NB_MESH_AUTHKEY")
+	if key == "" || *bridge == "" {
 		fatal("authkey and bridge are required")
 	}
 
@@ -87,7 +94,7 @@ func main() {
 
 	s := &tsnet.Server{
 		Hostname:   *hostname,
-		AuthKey:    *authKey,
+		AuthKey:    key,
 		Dir:        dir,
 		Ephemeral:  true,     // node auto-removes on disconnect
 		ControlURL: *control, // "" => tailscale.com default
