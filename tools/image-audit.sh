@@ -96,7 +96,7 @@ if [ $have_root -eq 1 ]; then
            /usr/local/bin/bridge-status.sh /usr/local/bin/bridge-diagnose.sh \
            /usr/local/bin/bridge-crackle-sentry.sh /usr/local/bin/flight-recorder.sh \
            /usr/local/bin/flight-recorder.py /usr/local/bin/bridge-feeder-net.sh \
-           /usr/local/bin/render-idle-frame.py \
+           /usr/local/bin/render-idle-frame.py /usr/local/bin/bridge-deploy-script.sh \
            /etc/systemd/journald.conf.d/no-kmsg.conf \
            /usr/local/bin/wifi-guardian.sh /usr/lib/os-release /etc/default/bridge-agent \
            /etc/netbridge/control-url /etc/bridge/control-url; do
@@ -269,6 +269,14 @@ fi
 grep -vE '^[[:space:]]*#' "$CAT/jitter-sentry.sh" 2>/dev/null | grep -q 'switch_profile lan' \
   && no "jitter-sentry can still switch the bridge to lan (owner's rule: never)" \
   || ok "jitter-sentry never switches to lan (and so never restarts media for it)"
+# 2026-09-24 working configuration: the camera service counts USB misses (the referee for video
+# tuning), and signed deploys flush to the card before restarting (a reset there left 0-byte files).
+grepf bridge-uvcd.sh 'netbridge-usb-video.txt' && grepf bridge-uvcd.sh 'USB_IRQ_CPUS="2"' \
+  && ok "camera service: USB-miss counter built in, USB interrupt on CPU 2" \
+  || no "camera service lacks the USB-miss counter or the CPU 2 interrupt setting"
+awk '/^install -m 0644 "\$STAGE\/\$NAME.sig"/{i=NR} /^sync$/{if(i&&!s)s=NR} /systemctl restart "\$s"/{if(i&&!r)r=NR} END{exit !(i && s && r && s>i && s<r)}' "$CAT/bridge-deploy-script.sh" 2>/dev/null \
+  && ok "signed deploys flush to the card before restarting the service" \
+  || no "deploy script restarts before flushing — a reset can leave 0-byte overrides"
 # 2026-09-22 CPU sweep: each of these was measured costing CPU on a live bridge.
 has flight-recorder.py && grepf flight-recorder.sh 'exec /usr/bin/python3 /usr/local/bin/flight-recorder.py' \
   && ok "flight recorder is the no-launch Python loop" \

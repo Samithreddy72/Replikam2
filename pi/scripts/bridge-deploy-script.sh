@@ -80,6 +80,7 @@ case "${1:-}" in
         log "$base FAILED signature re-verify — leaving it quarantined"; continue
       fi
       install -m 0755 "$f" "$DIR/$base" && cp -f "$sig" "$DIR/$base.sig" || continue
+      sync                                        # on the card before the restart (see deploy path)
       rm -f "$DIR/.state/$base.starts"
       rm -f "$f" "$sig"
       log "restored $base from quarantine (signature re-verified)"
@@ -134,6 +135,11 @@ install -m 0755 "$STAGE/$NAME"     "$DIR/$NAME"
 install -m 0644 "$STAGE/$NAME.sig" "$DIR/$NAME.sig"
 rm -f "$DIR/.state/$NAME.starts" "$DIR/.quarantined.json"   # fresh trial for the new version
 log "installed $DIR/$NAME"
+# Flush to the card BEFORE restarting anything. On 2026-09-24 two camera-service deploys were
+# followed by a reset seconds later (restart with the meeting laptop attached): both files were
+# still only in memory and came back as 0-byte files. bridge-run.sh then refused them (bad
+# signature) and ran the built-in script - safe, but the deploy was silently lost.
+sync
 
 s="$(svc_for "$NAME")"
 if [ -n "$s" ]; then
