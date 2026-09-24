@@ -9,8 +9,9 @@ thing that turns J3's six steps into software:
   3 pick bridge/camera/mic  -> real dropdowns, remembered BY NAME (ledger E4), never by
                                device index: avfoundation renumbers when you plug in a
                                headset, so a saved index silently streams the wrong camera
-  4 unlock with the PIN     -> verified ON THE DEVICE (/api/unlock). Seeing a bridge in the
-                               list is not permission to stream to it
+  4 the PIN, every go-live  -> verified ON THE DEVICE (/api/unlock), which answers with a
+                               one-session ticket kept in this process's memory only. Seeing a
+                               bridge in the list is not permission to stream to it
   5 go live, four checks    -> spawns the same ffmpeg legs as mac-stream.sh and polls the
                                device's /api/checks, which measures real activity
   6 hear the room back      -> registers THIS machine as the return-audio peer through the
@@ -260,7 +261,11 @@ def api(method, url, token=None, body=None, timeout=10):
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
         try:
-            return {"_error": json.loads(e.read().decode()).get("detail", str(e)), "_code": e.code}
+            j = json.loads(e.read().decode())
+            out = {"_error": j.get("detail", str(e)), "_code": e.code}
+            if isinstance(j, dict) and j.get("reason"):
+                out["_reason"] = j["reason"]        # e.g. a bridge saying WHY it is locked
+            return out
         except Exception:
             return {"_error": str(e), "_code": e.code}
     except Exception as e:
@@ -1430,6 +1435,183 @@ MESH = MeshManager()
 _BRIDGES = {"list": [], "ts": 0.0}
 
 
+# ---------------------------------------------------------------- the bridge PIN (2026-09-25)
+#
+# The owner went live without typing a PIN. Go live never asked for one, and the bridge took
+# video from anyone on the mesh. Bridges from the 2026-09-25 image require a PIN session for
+# every go-live: a correct PIN returns a TICKET, set-peer needs it, Stop ends it, and the
+# bridge's media gate admits video and voice only from the presenter who holds the session.
+#
+# The ticket lives HERE, in this process's memory, and nowhere else: never on disk, never in
+# state.json, never sent to the page. It is dropped on Stop, on sign-out, when the bridge says
+# it is no longer valid, and when the app exits. An internal reconnect (a media leg dropped, the
+# mesh helper was rebuilt) keeps it: that is the same session, not a new go-live.
+PIN_PROTOCOL = 2
+
+PIN_MESSAGES = {
+    "wrong": "Wrong PIN — {left} more {tries} before the bridge locks for an hour.",
+    "locked_out_now": "Wrong PIN. That was the third wrong try, so the bridge is now locked for "
+                      "1 hour. Your admin can clear the lockout from the fleet.",
+    "locked_out": "This bridge is locked after 3 wrong PINs. Try again in {mins} min, or ask your "
+                  "admin to clear the lockout from the fleet.",
+    "no_pin": "This bridge has no PIN yet, so nobody can go live on it. Ask your admin to set one "
+              "in the fleet (the bridge → Actions → Set PIN).",
+    "bad_format": "The PIN is 4 to 8 digits.",
+    "old_bridge": "This bridge runs older software that cannot check a PIN, so NetBridge will not "
+                  "go live on it. Ask your admin to update the bridge, or use the previous "
+                  "NetBridge version (Older versions folder) with this bridge.",
+}
+# Why the bridge refused a ticket (its 401 on set-peer) or reported itself locked mid-session.
+SESSION_LOST = {
+    "no_session": "The bridge is locked. Enter the PIN to go live.",
+    "locked": "The bridge locked itself. Enter the PIN to continue.",
+    "stop": "The session was ended on the bridge. Enter the PIN to go live again.",
+    "idle": "The bridge locked itself after 10 minutes without video. Enter the PIN to continue.",
+    "max_age": "The session reached its 12-hour limit. Enter the PIN to continue.",
+    "expired": "The session expired on the bridge. Enter the PIN to continue.",
+    "admin": "An admin locked this bridge. Enter the PIN to go live again.",
+    "superseded": "Someone else entered the PIN on this bridge, so your session ended.",
+    "invalid": "Your session is no longer valid on the bridge. Enter the PIN again.",
+    "reboot": "The bridge restarted, so it locked itself. Enter the PIN to reconnect.",
+}
+
+
+class PinSession:
+    """The go-live ticket for ONE bridge, in memory only. Never logged, never persisted."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._host = self._ticket = None
+        self._since = 0.0
+        self.lost = None        # why the bridge ended our session, for the page
+
+    def set(self, host, ticket):
+        with self._lock:
+            self._host, self._ticket, self._since, self.lost = host, ticket, time.time(), None
+
+    def ticket(self, host=None):
+        with self._lock:
+            if self._ticket and (host is None or host == self._host):
+                return self._ticket
+            return None
+
+    def host(self):
+        with self._lock:
+            return self._host
+
+    def clear(self, lost=None):
+        with self._lock:
+            self._host = self._ticket = None
+            self._since = 0.0
+            self.lost = lost
+
+    def snapshot(self):
+        with self._lock:
+            return {"unlocked": bool(self._ticket), "host": self._host,
+                    "since": int(self._since) or None, "lost": self.lost,
+                    "lost_message": SESSION_LOST.get(self.lost) if self.lost else None}
+
+
+PINS = PinSession()
+
+
+def _pin_message(reason, j=None):
+    j = j or {}
+    left = j.get("attempts_left")
+    return PIN_MESSAGES.get(reason, j.get("message") or "The bridge refused the PIN.").format(
+        left=left if left is not None else "a few", tries="try" if left == 1 else "tries",
+        mins=max(1, int(j.get("retry_in") or 3600) // 60))
+
+
+def _bridge_pin_protocol(route):
+    """(protocol, lock-state) - 2 = tickets (this image), 1 = the old gate, None = no answer.
+
+    Asked BEFORE unlocking, every time: on an old bridge /api/unlock restarted ALL media, the
+    operation that rebooted under-powered bridges, and it enforced nothing anyway."""
+    r = api("GET", route["base"] + "/api/lock-state", timeout=8)
+    if not isinstance(r, dict) or r.get("_error"):
+        return None, r
+    try:
+        return int(r.get("protocol") or 1), r
+    except (TypeError, ValueError):
+        return 1, r
+
+
+def _unlock_bridge(host, st, pin):
+    """Verify the PIN ON THE BRIDGE and keep its ticket. -> dict for the page (never the ticket).
+
+    SELF-HEAL, kept from the old unlock: the mesh helper is often younger than the path it
+    needs, so TRANSPORT failures are retried and the helper rebuilt once. A real verdict from
+    the bridge (wrong PIN, locked out, no PIN set) returns at once - a wrong PIN can never burn
+    the three tries the bridge allows."""
+    if not re.fullmatch(r"[0-9]{4,8}", pin or ""):
+        return {"ok": False, "reason": "bad_format", "need_pin": True,
+                "message": PIN_MESSAGES["bad_format"]}
+    last = None
+    for attempt in range(3):
+        route = bridge_route(host, st)
+        if route.get("via") == "none":
+            return {"ok": False, "reason": "no_route",
+                    "message": route.get("error", "no route to the bridge")}
+        proto, last = _bridge_pin_protocol(route)
+        if proto is not None:
+            if proto < PIN_PROTOCOL:
+                return {"ok": False, "reason": "old_bridge", "message": PIN_MESSAGES["old_bridge"]}
+            last = api("POST", route["base"] + "/api/unlock", body={"pin": pin}, timeout=15)
+            if not last.get("_error"):
+                break
+        if attempt == 0:
+            MESH.stop()                             # rebuild a helper that cannot route
+            _kill_orphan_mesh()
+        time.sleep(2)
+    else:
+        reachable = _bridge_reachable(host, st)
+        return {"ok": False, "reason": "unreachable", "attempts": 3,
+                "message": ("the bridge is not answering — check it has power and is online"
+                            if not reachable else
+                            "the bridge is up but not reachable over the mesh yet; it may still "
+                            "be starting up — wait a few seconds and try again")}
+    if last.get("ok") and last.get("ticket"):
+        PINS.set(host, last["ticket"])
+        return {"ok": True, "reason": "ok", "unlocked": True,
+                "message": "unlocked — this session ends when you press End session",
+                "idle_timeout": last.get("idle_timeout"), "expires_in": last.get("expires_in")}
+    reason = last.get("reason") or "error"
+    return {"ok": False, "reason": reason, "need_pin": reason in ("wrong", "bad_format"),
+            "attempts_left": last.get("attempts_left"), "retry_in": last.get("retry_in"),
+            "message": _pin_message(reason, last)}
+
+
+def _end_bridge_session():
+    """Stop: end the bridge's PIN session while the mesh helper can still reach it. Best effort -
+    if it cannot be reached, the bridge relocks by itself after 10 min without video."""
+    ticket = PINS.ticket()
+    port = getattr(MESH, "control_port", None)
+    ended = False
+    if ticket and port and MESH.proc and MESH.proc.poll() is None:
+        r = api("POST", "http://127.0.0.1:%d/api/end-session" % port, body={"ticket": ticket}, timeout=5)
+        ended = bool(isinstance(r, dict) and r.get("ended"))
+    PINS.clear()
+    return ended
+
+
+def _fleet_bridges(st):
+    """The org's bridges for the dropdown. /auth/bridges (fleet from 2026-09-25) answers any
+    signed-in user; older fleets only have /admin/devices, which the new fleet reserves for
+    admins - so try the new one first and fall back only when it does not exist."""
+    base = st["control_url"].rstrip("/")
+    r = api("GET", base + "/auth/bridges", token=st.get("token"))
+    if isinstance(r, dict) and r.get("_code") in (404, 405):
+        r = api("GET", base + "/admin/devices", token=st.get("token"))
+        if isinstance(r, list):
+            r = [{"id": d.get("id"), "number": d.get("number"), "label": d.get("label"),
+                  "name": d.get("name") or d.get("pairing_code"), "pairing_code": d.get("pairing_code"),
+                  "online": d.get("online"), "tailscale_ip": d.get("tailscale_ip"),
+                  "ip": (d.get("latest") or {}).get("ip")}
+                 for d in r if d.get("claimed", True)]
+    return r
+
+
 # ---------------------------------------------------------------- media-leg watchdog
 #
 # The helper is asked for three legs (--forward 5000,5002 --return 5004) and answers a
@@ -1912,10 +2094,20 @@ class BridgeWatch:
             try:
                 req = urllib.request.Request(
                     base + "/api/set-peer",
-                    data=json.dumps({"ip": me, "port": SESSION.return_port or 5004}).encode(),
+                    data=json.dumps({"ip": me, "port": SESSION.return_port or 5004,
+                                     "ticket": PINS.ticket() or ""}).encode(),
                     headers={"Content-Type": "application/json"}, method="POST")
                 with urllib.request.urlopen(req, timeout=10) as r:
                     res = json.loads(r.read().decode("utf-8", "replace"))
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    try:
+                        reason = json.loads(e.read().decode()).get("reason") or "locked"
+                    except Exception:
+                        reason = "locked"
+                    PINS.clear(lost=reason)
+                    return SESSION_LOST.get(reason, SESSION_LOST["locked"])
+                return "room audio was not coming back -> could not re-point the bridge (%s)" % e
             except Exception as e:
                 return "room audio was not coming back -> could not re-point the bridge (%s)" % e
 
@@ -1958,6 +2150,18 @@ class BridgeWatch:
 
         if not checks:
             # Say so, but do not act. The stream may be perfectly fine.
+            return
+
+        # The bridge ended our PIN session (10 min without video, 12 h, an admin lock, a reboot,
+        # someone else's PIN). It now refuses our media, so every "repair" would be noise: drop
+        # the ticket, say why, and let the page ask for the PIN.
+        pin = checks.get("pin") or {}
+        if pin.get("locked") and int(pin.get("protocol") or 1) >= PIN_PROTOCOL:
+            reason = pin.get("last_end") or "locked"
+            if PINS.ticket():
+                PINS.clear(lost=reason)
+            with self.lock:
+                self.last = SESSION_LOST.get(reason, SESSION_LOST["locked"])
             return
 
         # Publish measurements during startup; only corrective actions need grace.
@@ -2104,7 +2308,7 @@ def _bridge_rec(host, st):
     to a bare {ip:host} so a hand-typed address still works."""
     lst = _BRIDGES["list"]
     if not lst and st.get("token") and st.get("control_url"):
-        r = api("GET", st["control_url"].rstrip("/") + "/admin/devices", token=st.get("token"))
+        r = _fleet_bridges(st)
         if isinstance(r, list):
             lst = _BRIDGES["list"] = r
     for d in lst:
@@ -2197,6 +2401,7 @@ class Handler(BaseHTTPRequestHandler):
                 "voice_backend": getattr(SESSION, "voice_backend", None),
                 "live": SESSION.live,
                 "wanted": SESSION.wanted,
+                "pin": PINS.snapshot(),      # never the ticket itself
                 "voice_muted": SESSION.voice_muted and not SESSION.voice_sending(),
                 "legs": LEGS.snapshot(),
                 # Reported SEPARATELY from legs, because a dead helper used to make the legs
@@ -2216,15 +2421,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/bridges":
             if not st.get("token"):
                 return self._send({"_error": "not signed in"}, 401)
-            r = api("GET", st["control_url"].rstrip("/") + "/admin/devices", token=st["token"])
+            r = _fleet_bridges(st)
             if isinstance(r, list):
                 _BRIDGES["list"] = r     # cache for mesh routing (tailscale_ip per bridge)
             if isinstance(r, dict) and r.get("_error"):
-                return self._send(r, 502)
+                return self._send(r, 401 if r.get("_code") == 401 else 502)
             # presenters see their org's bridges; never any secret
-            out = [{"id": d.get("id"), "name": d.get("name") or d.get("pairing_code"),
+            out = [{"id": d.get("id"), "number": d.get("number"), "label": d.get("label"),
+                    "name": d.get("name") or d.get("pairing_code"),
                     "pairing_code": d.get("pairing_code"), "online": d.get("online"),
-                    "ip": (d.get("latest") or {}).get("ip"),
+                    "ip": d.get("ip") or (d.get("latest") or {}).get("ip"),
                     "tailscale_ip": d.get("tailscale_ip")} for d in (r or [])]
             # The fleet's "online" is a HEARTBEAT age, and the heartbeat travels a completely
             # different path (device -> control plane over the internet) from the one that
@@ -2369,6 +2575,7 @@ class Handler(BaseHTTPRequestHandler):
             for k in ("token", "email"):
                 st.pop(k, None)
             save_state(st)
+            _end_bridge_session()
             MESH.stop()
             return self._send({"ok": True})
 
@@ -2380,46 +2587,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send({"ok": True})
 
         if self.path == "/api/unlock":
+            # Studio unlocks first and then calls /api/golive without a PIN; the browser page
+            # sends the PIN WITH go-live. Either way the PIN is checked on the bridge and only a
+            # ticket comes back - kept in memory here, never handed to the page.
             host, pin = b.get("host"), str(b.get("pin") or "")
             if not host or not pin:
                 return self._send({"_error": "host and pin required"}, 400)
-            # Verified ON THE DEVICE, reached over the mesh. The control plane is not asked
-            # and cannot override it.
-            #
-            # SELF-HEAL. "unlock timed out" was by far the most common way a presenter got
-            # stuck, and it was almost never a real failure: the mesh helper is usually just
-            # YOUNGER THAN THE PATH IT NEEDS. If the helper joins while the bridge is still
-            # booting (or briefly offline), tsnet has no route to that peer yet and the first
-            # dial hangs — then the route comes up seconds later. The app used to make one
-            # 20 s attempt and give up, so a presenter saw "timed out" against a bridge that
-            # was fine and would have answered on the very next try.
-            #
-            # So: retry, and on the first failure rebuild the helper (that covers the other
-            # case — a helper left over from a previous session that will never route). A
-            # real answer from the device (wrong PIN / lockout) returns immediately; only
-            # transport failures are retried, so a wrong PIN can never burn 3 of the 3
-            # attempts the device allows before locking out.
-            last = None
-            for attempt in range(3):
-                route = bridge_route(host, st)
-                if route.get("via") == "none":
-                    return self._send({"_error": route.get("error", "no route to the bridge")}, 502)
-                last = api("POST", route["base"] + "/api/unlock",
-                           body={"pin": pin}, timeout=12)
-                if not last.get("_error"):
-                    return self._send(last)                 # unlocked, or a real PIN verdict
-                if attempt == 0:
-                    MESH.stop()                             # rebuild a helper that cannot route
-                    _kill_orphan_mesh()
-                time.sleep(2)
-            # Still failing: say what is actually wrong instead of "timed out".
-            reachable = _bridge_reachable(host, st)
-            detail = ("the bridge is not answering — check it has power and is online"
-                      if not reachable else
-                      "the bridge is up but not reachable over the mesh yet; it may still be "
-                      "starting up — wait a few seconds and try again")
-            return self._send({"_error": detail, "attempts": 3,
-                               "raw": last.get("_error") if last else None}, 502)
+            res = _unlock_bridge(host, st, pin)
+            if res.get("ok") or res.get("reason") in PIN_MESSAGES:
+                return self._send(res)               # unlocked, or a real PIN verdict
+            return self._send(dict(res, _error=res.get("message")), 502)
 
         if self.path == "/api/golive":
             host = b.get("host")
@@ -2431,6 +2608,24 @@ class Handler(BaseHTTPRequestHandler):
             # reason at the exact moment they were trying to fix something. Answer the
             # request truthfully instead of doing damage.
             if SESSION.live and SESSION.bridge:
+                if b.get("pin"):
+                    # The bridge relocked mid-session (10 min without video, an admin lock,
+                    # someone else's PIN) while this app kept its media running. Re-open the
+                    # session in place: the same mesh helper, so the gate admits us again the
+                    # moment the PIN is accepted - no media restart, no new helper.
+                    res = _unlock_bridge(host, st, str(b.get("pin")))
+                    if not res.get("ok"):
+                        return self._send(dict(res, _error=res.get("message")),
+                                          401 if res.get("reason") in PIN_MESSAGES else 502)
+                    route = bridge_route(host, st)
+                    if route.get("via") != "none" and route.get("return_peer"):
+                        api("POST", route["base"] + "/api/set-peer",
+                            body={"ip": route["return_peer"], "port": SESSION.return_port or 5004,
+                                  "ticket": PINS.ticket(host)}, timeout=15)
+                    BRIDGEWATCH.request_refresh()
+                    return self._send({"ok": True, "already_live": True, "resumed": True,
+                                       "camera": st.get("camera_name"), "mic": st.get("mic_name"),
+                                       "note": "PIN accepted — the bridge is taking your video again"})
                 return self._send({"ok": True, "already_live": True,
                                    "camera": st.get("camera_name"), "mic": st.get("mic_name"),
                                    "note": "already live — nothing to do"})
@@ -2442,6 +2637,19 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 aidx, aname, _ = resolve_by_name(devs.get("audio", []), b.get("mic_name"), "0")
             port = int(b.get("return_port") or 5004)
+            # THE PIN. A go-live from the page carries it; Studio unlocked a moment ago; an
+            # internal reconnect (reconnect=true) reuses this session's ticket. Nothing else
+            # gets past this point - a bridge in the list is not permission to stream to it.
+            pin = str(b.get("pin") or "")
+            if pin:
+                res = _unlock_bridge(host, st, pin)
+                if not res.get("ok"):
+                    return self._send(dict(res, _error=res.get("message")),
+                                      401 if res.get("reason") in PIN_MESSAGES else 502)
+            ticket = PINS.ticket(host)
+            if not ticket:
+                return self._send({"_error": SESSION_LOST.get(PINS.lost) or "Enter the bridge PIN to go live.",
+                                   "need_pin": True, "reason": PINS.lost or "need_pin"}, 401)
             # Route over the mesh when the bridge has a tailnet address. Media then targets
             # 127.0.0.1 (the helper's local proxies) and the bridge is told to return audio
             # to OUR mesh IP - so no 100.x address is ever handled by the app itself.
@@ -2453,7 +2661,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send({"_error": route.get("error", "no route to the bridge")}, 502)
             me = route["return_peer"]
             peer = api("POST", route["base"] + "/api/set-peer",
-                       body={"ip": me, "port": port}, timeout=15) if me else {"_error": "no route"}
+                       body={"ip": me, "port": port, "ticket": ticket}, timeout=15) if me else {"_error": "no route"}
+            if isinstance(peer, dict) and peer.get("_code") == 401:
+                # The bridge no longer honours this ticket (it rebooted, relocked after 10 min
+                # without video, an admin locked it, or someone else entered the PIN). Do not
+                # start media into a closed gate: ask for the PIN.
+                reason = peer.get("_reason") or "locked"
+                PINS.clear(lost=reason)
+                return self._send({"_error": SESSION_LOST.get(reason, SESSION_LOST["locked"]),
+                                   "need_pin": True, "reason": reason}, 401)
             SESSION.start(route["media_host"], vidx, aidx, return_port=port, mic_name=aname)
             st.update({"bridge_host": host, "camera_name": vname, "mic_name": aname})
             save_state(st)
@@ -2470,9 +2686,14 @@ class Handler(BaseHTTPRequestHandler):
                                }.get(player, player)})
 
         if self.path == "/api/stop":
+            # keep_session=true is the page reconnecting on its own (a media leg dropped, the
+            # bridge rebooted): same session, so the ticket stays. A presenter's Stop ends the
+            # bridge's session (its gate closes at once) and forgets the ticket.
+            keep = bool(b.get("keep_session")) and bool(PINS.ticket())
+            ended = False if keep else _end_bridge_session()
             SESSION.stop()
             MESH.stop()
-            return self._send({"ok": True})
+            return self._send({"ok": True, "session_kept": keep, "bridge_session_ended": ended})
 
         if self.path == "/api/return-tuning":
             # Live return-audio tuning. Both documented artifacts are fixed from here:
@@ -2576,9 +2797,21 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
    background:#fff;border-radius:50%;transition:.15s}
  .sw input:checked + .sl{background:var(--ok)}
  .sw input:checked + .sl:before{transform:translateX(16px)}
+ .hint{font-size:12px;color:var(--mut);margin:8px 0 0}
+ .modal{position:fixed;inset:0;background:rgba(8,14,12,.5);display:flex;align-items:center;
+   justify-content:center;padding:16px;z-index:20}
+ .modal[hidden]{display:none}
+ .sheet{background:var(--cd);border:1px solid var(--ln);border-radius:14px;padding:18px 18px 16px;
+   width:100%;max-width:360px;box-shadow:0 18px 50px rgba(0,0,0,.28)}
+ .sheet h2{font-size:17px;margin:0 0 3px;letter-spacing:-.01em}
+ .sheet .sub{margin:0 0 14px}
+ .sheet input{font-size:20px;letter-spacing:.3em;text-align:center}
+ .pinmsg{font-size:12.5px;min-height:17px;margin:-3px 0 10px;color:var(--red)}
+ .btns{display:flex;gap:10px}
+ .btns button{flex:1}
 </style>
 <div class=w>
-<h1>NetBridge Source</h1><p class=sub>Sign in, unlock your bridge, go live.</p>
+<h1>NetBridge Source</h1><p class=sub>Sign in, pick your bridge, go live with its PIN.</p>
 <div class=who><span id=who>not signed in</span>
   <span><button id=signout onclick=signout() style="display:none;width:auto;padding:3px 10px;font-size:11.5px;background:var(--ink);color:var(--pa)">sign out</button>
   <span id=livepill></span></span></div>
@@ -2597,11 +2830,21 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
   <label>Bridge</label><select id=bridge></select>
   <label>Camera</label><select id=cam></select>
   <label>Microphone</label><select id=mic></select>
-  <label>Bridge PIN</label><input id=pin placeholder="6-digit PIN from your admin" inputmode=numeric>
-  <button class=sec onclick=unlock()>Unlock bridge</button>
-  <div style=height:11px></div>
   <button id=go onclick=golive()>Go live</button>
+  <p class=hint>You enter the bridge PIN every time you go live.</p>
   <div class=msg id=m2></div>
+</div>
+
+<div class=modal id=pinbox hidden>
+ <div class=sheet role=dialog aria-modal=true aria-labelledby=pinTitle>
+  <h2 id=pinTitle>Bridge PIN</h2>
+  <p class=sub id=pinWhy>Every go-live needs the bridge's PIN.</p>
+  <input id=pin type=password inputmode=numeric autocomplete=off maxlength=8 placeholder="4–8 digits"
+    aria-describedby=pinMsg>
+  <div class=pinmsg id=pinMsg role=alert></div>
+  <div class=btns><button class=sec type=button onclick="pinSnooze=Date.now();pinClose()">Cancel</button>
+   <button id=pinGo type=button onclick=pinSubmit()>Go live</button></div>
+ </div>
 </div>
 
 <div class=card id=health style=display:none>
@@ -2695,8 +2938,8 @@ async function load(s){
     }
     $('m2').textContent=b._error; return;
   }
-  BR=b; $('bridge').innerHTML=b.map(x=>`<option value="${x.id}">${x.name} · ${x.pairing_code}`+
-    `${x.online?'':' (offline)'}</option>`).join('');
+  BR=b; $('bridge').innerHTML=b.map(x=>`<option value="${x.id}">${x.label?x.label+' · ':''}${x.name}`+
+    `${x.label?'':' · '+x.pairing_code}${x.online?'':' (offline)'}</option>`).join('');
   if(s.last_bridge)$('bridge').value=s.last_bridge;
   const d=await j('/api/devices');
   $('cam').innerHTML=(d.video||[]).map(x=>`<option>${x.name}</option>`).join('');
@@ -2706,24 +2949,49 @@ async function load(s){
 }
 function remember(){fetch('/api/remember',{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify({bridge_id:$('bridge').value,camera_name:$('cam').value,mic_name:$('mic').value})})}
-async function unlock(){const h=host(); if(!h){$('m2').textContent='bridge has no reachable address';return}
-  $('m2').textContent='unlocking…';
-  const r=await j('/api/unlock',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({host:h,pin:$('pin').value})});
-  $('m2').textContent=r._error||r.detail||r.result||JSON.stringify(r)}
-async function golive(){
-  if($('go').textContent==='End session'){await j('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'}});setLive(false);
-    $('m2').textContent='session ended';return}
-  const h=host(); if(!h){$('m2').textContent='bridge has no reachable address';return}
-  $('m2').textContent='starting…';
+// ---- the PIN, every go-live ------------------------------------------------------------
+// The PIN is typed here, sent once to this app (127.0.0.1 only), checked ON THE BRIDGE, and the
+// field is cleared at once. What the bridge returns (a one-session ticket) stays inside the app
+// process and never reaches this page. Stop ends the session on the bridge.
+let liveHost='', pinSnooze=0;
+const FATAL_PIN=['no_pin','old_bridge','locked_out','locked_out_now'];
+function openPin(why,err){
+  $('pinWhy').textContent=why||"Every go-live needs the bridge's PIN.";
+  $('pinMsg').textContent=err||''; $('pin').value=''; $('pinbox').hidden=false;
+  setTimeout(()=>$('pin').focus(),0)}
+function pinClose(){$('pinbox').hidden=true;$('pin').value='';$('pinMsg').textContent=''}
+async function pinSubmit(){
+  const pin=$('pin').value.trim(); $('pin').value='';
+  if(!/^[0-9]{4,8}$/.test(pin)){$('pinMsg').textContent='The PIN is 4 to 8 digits.';$('pin').focus();return}
+  $('pinGo').disabled=true; $('pinMsg').textContent='checking the PIN on the bridge…';
+  try{ await startSession({pin}); } finally { $('pinGo').disabled=false; }}
+$('pin').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();pinSubmit()}
+  if(e.key==='Escape'){pinSnooze=Date.now();pinClose()}});
+async function startSession(extra){
+  const h=liveHost||host(); if(!h){pinClose();$('m2').textContent='bridge has no reachable address';return false}
+  if(!(extra&&extra.pin))$('m2').textContent='reconnecting…';
   const r=await j('/api/golive',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({host:h,camera_name:$('cam').value,mic_name:$('mic').value})});
-  if(r._error){$('m2').textContent=r._error;return}
+    body:JSON.stringify(Object.assign({host:h,camera_name:$('cam').value,mic_name:$('mic').value},extra||{}))});
+  if(r._error){
+    if(FATAL_PIN.includes(r.reason)){pinClose();$('m2').textContent=r._error;return false}
+    if(r.reason==='wrong'||r.reason==='bad_format'){openPin($('pinWhy').textContent,r._error);return false}
+    if(r.need_pin){openPin(r._error,'');return false}
+    pinClose(); $('m2').textContent=r._error; return false}
+  pinClose();
+  if(r.resumed){$('m2').textContent=r.note||'PIN accepted';$('ckfix').style.display='none';return true}
+  liveHost=h;
   const warn = r.return_player!=='gstreamer';
   const via = r.via==='mesh' ? 'via secure mesh' : (r.via||'direct');
   $('m2').innerHTML=`live · ${r.camera} · ${r.mic} · <b>${via}</b><br>`+
     `<span style="color:${warn?'var(--red)':'var(--ok)'}">${r.return_note||''}</span>`;
-  setLive(true); poll()}
+  setLive(true); poll(); return true}
+async function golive(){
+  if($('go').textContent==='End session'){
+    await j('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    setLive(false); liveHost='';
+    $('m2').textContent='session ended — the bridge is locked again';return}
+  if(!host()){$('m2').textContent='bridge has no reachable address';return}
+  openPin()}
 // Walkthrough J3 step 5: "If one goes red, the app says what to do in plain words."
 // The device's `detail` is a MEASUREMENT ("usb gadget state: not attached") — true, but it
 // tells a presenter mid-meeting nothing about what to DO. Each red check therefore carries
@@ -2798,9 +3066,12 @@ async function recoverFromReboot(){
   if(rebootRecovering)return; rebootRecovering=true;
   $('m2').textContent='Bridge restarted — reconnecting…';
   try{
-    await j('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'}});
-    setLive(false);                    // golive() branches on the button label
-    await golive();
+    // Same session: keep this app's ticket. A reboot relocks the bridge, so the go-live that
+    // follows gets "enter the PIN" back and the dialog opens with the reason.
+    await j('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({keep_session:true})});
+    setLive(false);
+    await startSession({reconnect:true});
   } finally { rebootRecovering=false; lastBridgeUptime=null; }
 }
 
@@ -2808,16 +3079,25 @@ let legRepairDone=false;
 async function repairLegs(){
   if(legRepairDone)return; legRepairDone=true;
   $('m2').textContent='media path lost — reconnecting…';
-  await j('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'}});
-  // setLive(false) is NOT optional here. golive() branches on the BUTTON's label: while it
-  // still reads "End session" it takes the teardown path, stops again and returns. The first
-  // version of this omitted it, so the repair reliably ENDED the session and printed
-  // "session ended" instead of reconnecting — turning a recoverable blip into a dead call.
+  // keep_session: a dropped media leg is not a Stop - the bridge session (and its ticket) stay.
+  await j('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({keep_session:true})});
+  // setLive(false) before restarting: startSession() reads the button to tell a reconnect
+  // from a PIN re-entry mid-session.
   setLive(false);
-  await golive();
+  await startSession({reconnect:true});
 }
 async function poll(){
-  const h=host(); if(!h)return; const c=await j('/api/checks?host='+h); if(c._error)return;
+  const h=liveHost||host(); if(!h)return; const c=await j('/api/checks?host='+h); if(c._error)return;
+  // The bridge ended our PIN session (10 min without video, an admin lock, someone else's PIN).
+  // It refuses our media now, so every red row below would send the presenter the wrong way.
+  const pin=c.pin||{};
+  if(pin.locked && (pin.protocol||1)>=2){
+    const s=await j('/api/state');
+    const why=(s.pin&&s.pin.lost_message)||'The bridge locked itself. Enter the PIN to continue.';
+    $('ckfix').textContent=why; $('ckfix').style.display='';
+    if($('pinbox').hidden && Date.now()-pinSnooze>60000)openPin(why,'');   // not every 4 s after a Cancel
+    return}
   const map=[['c1','l1','online'],['c2','l2','video_arriving'],['c5','l5','voice_arriving'],
              ['c3','l3','client_sees_camera'],['c4','l4','return_audio']];
   let firstBad=null;
@@ -2973,6 +3253,10 @@ def main():
         if _cleaned["done"]:
             return
         _cleaned["done"] = True
+        try:
+            _end_bridge_session()   # the bridge relocks now, not 10 min from now
+        except Exception:
+            pass
         try:
             SESSION.stop()      # kill the video/voice ffmpeg legs + the return player
         finally:
