@@ -1,35 +1,659 @@
-#!/bin/bash
-# Device-side PIN gate for the bridge media.
-#   bridge-pin set <pin>      store the PIN (hash only) — admin action
-#   bridge-pin unlock <pin>   verify + start media; 3 wrong tries = 1h lockout
-#   bridge-pin lock           stop media, require PIN again
-#   bridge-pin status         no-pin | pin-set | lockout   (human)
-#   bridge-pin state          JSON: {pin_set,locked,lockout,lockout_remaining}
-export PATH=/usr/local/bin:/usr/bin:/bin
-H=/etc/bridge/pin.hash; T=/etc/bridge/pin.tries; L=/etc/bridge/pin.lockout; K=/etc/bridge/pin.locked
-hash(){ echo -n "$1" | sha256sum | cut -d" " -f1; }
-left(){ [ -f $L ] && echo $(( 3600 - ($(date +%s) - $(cat $L 2>/dev/null || echo 0)) )) || echo 0; }
-case "$1" in
-  set)    [ -n "$2" ] || { echo "usage: bridge-pin set <pin>"; exit 1; }
-          mkdir -p /etc/bridge; hash "$2" > $H; chmod 600 $H; rm -f $T $L
-          echo "PIN set (stored as hash only)";;
-  unlock) if [ -f $L ]; then LT=$(left); if [ "$LT" -gt 0 ]; then echo "LOCKED OUT (${LT}s cooldown after 3 wrong tries)"; exit 3; fi; rm -f $L $T; fi
-          [ -f $H ] || { echo "no PIN set — unlocked by default"; rm -f $K; bridge restart >/dev/null 2>&1; exit 0; }
-          if [ "$(hash "$2")" = "$(cat $H)" ]; then
-            rm -f $T $L $K; bridge restart >/dev/null 2>&1
-            echo "UNLOCKED — media started"
-          else
-            N=$(( $(cat $T 2>/dev/null || echo 0) + 1 )); echo $N > $T
-            [ $N -ge 3 ] && { date +%s > $L; rm -f $T; echo "WRONG PIN — bridge locked out for 1 hour"; exit 2; }
-            echo "WRONG PIN (attempt $N/3)"; exit 1
-          fi;;
-  lock)   touch $K; bridge stop >/dev/null 2>&1; echo "LOCKED — media stopped, PIN required";;
-  status) if [ -f $L ] && [ "$(left)" -gt 0 ]; then echo "lockout"; exit 0; fi
-          [ -f $H ] && echo "pin-set" || echo "no-pin";;
-  state)  LT=$(left); [ "$LT" -lt 0 ] && LT=0
-          PS=false; [ -f $H ] && PS=true
-          LK=false; [ -f $K ] && LK=true
-          LO=false; [ -f $L ] && [ "$LT" -gt 0 ] && LO=true
-          printf '{"pin_set":%s,"locked":%s,"lockout":%s,"lockout_remaining":%s}\n' "$PS" "$LK" "$LO" "$LT";;
-  *) grep "^#   " "$0" | sed "s/^#   //";;
-esac
+#!/usr/bin/env python3
+"""bridge-pin - who may go live on this bridge.
+
+WHY IT WAS REWRITTEN (2026-09-25)
+---------------------------------
+The owner went live without typing a PIN. Four holes lined up:
+  1. `bridge-pin unlock` never locked again: once opened, the bridge stayed open for everyone.
+  2. With no PIN set the bridge was open to anyone on the mesh.
+  3. /api/set-peer (the app's Go live) never asked whether the caller had unlocked.
+  4. The video and voice ports took packets from anyone, so going live never needed the PIN at
+     all - the app only asked for it when the bridge happened to say "locked".
+And every PIN attempt was written to the bridge's journal: the PIN travelled on the command line,
+and sudo logs every command line.
+
+HOW IT WORKS NOW
+----------------
+  * Every bridge needs a PIN. With none set, going live is refused and the fleet raises an alert.
+  * A correct PIN opens ONE session and returns a ticket (256 random bits). The ticket lives in
+    /run (gone at reboot) and in the presenter app's memory - nowhere else, never on disk.
+  * The media gate (nftables) lets video (UDP 5000) and voice (UDP 5002) in only from that
+    session's presenter. It is closed at boot and closed whenever no session is open.
+  * This tool never starts, stops or restarts a media service. (The old one ran a full media
+    restart on every unlock - the operation that rebooted under-powered bridges.)
+  * A session ends on Stop in the app (end), after 10 min without video, after 12 h, at reboot,
+    when an admin locks the bridge, or when someone else enters the PIN (the last PIN wins).
+  * Salted PBKDF2-SHA256. An old unsalted hash is upgraded on the first correct entry.
+  * 3 wrong tries = 1 h lockout. An admin clears it from the fleet (clear-lockout).
+  * Secrets are read from stdin ("-"), never taken from the command line.
+
+  bridge-pin set [PIN|-]                          store a new PIN (4-8 digits)
+  bridge-pin unlock [PIN|-] [--peer IP]           verify; on success print the session ticket
+  bridge-pin check [TICKET|-] [--peer IP] [--rebind]   is this the live session's ticket?
+  bridge-pin end [TICKET|-]                       end that session (Stop in the app)
+  bridge-pin lock                                 end any session now (admin)
+  bridge-pin clear-lockout                        forget wrong tries, lift a lockout (admin)
+  bridge-pin sweep                                relock idle/old sessions, keep the gate armed
+  bridge-pin watch                                sweep every 15 s (bridge-pin-sessions.service)
+  bridge-pin gate-init                            at boot: gate closed, no session
+  bridge-pin state                                JSON for the status page, telemetry, fleet
+  bridge-pin status                               one word: no-pin | pin-set | lockout | live
+
+Exit codes - unlock: 0 ok, 1 wrong PIN, 2 wrong PIN and now locked out, 3 locked out,
+5 no PIN set, 6 not 4-8 digits, 4 error. check: 0 ok, 10 no session, 11 not this session's
+ticket, 12 session expired, 13 wrong peer, 4 error.
+"""
+import fcntl, getpass, hashlib, hmac, ipaddress, json, os, re, secrets, subprocess, sys, time
+
+ETC = os.environ.get("BRIDGE_PIN_ETC", "/etc/bridge")        # /data-backed: survives OS updates
+RUN = os.environ.get("BRIDGE_PIN_RUN", "/run/bridge-pin")    # tmpfs: sessions die at reboot
+NFT = os.environ.get("BRIDGE_PIN_NFT", "/usr/sbin/nft")
+HASH = os.path.join(ETC, "pin.hash")
+TRIES = os.path.join(ETC, "pin.tries")
+LOCKOUT = os.path.join(ETC, "pin.lockout")
+LEGACY_FLAG = os.path.join(ETC, "pin.locked")                # the old tool's flag; meaningless now
+SESSION = os.path.join(RUN, "session.json")                  # root only: holds the ticket's hash
+STATE = os.path.join(RUN, "state.json")                      # public: no secrets, read by bridge-web
+LAST_END = os.path.join(RUN, "last-end.json")
+LOCKFILE = os.path.join(RUN, ".lock")
+
+PROTOCOL = 2              # the app checks this before unlocking: older bridges restart media on unlock
+MAX_TRIES = 3
+LOCKOUT_S = 3600
+IDLE_S = int(os.environ.get("BRIDGE_PIN_IDLE_S", 600))       # no video for 10 min -> relock
+MAX_AGE_S = int(os.environ.get("BRIDGE_PIN_MAX_AGE_S", 12 * 3600))
+ITERATIONS = 200000
+VIDEO_PORT, VOICE_PORT = 5000, 5002
+TABLE = "netbridge_gate"
+WATCH_S = 15
+
+TAILNET4 = ipaddress.ip_network("100.64.0.0/10")
+TAILNET6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
+
+
+# ------------------------------------------------------------------ small helpers
+def now():
+    return time.time()
+
+
+def log(msg):
+    """Journal line. Never pass a PIN or a ticket here."""
+    try:
+        subprocess.run(["logger", "-t", "bridge-pin", msg[:300]], timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def write_atomic(path, text, mode):
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def remove(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def load_json(path):
+    try:
+        with open(path) as f:
+            v = json.load(f)
+        return v if isinstance(v, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def secret_arg(argv, i, prompt):
+    """A PIN or ticket: '-' (or nothing) reads it from stdin, so it is never on a command line."""
+    v = argv[i] if len(argv) > i and not argv[i].startswith("--") else "-"
+    if v != "-":
+        return v.strip()
+    if sys.stdin.isatty():
+        return getpass.getpass(prompt).strip()
+    return sys.stdin.readline().strip()
+
+
+def opt(argv, name):
+    """--name VALUE"""
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
+def normalize_peer(v):
+    """A tailnet address as the gate should see it, None for loopback/absent, ValueError otherwise."""
+    if not v:
+        return None
+    v = str(v).strip()
+    if v.startswith("::ffff:"):
+        v = v[7:]
+    try:
+        a = ipaddress.ip_address(v)
+    except ValueError:
+        raise ValueError("not an IP address: %r" % v)
+    if a.is_loopback:
+        return None                       # a tool on the bridge itself: no remote peer to admit
+    if (a.version == 4 and a in TAILNET4) or (a.version == 6 and a in TAILNET6):
+        return str(a)
+    raise ValueError("%s is not a mesh address" % a)
+
+
+def out(obj, code=0):
+    print(json.dumps(obj, sort_keys=True))
+    sys.exit(code)
+
+
+class Locked:
+    """One mutation at a time: bridge-web is threaded and the watcher runs beside it."""
+    def __enter__(self):
+        os.makedirs(RUN, mode=0o755, exist_ok=True)
+        self.fd = os.open(LOCKFILE, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *a):
+        fcntl.flock(self.fd, fcntl.LOCK_UN)
+        os.close(self.fd)
+
+
+# ------------------------------------------------------------------ the PIN
+def pin_ok_format(pin):
+    return bool(re.fullmatch(r"[0-9]{4,8}", pin or ""))
+
+
+def make_hash(pin):
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", pin.encode(), salt, ITERATIONS)
+    return "pbkdf2-sha256$%d$%s$%s" % (ITERATIONS, salt.hex(), dk.hex())
+
+
+def hash_kind(stored):
+    if stored.startswith("pbkdf2-sha256$"):
+        return "pbkdf2"
+    if re.fullmatch(r"[0-9a-f]{64}", stored):
+        return "legacy"                   # the old tool: unsalted sha256 of the PIN
+    return "unknown" if stored else None
+
+
+def verify(pin, stored):
+    kind = hash_kind(stored)
+    if kind == "pbkdf2":
+        try:
+            _, it, salt, dk = stored.split("$")
+            got = hashlib.pbkdf2_hmac("sha256", pin.encode(), bytes.fromhex(salt), int(it))
+        except (ValueError, TypeError):
+            return False
+        return hmac.compare_digest(got.hex(), dk)
+    if kind == "legacy":
+        return hmac.compare_digest(hashlib.sha256(pin.encode()).hexdigest(), stored)
+    return False
+
+
+def lockout_left():
+    started = read(LOCKOUT)
+    if not started:
+        return 0
+    try:
+        left = LOCKOUT_S - (now() - float(started))
+    except ValueError:
+        left = LOCKOUT_S
+    if left <= 0:
+        remove(LOCKOUT)
+        remove(TRIES)
+        return 0
+    return int(left)
+
+
+# ------------------------------------------------------------------ the media gate
+def nft(script):
+    """Apply an nft script as ONE transaction. -> (ok, message)"""
+    try:
+        p = subprocess.run([NFT, "-f", "-"], input=script, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, str(e)
+    return p.returncode == 0, (p.stderr or p.stdout or "").strip()[-300:]
+
+
+def nft_list(what):
+    try:
+        p = subprocess.run([NFT] + what.split(), capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return p.stdout if p.returncode == 0 else None
+
+
+def _elements(peer, family):
+    if not peer:
+        return ""
+    v = ipaddress.ip_address(peer).version
+    return "\t\telements = { %s }\n" % peer if v == family else ""
+
+
+def gate_script(peer):
+    """The whole gate. Replaced atomically (declare, delete, define) so it can never be half-built.
+
+    Only the two ports the presenter streams TO. Everything else on the bridge - the mesh, the
+    fleet agent, the status page, SSH - is untouched, and so is anything the bridge sends."""
+    return (
+        "table inet %(t)s {\n}\n"
+        "delete table inet %(t)s\n"
+        "table inet %(t)s {\n"
+        "\tcounter video_in {\n\t\tpackets 0 bytes 0\n\t}\n"
+        "\tcounter voice_in {\n\t\tpackets 0 bytes 0\n\t}\n"
+        "\tcounter refused_in {\n\t\tpackets 0 bytes 0\n\t}\n"
+        "\tset peer4 {\n\t\ttype ipv4_addr\n%(e4)s\t}\n"
+        "\tset peer6 {\n\t\ttype ipv6_addr\n%(e6)s\t}\n"
+        "\tchain media_in {\n"
+        "\t\ttype filter hook input priority -5; policy accept;\n"
+        "\t\tiifname \"lo\" accept\n"
+        "\t\tip saddr @peer4 udp dport %(v)d counter name \"video_in\" accept\n"
+        "\t\tip6 saddr @peer6 udp dport %(v)d counter name \"video_in\" accept\n"
+        "\t\tip saddr @peer4 udp dport %(a)d counter name \"voice_in\" accept\n"
+        "\t\tip6 saddr @peer6 udp dport %(a)d counter name \"voice_in\" accept\n"
+        "\t\tudp dport { %(v)d, %(a)d } counter name \"refused_in\" drop\n"
+        "\t}\n"
+        "}\n") % {"t": TABLE, "v": VIDEO_PORT, "a": VOICE_PORT,
+                  "e4": _elements(peer, 4), "e6": _elements(peer, 6)}
+
+
+def gate_arm(peer):
+    """(Re)build the gate admitting only `peer` (None = closed). -> 'open' | 'closed' | 'unavailable'"""
+    ok, msg = nft(gate_script(peer))
+    if not ok:
+        log("media gate could NOT be armed: %s" % msg)
+        return "unavailable"
+    return "open" if peer else "closed"
+
+
+def gate_apply(peer):
+    """Make the kernel admit exactly `peer` (None = nobody). -> 'open' | 'closed' | 'unavailable'
+
+    Normally a set update (keeps the counters); if the table is missing or broken, rebuild it."""
+    if not os.path.exists(NFT):
+        return "unavailable"
+    lines = ["flush set inet %s peer4" % TABLE, "flush set inet %s peer6" % TABLE]
+    if peer:
+        fam = "peer4" if ipaddress.ip_address(peer).version == 4 else "peer6"
+        lines.append("add element inet %s %s { %s }" % (TABLE, fam, peer))
+    ok, _ = nft("\n".join(lines) + "\n")
+    if ok:
+        return "open" if peer else "closed"
+    return gate_arm(peer)
+
+
+def gate_now(peer):
+    """What the kernel is really enforcing: 'open' (peer admitted) | 'closed' | 'missing' | 'unavailable'."""
+    if not os.path.exists(NFT):
+        return "unavailable"
+    listing = nft_list("list table inet %s" % TABLE)
+    if listing is None:
+        return "missing"
+    if "media_in" not in listing or "refused_in" not in listing:
+        return "missing"
+    admitted = set(re.findall(r"elements = \{([^}]*)\}", listing))
+    admitted = {a.strip() for block in admitted for a in block.split(",") if a.strip()}
+    if peer:
+        return "open" if admitted == {peer} else "missing"
+    return "closed" if not admitted else "missing"
+
+
+def video_packets():
+    listing = nft_list("list counter inet %s video_in" % TABLE)
+    m = re.search(r"packets (\d+)", listing or "")
+    return int(m.group(1)) if m else None
+
+
+# ------------------------------------------------------------------ sessions
+def ticket_hash(ticket):
+    return hashlib.sha256(ticket.encode()).hexdigest()
+
+
+def session():
+    return load_json(SESSION)
+
+
+def save_session(s):
+    write_atomic(SESSION, json.dumps(s, sort_keys=True), 0o600)
+
+
+def end_session(reason, detail=""):
+    """Close the gate and forget the session. Never touches a media service."""
+    s = session()
+    remove(SESSION)
+    gate = gate_apply(None)
+    write_atomic(os.path.join(RUN, "gate"), gate, 0o644)
+    if s:
+        write_atomic(LAST_END, json.dumps({"reason": reason, "at": int(now()), "peer": s.get("peer"),
+                                           "lasted_s": int(now() - s.get("created", now()))}), 0o644)
+        log("session ended (%s)%s peer=%s after %ds" % (reason, (" " + detail) if detail else "",
+                                                        s.get("peer"), int(now() - s.get("created", now()))))
+    return s, gate
+
+
+def refresh_video(s):
+    """Advance last_video if the gate counted video from the peer since last time."""
+    n = video_packets()
+    if n is None:
+        # Cannot measure (no gate): never relock for "idle" on a guess - a live meeting would be
+        # cut every 10 min. Without the gate media is not blocked anyway; the 12 h limit still holds.
+        s["last_video"] = now()
+        return s
+    seen = s.get("video_packets")
+    if seen is None or n < seen:          # first look, or the table was rebuilt (counter reset)
+        s["video_packets"] = n
+    elif n > seen:
+        s["video_packets"] = n
+        s["last_video"] = now()
+    return s
+
+
+def expiry_reason(s, t=None):
+    t = t or now()
+    if t - s.get("created", t) >= MAX_AGE_S:
+        return "max_age"
+    if t - s.get("last_video", s.get("created", t)) >= IDLE_S:
+        return "idle"
+    return None
+
+
+# ------------------------------------------------------------------ public state
+def render(s=None, gate=None):
+    """The state as the status page, telemetry and the fleet see it. No secrets."""
+    stored = read(HASH)
+    s = session() if s is None else s
+    t = now()
+    left = lockout_left()
+    try:
+        tries = int(read(TRIES) or 0)
+    except ValueError:
+        tries = 0
+    st = {"protocol": PROTOCOL, "required": True,
+          "pin_set": bool(stored), "hash": hash_kind(stored),
+          "locked": not bool(s), "lockout": left > 0, "lockout_remaining": left,
+          "wrong_tries": tries,
+          "gate": gate or read(os.path.join(RUN, "gate")) or "unknown",
+          "idle_limit_s": IDLE_S, "max_age_s": MAX_AGE_S,
+          "session": {"active": False}}
+    if s:
+        st["session"] = {"active": True, "peer": s.get("peer"),
+                         "age_s": int(t - s.get("created", t)),
+                         "idle_s": int(t - s.get("last_video", s.get("created", t))),
+                         "expires_in": int(max(0, s.get("created", t) + MAX_AGE_S - t))}
+    last = load_json(LAST_END)
+    if last:
+        st["last_end"] = last
+    return st
+
+
+def publish(s=None, gate=None):
+    """Rewrite the public state file bridge-web reads (so status needs no sudo)."""
+    if gate:
+        write_atomic(os.path.join(RUN, "gate"), gate, 0o644)
+    st = render(s, gate)
+    st["written_at"] = int(now())
+    write_atomic(STATE, json.dumps(st, sort_keys=True), 0o644)
+    return st
+
+
+# ------------------------------------------------------------------ commands
+def cmd_set(argv):
+    pin = secret_arg(argv, 2, "New PIN (4-8 digits): ")
+    if not pin_ok_format(pin):
+        print("PIN must be 4-8 digits")
+        return 6
+    with Locked():
+        write_atomic(HASH, make_hash(pin) + "\n", 0o600)
+        remove(TRIES)
+        remove(LOCKOUT)
+        remove(LEGACY_FLAG)
+        publish()
+    log("PIN set")
+    print("PIN set (stored salted and hashed; wrong tries and any lockout cleared)")
+    return 0
+
+
+def cmd_unlock(argv):
+    pin = secret_arg(argv, 2, "PIN: ")
+    try:
+        peer = normalize_peer(opt(argv, "--peer"))
+    except ValueError as e:
+        out({"ok": False, "reason": "bad_peer", "message": str(e)}, 4)
+    with Locked():
+        left = lockout_left()
+        if left > 0:
+            out({"ok": False, "reason": "locked_out", "retry_in": left,
+                 "message": "LOCKED OUT after %d wrong PINs - try again in %d min, or ask your admin "
+                            "to clear the lockout" % (MAX_TRIES, max(1, left // 60))}, 3)
+        stored = read(HASH)
+        if not stored:
+            publish()
+            out({"ok": False, "reason": "no_pin",
+                 "message": "this bridge has no PIN yet - an admin must set one in the fleet before "
+                            "anyone can go live"}, 5)
+        if not pin_ok_format(pin):
+            out({"ok": False, "reason": "bad_format", "message": "the PIN is 4-8 digits"}, 6)
+        if not verify(pin, stored):
+            try:
+                n = int(read(TRIES) or 0) + 1
+            except ValueError:
+                n = 1
+            if n >= MAX_TRIES:
+                write_atomic(LOCKOUT, "%d\n" % int(now()), 0o600)
+                remove(TRIES)
+                log("wrong PIN %d/%d - LOCKED OUT for %d min" % (n, MAX_TRIES, LOCKOUT_S // 60))
+                publish()
+                out({"ok": False, "reason": "locked_out_now", "retry_in": LOCKOUT_S,
+                     "message": "wrong PIN - that was try %d of %d, so the bridge is locked for 1 hour"
+                                % (n, MAX_TRIES)}, 2)
+            write_atomic(TRIES, "%d\n" % n, 0o600)
+            log("wrong PIN (%d/%d)" % (n, MAX_TRIES))
+            publish()
+            out({"ok": False, "reason": "wrong", "attempt": n, "attempts_left": MAX_TRIES - n,
+                 "message": "wrong PIN (try %d of %d)" % (n, MAX_TRIES)}, 1)
+        # Correct.
+        remove(TRIES)
+        remove(LOCKOUT)
+        remove(LEGACY_FLAG)
+        if hash_kind(stored) == "legacy":
+            write_atomic(HASH, make_hash(pin) + "\n", 0o600)
+            log("PIN hash upgraded to salted PBKDF2")
+        old = session()
+        if old:
+            end_session("superseded", "by a new PIN entry")
+        ticket = secrets.token_hex(32)
+        t = now()
+        s = {"ticket_sha256": ticket_hash(ticket), "peer": peer, "created": t, "last_video": t,
+             "video_packets": video_packets()}
+        if old:
+            s["previous_ticket_sha256"] = old.get("ticket_sha256")
+        save_session(s)
+        gate = gate_apply(peer)
+        publish(s, gate)
+        log("session started peer=%s gate=%s%s" % (peer, gate, " (replaced the previous session)" if old else ""))
+    out({"ok": True, "reason": "ok", "ticket": ticket, "peer": peer, "gate": gate,
+         "expires_in": MAX_AGE_S, "idle_timeout": IDLE_S, "superseded": bool(old),
+         "message": "unlocked - this session ends when you stop, after %d min without video, or after %d h"
+                    % (IDLE_S // 60, MAX_AGE_S // 3600)}, 0)
+
+
+def cmd_check(argv):
+    ticket = secret_arg(argv, 2, "ticket: ")
+    try:
+        caller = normalize_peer(opt(argv, "--peer"))
+    except ValueError as e:
+        out({"ok": False, "reason": "bad_peer", "message": str(e)}, 4)
+    with Locked():
+        s = session()
+        if not s:
+            last = load_json(LAST_END) or {}
+            out({"ok": False, "reason": "no_session", "last_end": last.get("reason"),
+                 "message": "the bridge is locked - enter the PIN to go live"}, 10)
+        if not (ticket and hmac.compare_digest(ticket_hash(ticket), s.get("ticket_sha256", ""))):
+            prev = s.get("previous_ticket_sha256")
+            superseded = bool(ticket and prev and hmac.compare_digest(ticket_hash(ticket), prev))
+            out({"ok": False, "reason": "superseded" if superseded else "invalid",
+                 "message": ("another presenter entered the PIN on this bridge, so your session ended"
+                             if superseded else "not a valid session for this bridge - enter the PIN")}, 11)
+        s = refresh_video(s)
+        why = expiry_reason(s)
+        if why:
+            _, gate = end_session(why)
+            publish(None, gate)
+            out({"ok": False, "reason": "expired", "why": why,
+                 "message": ("the bridge locked itself after %d min without video - enter the PIN again"
+                             % (IDLE_S // 60)) if why == "idle" else
+                            "the session reached its %d h limit - enter the PIN again" % (MAX_AGE_S // 3600)}, 12)
+        moved = False
+        if caller and caller != s.get("peer"):
+            if "--rebind" not in argv:
+                out({"ok": False, "reason": "peer_mismatch",
+                     "message": "this session belongs to another address"}, 13)
+            # The ticket is the proof; the address is only where the media comes from. The app's
+            # mesh helper takes a new address when it restarts mid-session, and the gate follows.
+            log("session moved %s -> %s" % (s.get("peer"), caller))
+            s["peer"] = caller
+            moved = True
+        save_session(s)
+        publish(s, gate_apply(caller) if moved else None)
+    out({"ok": True, "reason": "ok", "peer": s.get("peer"), "moved": moved,
+         "expires_in": int(max(0, s["created"] + MAX_AGE_S - now()))}, 0)
+
+
+def cmd_end(argv):
+    ticket = secret_arg(argv, 2, "ticket: ")
+    with Locked():
+        s = session()
+        if not s:
+            publish(None, None)
+            out({"ok": True, "ended": False, "message": "no session was open"}, 0)
+        if not (ticket and hmac.compare_digest(ticket_hash(ticket), s.get("ticket_sha256", ""))):
+            # Someone else's session (or a stale ticket): leave it alone.
+            out({"ok": True, "ended": False, "not_current": True,
+                 "message": "that session had already ended"}, 0)
+        _, gate = end_session("stop")
+        st = publish(None, gate)
+    out({"ok": True, "ended": True, "gate": st.get("gate"), "message": "session ended; bridge locked"}, 0)
+
+
+def cmd_lock(argv):
+    with Locked():
+        s, gate = end_session("admin", "locked by an admin")
+        remove(LEGACY_FLAG)
+        publish(None, gate)
+    print("LOCKED - %s; media gate %s; media services untouched"
+          % ("the live session was ended" if s else "no session was open", gate))
+    return 0
+
+
+def cmd_clear_lockout(argv):
+    with Locked():
+        had = lockout_left() > 0 or bool(read(TRIES))
+        remove(TRIES)
+        remove(LOCKOUT)
+        publish()
+    log("lockout cleared by an admin" if had else "clear-lockout: nothing to clear")
+    print("lockout cleared - wrong tries reset" if had else "no lockout and no wrong tries to clear")
+    return 0
+
+
+def sweep():
+    """Relock sessions that went idle or old; make sure the kernel enforces what we think it does."""
+    with Locked():
+        remove(LEGACY_FLAG)
+        s = session()
+        if s:
+            s = refresh_video(s)
+            why = expiry_reason(s)
+            if why:
+                end_session(why)
+                s = None
+            else:
+                save_session(s)
+        peer = (s or {}).get("peer")
+        gate = gate_now(peer)
+        if gate == "missing":             # flushed by someone, or never armed (boot failure): re-arm
+            gate = gate_arm(peer)
+            log("media gate re-armed (%s)" % gate)
+        return publish(s, gate)
+
+
+def cmd_watch(argv):
+    while True:
+        try:
+            sweep()
+        except Exception as e:            # never die: this loop is what relocks idle sessions
+            log("sweep failed: %s" % e)
+        time.sleep(WATCH_S)
+
+
+def cmd_gate_init(argv):
+    with Locked():
+        remove(SESSION)                   # /run is empty after a reboot anyway; be explicit
+        remove(LEGACY_FLAG)
+        gate = gate_arm(None)
+        publish(None, gate)
+    print("media gate %s at boot (video %d / voice %d accept nothing until a PIN opens a session)"
+          % (gate, VIDEO_PORT, VOICE_PORT))
+    return 0          # a failed early-boot unit helps nobody; gate=unavailable raises the fleet alert
+
+
+def cmd_state(argv):
+    s = session()
+    if s:
+        s = refresh_video(dict(s))        # read-only: the watcher persists it
+    print(json.dumps(render(s), sort_keys=True))
+    return 0
+
+
+def cmd_status(argv):
+    st = render()
+    print("lockout" if st["lockout"] else "live" if st["session"]["active"] else
+          "pin-set" if st["pin_set"] else "no-pin")
+    return 0
+
+
+COMMANDS = {"set": cmd_set, "unlock": cmd_unlock, "check": cmd_check, "end": cmd_end,
+            "lock": cmd_lock, "clear-lockout": cmd_clear_lockout, "sweep": lambda a: (sweep(), 0)[1],
+            "watch": cmd_watch, "gate-init": cmd_gate_init, "state": cmd_state, "status": cmd_status}
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else ""
+    if cmd not in COMMANDS:
+        print("\n".join(l for l in __doc__.splitlines() if l.startswith("  bridge-pin ")))
+        return 1
+    try:
+        return COMMANDS[cmd](argv) or 0
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(json.dumps({"ok": False, "reason": "error", "message": str(e)[:200]}))
+        return 4
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

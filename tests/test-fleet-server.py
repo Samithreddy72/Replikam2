@@ -162,6 +162,14 @@ try:
     check(r.status_code == 400 and "LAN" in r.text, "the LAN profile is refused by the fleet (owner's rule)", r.text)
     r = c.post("/admin/commands/broadcast", headers=A, json={"type": "profile", "args": {"mode": "LAN"}})
     check(r.status_code == 400, "…also when broadcast to every bridge")
+    r = c.post("/admin/devices/%s/commands" % ids[0], headers=A, json={"type": "unlock", "args": {"pin": "123456"}})
+    check(r.status_code == 400, "remote unlock no longer exists (only a presenter typing the PIN opens a session)", r.text)
+    r = c.post("/admin/devices/%s/commands" % ids[0], headers=A, json={"type": "clear-lockout"})
+    check(r.status_code == 200, "clear-lockout is accepted", r.text)
+    r = c.post("/admin/devices/%s/commands" % ids[0], headers=A, json={"type": "lock"})
+    check(r.status_code == 400, "lock (ends the live session) needs confirmation", r.text)
+    r = c.post("/admin/devices/%s/commands" % ids[0], headers=A, json={"type": "lock", "confirm": True})
+    check(r.status_code == 200, "…and is queued once confirmed", r.text)
     r = c.post("/admin/devices/%s/commands" % ids[0], headers=A, json={"type": "reboot"})
     check(r.status_code == 400, "a reboot without confirmation is refused")
     r = c.post("/admin/devices/%s/commands" % ids[0], headers=A, json={"type": "reboot", "confirm": True})
@@ -172,7 +180,7 @@ try:
     hist = c.get("/admin/devices/%s/commands" % ids[0], headers=A).json()
     check(all("pin" not in (h.get("args") or {}) for h in hist), "a queued PIN is never shown back to a browser")
     pulled = c.get("/v1/commands", headers=dev_tok[ids[0]]).json()
-    check({p["id"] for p in pulled} == {rid, pid} and any(p.get("args", {}).get("pin") == "123456" for p in pulled),
+    check({rid, pid} <= {p["id"] for p in pulled} and any(p.get("args", {}).get("pin") == "123456" for p in pulled),
           "the bridge (and only the bridge) receives the command with its PIN")
     c.post("/v1/commands/%s/result" % rid, headers=dev_tok[ids[0]], json={"status": "done", "output": "rebooting"})
     st = {h["id"]: h["status"] for h in c.get("/admin/devices/%s/commands" % ids[0], headers=A).json()}

@@ -380,6 +380,69 @@ def _audit(action, addr, allowed, detail=""):
 
 
 # ---------------------------------------------------------------------------------------
+# THE PIN (2026-09-25)
+#
+# Being on the mesh was never meant to be enough to go live, but it was: set-peer did not ask
+# whether the caller had unlocked, and the video/voice ports took packets from anyone, so the
+# owner went live without ever typing the PIN. Now a correct PIN opens ONE session (bridge-pin
+# unlock) and returns a ticket; set-peer and return-tune require that ticket; end-session
+# closes it; bridge-pin's media gate admits video and voice only from that session's presenter.
+#
+# The PIN and the ticket reach bridge-pin on STDIN, never on its command line: sudo writes
+# every command line to the journal, which is how every PIN attempt used to end up in the log.
+# PIN verdicts (wrong / locked out / no PIN) stay HTTP 200 with a reason, as they always were:
+# the app retries transport errors, and retrying a wrong PIN would burn all three tries.
+PIN_TOOL = "/usr/local/bin/bridge-pin"
+PIN_STATE_FILE = "/run/bridge-pin/state.json"
+PIN_PROTOCOL = 2                  # the app refuses to unlock older bridges (their unlock restarted media)
+
+
+def _caller_ip(addr):
+    a = str(addr or "")
+    return a[7:] if a.startswith("::ffff:") else a
+
+
+def _pin_run(args, secret="", timeout=20):
+    """bridge-pin as root, secret on stdin. -> (exit code, its JSON answer or {})"""
+    try:
+        r = subprocess.run(["sudo", "-n", PIN_TOOL] + list(args), input=(secret or "") + "\n",
+                           capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return 4, {"ok": False, "reason": "error", "message": "the PIN check could not run on the bridge"}
+    try:
+        j = json.loads((r.stdout or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        j = {}
+    return r.returncode, (j if isinstance(j, dict) else {})
+
+
+def pin_state():
+    """The PIN gate as bridge-pin last published it - read from a file, so a status poll costs no
+    sudo and no process launch. Relative times are aged by the file's own age (it is rewritten
+    at least every 15 s). An older image without the file falls back to asking the tool."""
+    try:
+        with open(PIN_STATE_FILE) as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        st = None
+    if not isinstance(st, dict):
+        try:
+            return json.loads(_cached("pin", 3, lambda: sh("sudo -n %s state" % PIN_TOOL)))
+        except Exception:
+            return {}
+    age = max(0, int(time.time() - float(st.pop("written_at", 0) or 0)))
+    if age and st.get("lockout"):
+        st["lockout_remaining"] = max(0, int(st.get("lockout_remaining") or 0) - age)
+        st["lockout"] = st["lockout_remaining"] > 0
+    ses = st.get("session") or {}
+    if age and ses.get("active"):
+        ses["age_s"] = int(ses.get("age_s") or 0) + age
+        ses["expires_in"] = max(0, int(ses.get("expires_in") or 0) - age)
+    st["stale_s"] = age
+    return st
+
+
+# ---------------------------------------------------------------------------------------
 # WHAT THE USB SIDE IS ACTUALLY DOING
 #
 # `udc: not attached` was reported for five different situations - nothing plugged in, a
@@ -789,12 +852,9 @@ def _gather_uncached():
     d["peer"] = peer or "?"
     d["wd_timer"] = _cached("wd_timer", 30, lambda: sh("systemctl is-active bridge-watchdog.timer"))
     d["wd_hw"] = _cached("wd_hw", 30, lambda: sh("systemctl show -p RuntimeWatchdogUSec --value"))
-    # PIN-gate state (rides telemetry so a brute-force lockout raises a fleet alert). 3 s: a
-    # lockout still shows within one fleet poll, without a sudo+script launch per request.
-    try:
-        d["pin"] = json.loads(_cached("pin", 3, lambda: sh("sudo -n /usr/local/bin/bridge-pin state")))
-    except Exception:
-        d["pin"] = {}
+    # PIN gate (rides telemetry: lockouts, missing PIN, gate health and the live session all
+    # reach the fleet). Read from bridge-pin's public state file - no sudo per request.
+    d["pin"] = pin_state()
     # --- fleet identity + telemetry (consumed by the control plane) ---
     serial = cpu_serial()
     d["device_id"] = serial
@@ -1162,6 +1222,11 @@ def checks():
         voice_detail = "voice feeder pid %s used %d cpu ticks in %.0fs" % (vpid, vdt, win)
 
     udc = _udc_state()
+    pin = pin_state()
+    locked = bool(pin) and pin.get("protocol", 0) >= PIN_PROTOCOL and not (pin.get("session") or {}).get("active")
+    if locked and not video_ok:
+        video_detail = ("the bridge is LOCKED - no PIN session is open, so it refuses video. "
+                        "Enter the PIN in the app (%s)" % ((pin.get("last_end") or {}).get("reason") or "not unlocked"))
     return {
         # Say so where the operator is actually looking. The app polls /api/checks every 10s
         # and shows these lines; putting "still settling" only in /api/status would leave the
@@ -1179,6 +1244,11 @@ def checks():
         # Tuning the fleet wants the PRESENTER APP to apply. Carried here because /api/checks
         # is the one thing the app already polls on a timer; see presenter_tuning().
         "presenter_tuning": presenter_tuning(),
+        # The app reads this to ask for the PIN again when the bridge relocked itself (Stop,
+        # 10 min without video, 12 h, an admin lock, a reboot, or another presenter's PIN).
+        "pin": {"locked": locked, "lockout": bool(pin.get("lockout")),
+                "last_end": (pin.get("last_end") or {}).get("reason"),
+                "protocol": pin.get("protocol", 1)},
         "ts": int(time.time()),
     }
 
@@ -1271,12 +1341,10 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send(json.dumps(dict(values, source=source, writable_path="/data/config/bridge-return-tune")).encode(),
                        "application/json; charset=utf-8")
         elif path == "/api/lock-state":
-            # Is this bridge currently PIN-gated? Read straight from the device gate.
-            st = sh("sudo -n /usr/local/bin/bridge-pin state")
-            try:
-                obj = json.loads(st)
-            except Exception:
-                obj = {"pin_set": False, "locked": False, "lockout": False, "lockout_remaining": 0}
+            # Is a PIN session open, is the bridge locked out, is the media gate armed? The app
+            # checks "protocol" here BEFORE unlocking: on an older bridge unlock restarted media.
+            obj = pin_state() or {"pin_set": False, "locked": True, "lockout": False,
+                                  "lockout_remaining": 0, "protocol": 1}
             self._send(json.dumps(obj).encode("utf-8"),
                        "application/json; charset=utf-8")
         else:
@@ -1296,6 +1364,16 @@ class H(http.server.BaseHTTPRequestHandler):
                        "application/json; charset=utf-8", status=403)
             return
         _audit(path, peer, True)
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            body = json.loads(self.rfile.read(n) if n else b"{}") or {}
+            if not isinstance(body, dict):
+                body = {}
+        except Exception:
+            body = {}
+        caller = _caller_ip(peer)
+        if path in ("/api/set-peer", "/api/return-tune") and not self._session_ok(caller, body):
+            return
         if path == "/api/set-peer":
             # Register the presenter as the return-audio destination — the SSH-free
             # replacement for `ssh pi@bridge bridge set-peer <ip>`. Strictly a
@@ -1303,8 +1381,6 @@ class H(http.server.BaseHTTPRequestHandler):
             # peer is already this ip:port we skip the return-audio restart so
             # re-going-live never blips the meeting audio.
             try:
-                n = int(self.headers.get("Content-Length", 0) or 0)
-                body = json.loads(self.rfile.read(n) if n else b"{}") or {}
                 ip = str(body.get("ip", "")).strip()
                 port = str(int(body.get("port", 5004)))
             except Exception:
@@ -1338,8 +1414,6 @@ class H(http.server.BaseHTTPRequestHandler):
             # allow-listed BOTH here and in the CLI because the values are word-split into
             # a gst-launch command line on the device.
             try:
-                n = int(self.headers.get("Content-Length", 0) or 0)
-                body = json.loads(self.rfile.read(n) if n else b"{}") or {}
                 props = str(body.get("props", "")).strip()
                 pre = str(body.get("pre", "")).strip()
                 clear = bool(body.get("clear"))
@@ -1366,27 +1440,49 @@ class H(http.server.BaseHTTPRequestHandler):
                                    "pre": pre, "error": error}).encode("utf-8"),
                        "application/json; charset=utf-8")
         elif path == "/api/unlock":
-            # The PIN is verified ON THE DEVICE ITSELF — it is never forwarded to
-            # the control plane and never logged here. Presenter app -> this bridge
-            # over the private mesh only.
-            try:
-                n = int(self.headers.get("Content-Length", 0) or 0)
-                pin = str((json.loads(self.rfile.read(n) if n else b"{}") or {}).get("pin", ""))
-            except Exception:
-                pin = ""
-            try:
-                r = subprocess.run(["sudo", "-n", "/usr/local/bin/bridge-pin", "unlock", pin],
-                                   capture_output=True, text=True, timeout=20)
-                code = r.returncode
-                msg = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
-            except Exception:
-                code, msg = 4, "unlock failed on device"
-            reason = {0: "ok", 1: "wrong", 2: "locked_out_now", 3: "locked_out"}.get(code, "error")
-            self._send(json.dumps({"ok": code == 0, "reason": reason, "message": msg}).encode("utf-8"),
+            # The PIN is verified ON THE DEVICE ITSELF - never forwarded to the control plane,
+            # never logged, never on a command line. Presenter app -> this bridge over the mesh.
+            # A correct PIN opens the session for the CALLER's mesh address (where its media will
+            # come from). A tool on the bridge itself (loopback) may name the presenter instead.
+            local = caller.startswith(("127.", "::1")) or caller == "localhost"
+            who = str(body.get("peer") or "") if local else caller
+            args = ["unlock", "-"] + (["--peer", who] if who else [])
+            code, j = _pin_run(args, str(body.get("pin", "")))
+            reason = j.get("reason") or {0: "ok", 1: "wrong", 2: "locked_out_now", 3: "locked_out",
+                                         5: "no_pin", 6: "bad_format"}.get(code, "error")
+            resp = {"ok": code == 0 and bool(j.get("ticket")), "reason": reason,
+                    "message": j.get("message") or ("unlock failed on device" if code == 4 else ""),
+                    "protocol": PIN_PROTOCOL}
+            for k in ("ticket", "peer", "gate", "expires_in", "idle_timeout", "superseded",
+                      "attempt", "attempts_left", "retry_in"):
+                if k in j:
+                    resp[k] = j[k]
+            self._send(json.dumps(resp).encode("utf-8"), "application/json; charset=utf-8")
+        elif path == "/api/end-session":
+            # Stop in the app. Ends THIS ticket's session and closes the media gate; a stale
+            # ticket cannot end someone else's. Nothing is restarted.
+            code, j = _pin_run(["end", "-"], str(body.get("ticket", "")))
+            self._send(json.dumps({"ok": code == 0 and bool(j.get("ok")), "ended": bool(j.get("ended")),
+                                   "message": j.get("message", "")}).encode("utf-8"),
                        "application/json; charset=utf-8")
         else:
             self._send(json.dumps({"ok": False, "error": "not found"}).encode("utf-8"),
                        "application/json; charset=utf-8")
+
+    def _session_ok(self, caller, body):
+        """Go-live actions need the open session's ticket. Refused = HTTP 401 with the reason,
+        so the app knows to ask for the PIN (and an old app without tickets is refused plainly).
+        The session follows the caller's mesh address: the app's helper may restart mid-session."""
+        args = ["check", "-", "--rebind"] + (["--peer", caller] if caller and not caller.startswith(("127.", "::1")) else [])
+        code, j = _pin_run(args, str(body.get("ticket", "")))
+        if code == 0:
+            return True
+        reason = j.get("reason") or "locked"
+        self._send(json.dumps({"ok": False, "error": "locked", "reason": reason,
+                               "detail": j.get("message") or "the bridge is locked - enter the PIN to go live",
+                               "protocol": PIN_PROTOCOL}).encode("utf-8"),
+                   "application/json; charset=utf-8", status=401)
+        return False
 
     def log_message(self, *a):
         pass

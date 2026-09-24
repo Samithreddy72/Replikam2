@@ -1,0 +1,18 @@
+[Unit]
+Description=NetBridge media gate: closed at boot - video and voice are refused until a presenter enters the PIN
+# Early, before the network and before the media services, so there is no moment after boot
+# when the video/voice ports take packets from anyone. The PIN state lives in /etc/bridge (on
+# /data); the gate itself only needs nftables. Sessions live in /run, so a reboot always relocks.
+DefaultDependencies=no
+After=local-fs.target
+Wants=network-pre.target
+Before=network-pre.target sysinit.target shutdown.target tailscaled.service bridge-feeder-net.service bridge-feeder-audio.service bridge-web.service bridge-agent.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /usr/local/bin/bridge-pin gate-init
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=NetBridge PIN sessions: relock after 10 min without video or 12 h, keep the media gate armed
+# One long-running loop (every 15 s) instead of a timer: no per-run journal lines, and it
+# re-arms the gate if anything ever flushes the firewall rules.
+After=bridge-pin-gate.service
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/bridge-pin watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

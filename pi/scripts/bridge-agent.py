@@ -96,9 +96,15 @@ ALLOWED = {
                                 + (["--force"] if a.get("force") else [])
                                 + (["--note", _note(a["note"])] if a.get("note") else []),
     "golden-restore": lambda a: ["sudo", "/usr/local/bin/bridge-golden.py", "restore", "--json"],
-    "set-pin":     lambda a: ["sudo", "bridge-pin", "set", _pin(a.get("pin"))],
-    "unlock":      lambda a: ["sudo", "bridge-pin", "unlock", _pin(a.get("pin"))],
-    "lock":        lambda a: ["sudo", "bridge-pin", "lock"],
+    # PIN gate (2026-09-25). The agent runs as root, so no sudo: sudo writes every command line
+    # to the journal, and set-pin's PIN goes in on STDIN (see STDIN below), never in argv.
+    # A session can only be opened by a presenter typing the PIN into the app - the fleet cannot
+    # open one. "unlock" survives as an alias of clear-lockout for older panels.
+    "set-pin":       lambda a: (_pin(a.get("pin")), ["/usr/local/bin/bridge-pin", "set", "-"])[1],
+    "clear-lockout": lambda a: ["/usr/local/bin/bridge-pin", "clear-lockout"],
+    "unlock":        lambda a: ["/usr/local/bin/bridge-pin", "clear-lockout"],
+    # Ends the live session and closes the media gate. Media services are left running.
+    "lock":          lambda a: ["/usr/local/bin/bridge-pin", "lock"],
     # --- remote recovery, added after a night where a bridge in another room could not be
     # --- repaired from the panel at all.
     # Put a quarantined override back. Auto-rollback silently reverts a device to its
@@ -122,6 +128,10 @@ ALLOWED = {
                               "--no-pager", "-o", "short-iso"]
                              + (["-u", _unit(a["unit"])] if a.get("unit") else []),
 }
+
+
+# Secrets a command needs, fed on stdin so they never appear in argv, ps, or the journal.
+STDIN = {"set-pin": lambda a: _pin(a.get("pin")) + "\n"}
 
 
 def _lines(v):
@@ -397,7 +407,9 @@ def run_command(cmd):
         argv = builder(args)
     except ValueError as e:
         return cid, "rejected", str(e)
-    if ctype in DETACHED and _cid_ok(cid) and os.path.exists(SYSTEMD_RUN) and os.path.exists(CMD_RUN):
+    # A command with a secret on stdin always runs inline: the background runner has no stdin.
+    if ctype in DETACHED and ctype not in STDIN and _cid_ok(cid) and os.path.exists(SYSTEMD_RUN) \
+            and os.path.exists(CMD_RUN):
         try:
             os.makedirs(RESULTS, exist_ok=True)
             with open(os.path.join(RESULTS, "%s.meta" % cid), "w") as f:
@@ -413,7 +425,8 @@ def run_command(cmd):
         except (OSError, subprocess.SubprocessError) as e:
             _forget(cid)
             return cid, "failed", "could not start in the background: %s" % e
-    p = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+    p = subprocess.run(argv, capture_output=True, text=True, timeout=300,
+                       input=STDIN[ctype](args) if ctype in STDIN else None)
     status = "done" if p.returncode == 0 else "failed"
     return cid, status, (p.stdout + p.stderr)[-2000:]
 

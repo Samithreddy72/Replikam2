@@ -35,7 +35,11 @@ from .schemas import (EnrollIn, EnrollOut, CommandOut, CommandResultIn,
 # the panel was not enough: the API refused them here with "unsupported command type"
 # before they were ever queued, so every new button would have failed on first click.
 ALLOWED_COMMANDS = {"restart", "reset-clock", "profile", "set-peer", "update", "reboot",
-                    "start", "stop", "diagnose", "set-pin", "unlock", "lock",
+                    "start", "stop", "diagnose",
+                    # PIN gate (2026-09-25): set a PIN, lift a brute-force lockout, end the live
+                    # session. There is deliberately NO remote unlock: only a presenter typing the
+                    # PIN opens a session. (The old unlock command is gone: on an old image it restarted media.)
+                    "set-pin", "clear-lockout", "lock",
                     "deploy-script", "revert-script",
                     # remote recovery for a bridge nobody can physically reach
                     "unquarantine", "running", "logs",
@@ -73,7 +77,7 @@ TIMEOUT_S = {
     "diagnose": 300,
     # media restarts are quick; the gadget re-enumerates a client, which is slower
     "restart": 180, "profile": 180, "jitter-fix": 180, "jitter-reset": 180,
-    "set-peer": 120, "set-pin": 120, "unlock": 120, "lock": 120,
+    "set-peer": 120, "set-pin": 120, "clear-lockout": 120, "lock": 120,
     "gadget-tune": 120, "gadget-tune-clear": 120,
     "golden-save": 180, "golden-restore": 300,
     # must outlive the reboot and the services coming back
@@ -90,7 +94,9 @@ DEFAULT_TIMEOUT_S = 240
 # without it - which is exactly how the accidental reboot happened. The backend now refuses
 # them unless the caller states the intent explicitly.
 CONFIRM_REQUIRED = {"reboot", "update", "deploy-script", "revert-script",
-                    "unquarantine", "golden-restore", "reset-clock"}
+                    "unquarantine", "golden-restore", "reset-clock",
+                    # ends the live session at once: the presenter's video stops arriving
+                    "lock"}
 
 # Commands where running the same thing twice is materially worse than running it once, so an
 # identical one already pending or sent is handed back rather than queued again. Read-only

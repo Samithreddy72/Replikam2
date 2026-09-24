@@ -108,7 +108,7 @@ if [ $have_root -eq 1 ]; then
   done
   for u in bridge-agent bridge-web bridge-media bridge-pitch bridge-crackle-sentry bridge-identity \
            bridge-jitter-sentry netbridge-gadget bridge-ssh bridge-overrides bridge-ab-healthcheck \
-           netbridge-diagnostics-ssh; do
+           netbridge-diagnostics-ssh bridge-pin-gate bridge-pin-sessions; do
     "$DEBUGFS" -R "cat /etc/systemd/system/${u}.service" "$ROOTDEV" >"$CAT/${u}.service" 2>/dev/null
   done
   # Enablement lives in the .wants symlink farm — listed ONCE, not once per unit.
@@ -118,6 +118,8 @@ if [ $have_root -eq 1 ]; then
     >"$CAT/.timers" 2>/dev/null
   "$DEBUGFS" -R "ls /etc/systemd/system/sysinit.target.wants" "$ROOTDEV" \
     >"$CAT/.sysinit" 2>/dev/null
+  # The PIN's media gate needs the nft tool (package nftables).
+  "$DEBUGFS" -R "stat /usr/sbin/nft" "$ROOTDEV" 2>/dev/null | grep -q Inode && echo yes >"$CAT/.nft"
 fi
 has() { [ -s "$CAT/$1" ]; }
 grepf() { grep -qE "$2" "$CAT/$1" 2>/dev/null; }
@@ -223,8 +225,33 @@ has bridge-derive-pass && ok "password derivation present" || warn "no password 
 # "clock" -- PIN enforcement could have been deleted outright and this check would still
 # have passed. A false PASS in the tool that gates flashing is the worst kind there is.
 # Anchor on the actual state object the PIN gate publishes.
-grepf bridge-web.py '"pin_set": *(True|False)' && ok "web layer enforces the PIN and lockout" \
-  || no "no PIN enforcement in the web layer — anyone on the mesh could go live"
+# 2026-09-25: the owner went live WITHOUT a PIN. The old check above passed on a bridge where the
+# PIN was optional end to end - it only proved a state object existed. These check the parts that
+# make the PIN REQUIRED: the ticket gate on go-live, the network gate on the media ports, relock.
+grepf bridge-pin 'PROTOCOL = 2' && grepf bridge-pin 'pbkdf2_hmac' \
+  && ok "PIN tool is the 2026-09-25 rewrite (salted PBKDF2, one-session tickets)" \
+  || no "PIN tool is the OLD one: unlock never relocks, no PIN = open"
+grepf bridge-pin 'udp dport \{ %\(v\)d, %\(a\)d \} counter name \\"refused_in\\" drop' \
+  && ok "media gate drops video/voice from anyone but the session's presenter" \
+  || no "no media gate - anyone on the mesh can stream into the room without the PIN"
+grepf bridge-pin '"bridge", *"restart"|bridge restart' && no "PIN tool restarts media (the reboot trigger)" \
+  || ok "PIN tool never restarts media"
+grepf bridge-web.py 'not self\._session_ok\(caller, body\)' && grepf bridge-web.py '"/api/end-session"' \
+  && ok "go-live (set-peer, return-tune) requires the session ticket; Stop ends the session" \
+  || no "go-live does not check the PIN session - the PIN can be skipped"
+grepf bridge-web.py 'input=\(secret or ""\)' && ok "PIN and ticket reach bridge-pin on stdin (never argv/journal)" \
+  || no "PIN passed on a command line - sudo logs it to the journal"
+grepf bridge-agent.py 'STDIN = \{"set-pin"' && ! grepf bridge-agent.py '"sudo", "bridge-pin"' \
+  && ok "fleet set-pin sends the PIN on stdin; the fleet cannot open a session" \
+  || no "agent passes the PIN in argv or can still unlock remotely"
+[ -s "$CAT/.nft" ] && ok "nft present (package nftables)" || no "no nft - the media gate cannot be armed"
+grep -q 'bridge-pin-gate.service' "$CAT/.sysinit" 2>/dev/null \
+  && ok "media gate closed at every boot (bridge-pin-gate, sysinit)" || no "bridge-pin-gate not enabled - media open after boot"
+grep -q 'bridge-pin-sessions.service' "$CAT/.wants" 2>/dev/null \
+  && ok "session watcher enabled (relock after 10 min without video / 12 h)" || no "bridge-pin-sessions not enabled - sessions never relock"
+grep -q 'nftables.service' "$CAT/.sysinit" "$CAT/.wants" 2>/dev/null \
+  && no "Debian nftables.service enabled - its 'flush ruleset' would wipe the gate" \
+  || ok "distro nftables loader not enabled"
 # 'config' appears everywhere; anchor on the call that actually publishes it.
 grepf bridge-web.py 'd\["config"\] *= *golden_state\(\)' && ok "status exposes the live config (Golden Profile)" \
   || warn "config not exposed — drift could not be detected"

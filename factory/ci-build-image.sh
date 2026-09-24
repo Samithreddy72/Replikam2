@@ -29,7 +29,11 @@ apt-get install -y --no-install-recommends \
   network-manager dnsmasq-base rsync ca-certificates curl \
   cloud-guest-utils parted e2fsprogs \
   rfkill iw \
-  fonts-dejavu-core
+  fonts-dejavu-core \
+  nftables
+# nftables: the PIN's media gate (bridge-pin) - video/voice ports admit only the presenter who
+# entered the PIN. Only the `nft` tool is used; Debian's own nftables.service stays disabled
+# below, because its /etc/nftables.conf starts with "flush ruleset" (it would wipe the gate).
 # fonts-dejavu-core: render-idle-frame.py loads DejaVuSans.ttf by absolute path. Raspberry Pi
 # OS Lite ships NO truetype fonts, so the renderer raised FileNotFoundError on every run and
 # the in-camera status card was never re-rendered on the device - the meeting laptop showed
@@ -235,10 +239,13 @@ for u in bridge-gadget bridge-feeder-net bridge-uvcd bridge-feeder-audio bridge-
          gadget-clean-detach bridge-agent.timer \
          bridge-overrides bridge-overrides-health.timer bridge-ssh \
          bridge-ab-healthcheck bridge-wifi-unblock bridge-firstdiag \
-         bridge-firstboot bridge-regen-hostkeys bridge-identity; do
+         bridge-firstboot bridge-regen-hostkeys bridge-identity \
+         bridge-pin-gate bridge-pin-sessions; do
   systemctl enable "$u" 2>/dev/null || echo "WARN: could not enable $u"
 done
 systemctl disable bridge-testpattern 2>/dev/null || true
+# The distro firewall loader must never run: its config flushes every rule, the PIN gate included.
+systemctl disable nftables.service 2>/dev/null || true
 # The stock sshd stays OFF: it would listen on every interface with the distro config. The
 # bridge's SSH is bridge-ssh.service — tailnet address only, owner key only.
 systemctl disable ssh.service ssh.socket 2>/dev/null || true
