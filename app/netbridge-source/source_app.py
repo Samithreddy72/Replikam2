@@ -3174,7 +3174,28 @@ boot();
 """
 
 
+def _already_running():
+    """Is another copy of this app already serving on our port? A connect probe: no socket
+    options, no TIME_WAIT false alarms, the same on macOS and Windows."""
+    try:
+        with socket.create_connection((HOST, PORT), timeout=1.5):
+            return True
+    except OSError:
+        return False
+
+
 def main():
+    # ANOTHER COPY FIRST. The start-up sweep below kills every netbridge-mesh helper and our
+    # ffmpeg/GStreamer processes as "orphans" - but when a copy is already running they are
+    # ITS processes, and killing them cut a live meeting's video, voice and room audio before
+    # this copy then said "already running" and quit (found 2026-09-25, present since the
+    # sweep was added). Ask before touching anything; if one is running, just show it.
+    if _already_running():
+        url = "http://%s:%d/" % (HOST, PORT)
+        print("\nNetBridge is already running — opening it: %s" % url)
+        print("  (To switch versions, press Stop, quit that copy normally, then launch this one.)\n")
+        _open_browser(url)
+        raise SystemExit(0)
     # Explicit operator latency choice survives reconnects and fleet auto-tuning.
     saved_jitter = load_state().get("return_manual_jitter_ms")
     if saved_jitter is not None:
