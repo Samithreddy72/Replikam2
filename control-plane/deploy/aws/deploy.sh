@@ -40,6 +40,15 @@ fi
 echo "[deploy] commit   $GIT_SHA"
 echo "[deploy] build id $BUILD_ID"
 
+# BACK UP THE DATABASE FIRST. A new build may migrate it (2026-09-25 adds fleet numbers and
+# backfills them). SQLite's own backup API, run inside the RUNNING container, gives a consistent
+# copy even mid-write - a plain cp can catch half a transaction. Kept on the data volume, so the
+# rollback is: redeploy the previous commit and, only if needed, copy this file back.
+BACKUP="bridge.db.pre-${GIT_SHA:0:7}-$(date -u +%Y%m%d%H%M%S)"
+echo "[deploy] backing up the database -> /data/$BACKUP"
+$S "cd /opt/netbridge && sudo docker compose exec -T fleet python -c \"import sqlite3; s=sqlite3.connect('/data/bridge.db'); d=sqlite3.connect('/data/$BACKUP'); s.backup(d); d.close(); print('backup ok', sum(1 for _ in s.execute('select 1 from devices')), 'devices')\"" \
+  || { echo "[deploy] REFUSING: could not back up the database - nothing was changed." >&2; exit 1; }
+
 echo "[deploy] sending source (backend + built panel + Dockerfile)"
 tar -C "$CP" -czf - Dockerfile backend/requirements.txt backend/app panel-dist \
   | $S 'sudo mkdir -p /opt/netbridge/src && sudo chown -R ubuntu:ubuntu /opt/netbridge && tar -C /opt/netbridge/src -xzf -'
@@ -57,6 +66,16 @@ $S "cd /opt/netbridge/src && sudo docker build -q \
 
 echo "[deploy] starting"
 $S 'cd /opt/netbridge && sudo docker compose up -d && sleep 5 && sudo docker compose ps'
+
+# Caddy reads its Caddyfile once at start (no --watch), and `compose up -d` does not restart it
+# for a changed bind-mounted file - so a proxy change (2026-09-25: the panel's live stream must
+# pass uncompressed and unbuffered) would be copied and then silently ignored. Validate, then
+# reload gracefully: no dropped connections, and an invalid file leaves the old config serving.
+echo "[deploy] reloading the proxy config"
+$S 'cd /opt/netbridge && sudo docker compose exec -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 \
+     && sudo docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile' \
+  && echo "[deploy] proxy config reloaded" \
+  || { echo "[deploy] WARNING: the new Caddyfile did not validate/reload - the OLD proxy config is still serving." >&2; }
 
 # ---------------------------------------------------------------------------------------
 # PROVE IT. `docker compose ps` says a container is up, which is the same class of green
@@ -82,6 +101,17 @@ if [ "$LIVE_SHA" != "$GIT_SHA" ]; then
 fi
 DOCS_PUBLIC="$(printf '%s' "$LIVE" | sed -n 's/.*"api_docs_public" *: *\([a-z]*\).*/\1/p')"
 echo "[deploy] live commit  $LIVE_SHA  (matches)"
+# The panel is part of what shipped: prove the page being served is the one in this commit, and
+# that the admin stream refuses anyone without a credential.
+D="https://${DOMAIN:-fleet.scine.online}"
+WANT_PANEL="$(shasum -a 256 "$CP/panel-dist/index.html" | cut -c1-16)"
+GOT_PANEL="$(curl -fsS -m 15 "$D/" | shasum -a 256 | cut -c1-16)"
+[ "$WANT_PANEL" = "$GOT_PANEL" ] && echo "[deploy] panel        $GOT_PANEL  (matches)" \
+  || { echo "[deploy] FAILED: the panel being served ($GOT_PANEL) is not this commit's ($WANT_PANEL)." >&2; exit 1; }
+STREAM_CODE="$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$D/admin/stream")"
+[ "$STREAM_CODE" = "401" ] && echo "[deploy] /admin/stream refuses anonymous callers (401)" \
+  || { echo "[deploy] FAILED: /admin/stream answered $STREAM_CODE to an anonymous caller." >&2; exit 1; }
+echo "[deploy] database backup kept at /data/$BACKUP (fleetdata volume)"
 echo "[deploy] api docs public: ${DOCS_PUBLIC:-unknown}"
 [ "$DOCS_PUBLIC" = "true" ] && echo "[deploy] NOTE: interactive API docs are PUBLIC on this deployment (NB_API_DOCS=1)."
 echo "[deploy] done"
