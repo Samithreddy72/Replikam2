@@ -48,6 +48,15 @@ esac
 exec_baked() { exec "$BAKED" "$@"; }
 [ -x "$BAKED" ] || { log "baked-in script missing: $BAKED"; exit 127; }
 
+# Safe mode (bridge-overrides.sh): three boots in a row never became healthy, so this boot runs
+# every built-in script and no override at all — whatever was installed last cannot keep the
+# bridge down. A healthy boot clears it.
+SAFE_FLAG="${BRIDGE_RUN_SAFE_FLAG:-/run/bridge-overrides/safe-mode}"
+if [ -e "$SAFE_FLAG" ]; then
+  log "safe mode — running the built-in script"
+  exec_baked "$@"
+fi
+
 OVR="$DIR/$NAME"
 SIG="$DIR/$NAME.sig"
 [ -f "$OVR" ] || exec_baked "$@"

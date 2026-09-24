@@ -2,7 +2,8 @@
 # ci-disk-from-image.sh — the CI glue that turns the arm-runner's single-partition
 # raspios image into the two artifacts the fleet actually consumes, then signs them:
 #
-#   1. rootfs.tar.zst           — the OTA payload for bridge-update.sh (writes a STANDBY slot)
+#   1. rootfs.tar.zst           — the OTA payload for bridge-update.sh (writes a STANDBY slot);
+#                                  since 2026-09-24 it is rootA exactly as flashed (step 3b)
 #   2. netbridge-os-<V>.img.xz  — the flashable full-disk A/B + /data image (whole-card provision)
 #
 # Kept as a script (not inline YAML) so it is testable off-CI: point --image at any
@@ -37,10 +38,11 @@ esac; done
 for t in losetup sfdisk mkfs.vfat mkfs.ext4 zstd openssl xz; do command -v "$t" >/dev/null || die "missing tool: $t"; done
 
 mkdir -p "$OUTDIR"; OUTDIR="$(cd "$OUTDIR" && pwd)"
-WORK="$(mktemp -d)"; LOOP=""
+WORK="$(mktemp -d)"; LOOP=""; OTA_LOOP=""
 cleanup(){ set +e
-  for m in "$WORK"/root "$WORK"/boot; do mountpoint -q "$m" && umount "$m"; done
+  for m in "$WORK"/root "$WORK"/boot "$WORK"/rootA; do mountpoint -q "$m" && umount "$m"; done
   [ -n "$LOOP" ] && losetup -d "$LOOP" 2>/dev/null
+  [ -n "$OTA_LOOP" ] && losetup -d "$OTA_LOOP" 2>/dev/null
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -80,6 +82,12 @@ if [ -n "$KEY" ] && [ -f "$KEY" ]; then
   openssl pkey -in "$KEY" -pubout -out "$OUTDIR/ota-pubkey.pem" 2>/dev/null \
     || openssl ec -in "$KEY" -pubout -out "$OUTDIR/ota-pubkey.pem"
   PUBKEY_ARG="--pubkey $OUTDIR/ota-pubkey.pem"
+  # The image's read-only root carries pi/configs/ota-pubkey.pem as the OTA trust anchor. It
+  # must be the public half of THIS signing key, or every bridge built from here would refuse
+  # every future update.
+  _k1="$(openssl pkey -pubin -in "$OUTDIR/ota-pubkey.pem" -outform DER 2>/dev/null | sha256sum | cut -c1-64)"
+  _k2="$(openssl pkey -pubin -in "$HERE/../pi/configs/ota-pubkey.pem" -outform DER 2>/dev/null | sha256sum | cut -c1-64)"
+  [ -n "$_k1" ] && [ "$_k1" = "$_k2" ] || die "pi/configs/ota-pubkey.pem is not the public key of the OTA signing key"
 else
   log "WARN: no --signing-key; building UNSIGNED (no .sig / no shipped pubkey)"
 fi
@@ -90,6 +98,28 @@ log "assembling full-disk image (ROOT_MB=$ROOT_MB DATA_MB=$DATA_MB)"
 ROOT_MB="$ROOT_MB" DATA_MB="$DATA_MB" bash "$HERE/build-disk-image.sh" \
   --rootfs "$OUTDIR/rootfs.tar.zst" --boot "$WORK/bootsrc" \
   --version "$VERSION" --out "$DISK" $PUBKEY_ARG
+# ---- 3b. the OTA payload = rootA exactly as flashed ---------------------------
+# rootfs.tar.zst above is the RAW Raspberry Pi OS root. build-disk-image.sh turns it into the
+# bridge's rootA: read-only overlay config, the /data binds for tailscale / NetworkManager /
+# journal / /etc/bridge / agent + media config, resolv.conf, the flight-recorder link. An OTA
+# must install THAT — the raw root boots without the bridge's identity (no tailnet state, no
+# Wi-Fi, no fleet token), so every trial would fail its health check and roll back. Found
+# 2026-09-24 by reading both scripts side by side; no OTA had ever been run end to end.
+log "OTA payload: re-packing rootA from the assembled disk image"
+OTA_LOOP="$(losetup -fP --show "$DISK")"
+mkdir -p "$WORK/rootA"
+mount -o ro "${OTA_LOOP}p2" "$WORK/rootA"
+for _must in etc/overlayroot.conf etc/fstab usr/local/bin/bridge-overrides.sh etc/netbridge/updatable.conf; do
+  [ -e "$WORK/rootA/$_must" ] || die "flashed rootA lacks $_must — refusing to publish an OTA payload"
+done
+grep -q "/data/tailscale" "$WORK/rootA/etc/fstab" || die "flashed rootA fstab lacks the /data binds"
+tar --numeric-owner --acls --xattrs --warning=no-file-changed \
+    -C "$WORK/rootA" -cf "$WORK/rootfs-ota.tar" . || [ $? -le 1 ]
+umount "$WORK/rootA"; losetup -d "$OTA_LOOP"; OTA_LOOP=""
+zstd -q -12 --long=27 -T0 -f "$WORK/rootfs-ota.tar" -o "$OUTDIR/rootfs.tar.zst"
+rm -f "$WORK/rootfs-ota.tar"
+log "  OTA rootfs.tar.zst = the flashed rootA ($(du -h "$OUTDIR/rootfs.tar.zst" | cut -f1))"
+
 log "compressing disk image -> .img.xz (xz -${XZ_LEVEL:-3} -T0)"
 xz -T0 "-${XZ_LEVEL:-3}" -f "$DISK"   # rootB is empty (factory shrink) so a fast preset
 mv "${DISK}.xz" "$OUTDIR/"            # still lands well under GitHub's 2 GiB asset cap

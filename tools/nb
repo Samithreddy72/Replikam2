@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""nb — manage every NetBridge bridge in the fleet from this Mac.
+
+    nb list                              every bridge: online, OS, uptime, video/voice/return, power, updates
+    nb show <bridge>                     one bridge in detail
+    nb running <bridge>                  which files are built-in / updated / waiting / parked
+    nb logs <bridge> [unit] [-n N]       recent log lines (whole system, or one service)
+    nb read <bridge> <path> [-n N]       read a file on the bridge (read-only; secrets are redacted)
+    nb usb <bridge>                      USB camera misses, last minute
+    nb diagnose <bridge>                 full diagnostics bundle -> ~/Downloads
+    nb deploy <bridge|all> <file|name> [--now]   sign + publish (if a path) + install; applies safely
+    nb revert <bridge|all> <name>        back to the built-in file
+    nb unquarantine <bridge> [name]      restore a file automatic rollback parked
+    nb update <bridge> <version> [--force]   whole-OS update (after tools/publish-ota.sh <version>)
+    nb ota <bridge>                      progress / result of the last OS update
+    nb reboot <bridge>
+    nb ssh <bridge> [command ...]        owner SSH over the tailnet
+    nb run <bridge> <type> ['{"json":"args"}']   any allowed fleet command (advanced)
+
+<bridge> is a name ("Testing 2", or a unique prefix like "test"), or a device id (or its end).
+Anything that changes a bridge asks first; add --yes to skip the question (scripts).
+Config: FLEET_URL (default https://fleet.scine.online), token in ~/.netbridge/fleet-automation-token.
+"""
+import json, os, pathlib, re, shlex, socket, subprocess, sys, time, urllib.error, urllib.request
+
+FLEET = os.environ.get("FLEET_URL", "https://fleet.scine.online").rstrip("/")
+TOKEN_FILE = pathlib.Path(os.environ.get("FLEET_TOKEN_FILE", "~/.netbridge/fleet-automation-token")).expanduser()
+OWNER_KEY = pathlib.Path("~/.netbridge/keys/netbridge-owner-ssh").expanduser()
+KNOWN_HOSTS = pathlib.Path("~/.netbridge/known_hosts").expanduser()
+REPO = pathlib.Path(__file__).resolve().parent.parent
+DONE = {"done", "failed", "rejected", "timeout", "expired", "cancelled", "error"}
+CHANGES = {"deploy-script", "revert-script", "unquarantine", "update", "reboot", "restart", "start",
+           "stop", "profile", "set-peer", "reset-clock", "gadget-tune", "gadget-tune-clear",
+           "jitter-fix", "jitter-reset", "golden-restore", "set-pin", "unlock", "lock"}
+WAIT_S = {"update": 1800, "deploy-script": 1000, "diagnose": 1000, "revert-script": 700,
+          "unquarantine": 700, "restart": 700, "reboot": 60}
+YES = "--yes" in sys.argv
+if YES:
+    sys.argv.remove("--yes")
+
+
+def die(msg, code=1):
+    print("✖ " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def api(method, path, body=None, timeout=30):
+    try:
+        token = TOKEN_FILE.read_text().strip()
+    except OSError:
+        die("no fleet token at %s" % TOKEN_FILE)
+    req = urllib.request.Request(FLEET + path, method=method,
+                                 data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Authorization": "Bearer " + token,
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = r.read()
+            ctype = r.headers.get("Content-Type", "")
+            return json.loads(data) if "json" in ctype else data
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:400]
+        die("fleet said %s: %s" % (e.code, detail))
+    except urllib.error.URLError as e:
+        die("cannot reach the fleet (%s): %s" % (FLEET, e.reason))
+
+
+def devices():
+    return api("GET", "/admin/devices")
+
+
+def pick(query, allow_all=False):
+    devs = devices()
+    if allow_all and query.lower() == "all":
+        return [d for d in devs if d.get("claimed")]
+    q = query.lower()
+    exact = [d for d in devs if (d.get("name") or "").lower() == q or d["id"] == query]
+    if exact:
+        return exact[:1]
+    cand = [d for d in devs if (d.get("name") or "").lower().startswith(q) or d["id"].endswith(query)]
+    if len(cand) == 1:
+        return cand
+    if not cand:
+        die("no bridge matches %r — try: nb list" % query)
+    die("%r matches %d bridges (%s) — be more specific" % (query, len(cand), ", ".join(d.get("name") or d["id"] for d in cand)))
+
+
+def short_uptime(u):
+    """'2 days, 3 hours, 4 minutes' -> '2d03h04m' (fits the table)."""
+    m = {k: 0 for k in "dhm"}
+    for n, unit in re.findall(r"(\d+)\s*(day|hour|minute)", str(u or "")):
+        m[unit[0]] = int(n)
+    if not re.search(r"\d", str(u or "")):
+        return "?"
+    return ("%dd%02dh%02dm" % (m["d"], m["h"], m["m"])) if m["d"] else "%dh%02dm" % (m["h"], m["m"])
+
+
+def label(d):
+    return "%s (%s)" % (d.get("name") or "unnamed", d["id"][-8:])
+
+
+def live(d):
+    s = ((d.get("latest") or {}).get("streams") or {})
+    return bool(s.get("video")), bool((d.get("latest") or {}).get("udc") == "configured" or
+                                      "enumerated" in str(((d.get("latest") or {}).get("usb") or {}).get("detail", "")))
+
+
+def confirm(what, targets):
+    if YES:
+        return
+    names = ", ".join(label(d) for d in targets)
+    for d in targets:
+        vid, attached = live(d)
+        if vid:
+            print("  ⚠ %s is LIVE (presenter video flowing) — media changes will wait until it is idle." % label(d))
+        if attached:
+            print("  ⚠ %s has a meeting laptop attached — camera changes wait until it is unplugged." % label(d))
+    ans = input("%s on %s — continue? [y/N] " % (what, names)).strip().lower()
+    if ans not in ("y", "yes"):
+        die("cancelled", 0)
+
+
+def run(d, ctype, args=None, wait=True, quiet=False):
+    body = {"type": ctype, "args": args or {}}
+    if ctype in CHANGES:
+        body["confirm"] = True
+    r = api("POST", "/admin/devices/%s/commands" % d["id"], body)
+    cid = r.get("id") or r.get("command_id")
+    if not quiet:
+        print("  → %s: %s queued (#%s)" % (label(d), ctype, cid))
+    if not wait or cid is None:
+        return None
+    limit = WAIT_S.get(ctype, 180)
+    t0 = time.time()
+    while time.time() - t0 < limit:
+        time.sleep(4)
+        for c in api("GET", "/admin/devices/%s/commands?limit=30" % d["id"]):
+            if str(c.get("id")) == str(cid) and c.get("status") in DONE:
+                return c
+        if not quiet and int(time.time() - t0) % 60 < 4:
+            print("    … still running (%ds)" % (time.time() - t0))
+    print("  ⏳ no result after %ds — it may still finish; check: nb show %s" % (limit, d.get("name")))
+    return None
+
+
+def show_result(c):
+    if not c:
+        return 1
+    ok = c.get("status") == "done"
+    print(("  ✔ " if ok else "  ✖ ") + c.get("status", "?"))
+    out = (c.get("output") or "").rstrip()
+    if out:
+        print("    " + out.replace("\n", "\n    "))
+    return 0 if ok else 1
+
+
+# ------------------------------------------------------------------------ commands
+def cmd_list(_):
+    devs = devices()
+    print("%-18s %-6s %-15s %-9s %-11s %-8s %-6s %s" % ("BRIDGE", "ONLINE", "OS", "UPTIME", "V/VOICE/RET", "POWER", "TEMP", "UPDATES"))
+    for d in devs:
+        l = d.get("latest") or {}
+        s = l.get("streams") or {}
+        streams = "/".join("✔" if s.get(k) else "·" for k in ("video", "voice", "return"))
+        pw = ((l.get("power") or {}).get("rate") or {}).get("pct")
+        ov = l.get("overrides") or {}
+        upd = []
+        if ov.get("safe_mode"):
+            upd.append("SAFE MODE")
+        if ov.get("pending"):
+            upd.append("waiting: " + ",".join(ov["pending"]))
+        if l.get("quarantined"):
+            upd.append("parked: " + ",".join(l["quarantined"]))
+        if ov.get("active"):
+            upd.append("%d updated" % len(ov["active"]))
+        ota = l.get("ota") or {}
+        if ota.get("state") and ota.get("state") not in ("committed",):
+            upd.append("OS %s: %s" % (ota.get("version", ""), ota["state"]))
+        print("%-18s %-6s %-15s %-9s %-11s %-8s %-6s %s" % (
+            (d.get("name") or d["id"][-8:])[:18], "yes" if d.get("online") else "NO",
+            (d.get("version") or "?")[:15], short_uptime(l.get("uptime")), streams,
+            ("%s%%" % pw) if pw is not None else "?", str(l.get("temp", "?"))[:6], "; ".join(upd) or "-"))
+
+
+def cmd_show(a):
+    d = pick(a[0])[0]
+    d = api("GET", "/admin/devices/%s" % d["id"])
+    l = d.get("latest") or {}
+    p = l.get("power") or {}
+    print("%s — %s, OS %s, last seen %s" % (label(d), "ONLINE" if d.get("online") else "OFFLINE", d.get("version"), d.get("last_seen")))
+    print("  uptime %s | temp %s | tailnet %s | mesh %s" % (l.get("uptime"), l.get("temp"), d.get("tailscale_ip") or l.get("tailscale_ip"),
+                                                         (l.get("mesh_path") or {}).get("via")))
+    print("  streams %s | restarts %s" % (l.get("streams"), l.get("restarts")))
+    print("  USB: %s" % ((l.get("usb") or {}).get("detail")))
+    print("  power: %s" % (p.get("summary") or p))
+    print("  audio: return %s Hz, mismatch %s, clock %s" % (l.get("return_rate"), l.get("return_mismatch"), (l.get("clock") or {}).get("verdict")))
+    print("  updates: %s | parked: %s | OS update: %s" % (l.get("overrides"), l.get("quarantined"), l.get("ota")))
+    if d.get("alerts"):
+        print("  alerts: %s" % d["alerts"])
+    print("  recent commands:")
+    for c in (d.get("commands") or [])[:8]:
+        print("    #%s %-14s %-9s %s" % (c["id"], c["type"], c["status"], c["created_at"][:19]))
+
+
+def cmd_simple(ctype, args_fn=lambda a: {}):
+    def f(a):
+        d = pick(a[0])[0]
+        return show_result(run(d, ctype, args_fn(a[1:])))
+    return f
+
+
+def _n(a, default):
+    for i, x in enumerate(a):
+        if x in ("-n", "--lines") and i + 1 < len(a):
+            return int(a[i + 1])
+    return default
+
+
+def cmd_logs(a):
+    d = pick(a[0])[0]
+    rest = [x for x in a[1:] if not x.startswith("-") and not x.isdigit()]
+    args = {"lines": _n(a, 120)}
+    if rest:
+        args["unit"] = rest[0]
+    return show_result(run(d, "logs", args))
+
+
+def cmd_read(a):
+    d = pick(a[0])[0]
+    return show_result(run(d, "read-file", {"path": a[1], "lines": _n(a, 60), "tail": True}))
+
+
+def cmd_usb(a):
+    d = pick(a[0])[0]
+    c = run(d, "read-file", {"path": "/run/netbridge-usb-video.txt", "lines": 6, "tail": True}, quiet=True)
+    if not c or c.get("status") != "done":
+        return show_result(c)
+    rows = [l for l in (c.get("output") or "").splitlines() if "enodata=" in l]
+    total = sum(int(re.search(r"enodata=(\d+)", l).group(1)) for l in rows)
+    for l in rows:
+        print("  " + l)
+    if rows:
+        print("  ≈ %.1f USB camera misses per second over the last %d s" % (total / (10.0 * len(rows)), 10 * len(rows)))
+    return 0
+
+
+def cmd_diagnose(a):
+    d = pick(a[0])[0]
+    before = {b["id"] for b in api("GET", "/admin/devices/%s/diagnostics" % d["id"])}
+    rc = show_result(run(d, "diagnose"))
+    for _ in range(30):
+        new = [b for b in api("GET", "/admin/devices/%s/diagnostics" % d["id"]) if b["id"] not in before]
+        if new:
+            b = new[0]
+            data = api("GET", "/admin/diagnostics/%s" % b["id"], timeout=120)
+            out = pathlib.Path("~/Downloads").expanduser() / ("netbridge-diag-%s-%s" % (re.sub(r"\W+", "-", d.get("name") or d["id"]), b["filename"]))
+            out.write_bytes(data if isinstance(data, (bytes, bytearray)) else json.dumps(data).encode())
+            print("  📦 bundle saved: %s (%d KB)" % (out, len(data) // 1024))
+            return rc
+        time.sleep(4)
+    print("  (no bundle arrived yet — the bridge uploads it after the diagnose finishes)")
+    return rc
+
+
+def _publish_if_path(x):
+    p = pathlib.Path(x).expanduser()
+    if p.exists():
+        r = subprocess.run(["bash", str(REPO / "tools/publish-script.sh"), str(p)])
+        if r.returncode != 0:
+            die("publish failed — nothing deployed")
+        return p.name
+    return x
+
+
+def cmd_deploy(a):
+    targets = pick(a[0], allow_all=True)
+    name = _publish_if_path(a[1])
+    args = {"name": name, "source": FLEET + "/payloads"}
+    if "--now" in a:
+        args["now"] = True
+    confirm("Install signed update %s" % name, targets)
+    rc = 0
+    for d in targets:
+        rc |= show_result(run(d, "deploy-script", args))
+    return rc
+
+
+def cmd_revert(a):
+    targets = pick(a[0], allow_all=True)
+    confirm("Revert %s to the built-in file" % a[1], targets)
+    rc = 0
+    for d in targets:
+        rc |= show_result(run(d, "revert-script", {"name": a[1]}))
+    return rc
+
+
+def cmd_unquarantine(a):
+    d = pick(a[0])[0]
+    confirm("Restore %s from quarantine" % (a[1] if len(a) > 1 else "everything"), [d])
+    return show_result(run(d, "unquarantine", {"name": a[1]} if len(a) > 1 else {}))
+
+
+def cmd_update(a):
+    d = pick(a[0])[0]
+    v = a[1]
+    have = [x.get("version") for x in api("GET", "/admin/payloads/ota")]
+    if v not in have:
+        die("the fleet does not offer %s yet — first run: bash tools/publish-ota.sh %s" % (v, v))
+    args = {"version": v}
+    if "--force" in a:
+        args["force"] = True
+    confirm("Install OS %s (two reboots; automatic rollback if unhealthy)" % v, [d])
+    rc = show_result(run(d, "update", args))
+    if rc == 0:
+        print("  The bridge trial-boots in ~45 s and commits itself only if healthy. Watch: nb ota %s" % (d.get("name")))
+    return rc
+
+
+def cmd_ota(a):
+    d = pick(a[0])[0]
+    c = run(d, "read-file", {"path": "/data/ota-staging/status.json"}, quiet=True)
+    if c and c.get("status") == "done":
+        m = re.search(r"\{.*\}", c.get("output") or "", re.S)
+        print("  " + (m.group(0) if m else (c.get("output") or "no OS update has run on this bridge")))
+    print("  running OS: %s" % d.get("version"))
+    return 0
+
+
+def cmd_reboot(a):
+    d = pick(a[0])[0]
+    confirm("REBOOT", [d])
+    return show_result(run(d, "reboot"))
+
+
+def cmd_ssh(a):
+    d = pick(a[0])[0]
+    d = api("GET", "/admin/devices/%s" % d["id"])
+    ip = d.get("tailscale_ip") or (d.get("latest") or {}).get("tailscale_ip")
+    if not ip:
+        die("the fleet does not know %s's tailnet address yet" % label(d))
+    if not OWNER_KEY.exists():
+        die("owner key missing: %s" % OWNER_KEY)
+    try:
+        socket.create_connection((ip, 22), timeout=6).close()
+    except OSError:
+        die("cannot reach %s:22. This Mac must be on the bridges' tailnet (open Tailscale, sign in to "
+            "the account that owns the bridges, and allow you -> tag:bridge:22 in the tailnet policy); "
+            "the bridge must also run an image with owner SSH (2026-09-24 or later)." % ip)
+    cmd = ["ssh", "-i", str(OWNER_KEY), "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new",
+           "-o", "UserKnownHostsFile=%s" % KNOWN_HOSTS, "pi@%s" % ip] + a[1:]
+    os.execvp("ssh", cmd)
+
+
+def cmd_run(a):
+    d = pick(a[0])[0]
+    args = json.loads(a[2]) if len(a) > 2 else {}
+    if a[1] in CHANGES:
+        confirm("Run %s %s" % (a[1], json.dumps(args)), [d])
+    return show_result(run(d, a[1], args))
+
+
+COMMANDS = {
+    "list": (cmd_list, 0), "ls": (cmd_list, 0), "show": (cmd_show, 1),
+    "running": (cmd_simple("running"), 1), "logs": (cmd_logs, 1), "read": (cmd_read, 2),
+    "usb": (cmd_usb, 1), "diagnose": (cmd_diagnose, 1), "deploy": (cmd_deploy, 2),
+    "revert": (cmd_revert, 2), "unquarantine": (cmd_unquarantine, 1), "update": (cmd_update, 2),
+    "ota": (cmd_ota, 1), "reboot": (cmd_reboot, 1), "ssh": (cmd_ssh, 1), "run": (cmd_run, 2),
+}
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help") or sys.argv[1] not in COMMANDS:
+        print(__doc__)
+        sys.exit(0 if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help", "help") else 64)
+    fn, need = COMMANDS[sys.argv[1]]
+    rest = sys.argv[2:]
+    if len(rest) < need:
+        print(__doc__)
+        sys.exit(64)
+    try:
+        sys.exit(fn(rest) or 0)
+    except KeyboardInterrupt:
+        sys.exit(130)

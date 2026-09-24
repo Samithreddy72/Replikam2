@@ -1,0 +1,4 @@
+# NetBridge owner SSH key(s). Installed read-only at /etc/netbridge/owner_ssh_authorized_keys;
+# rotate with a signed update of 'owner_ssh_authorized_keys' (no reflash). 'restrict,pty' = a shell
+# only: no port/agent/X11 forwarding, no tunnels. Private key: ~/.netbridge/keys/netbridge-owner-ssh
+restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGk5nR95P0e1VaKiu9l72K8e7B1SGaMkMosn5Ppv5iXE netbridge-owner (Samith's Mac) 2026-09-24

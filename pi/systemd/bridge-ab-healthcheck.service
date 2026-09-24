@@ -1,6 +1,8 @@
 [Unit]
 Description=NetBridge A/B tryboot health-check + auto-rollback
-After=multi-user.target network-online.target fleet-brain.service
+# No fleet-brain: the control plane runs on AWS, not on bridges (2026-08). A trial boot is
+# judged by bridge-ab health_ok: media up, gadget bound, tailnet up, a fleet heartbeat this boot.
+After=multi-user.target network-online.target tailscaled.service
 Wants=network-online.target
 
 [Service]

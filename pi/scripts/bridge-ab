@@ -17,13 +17,27 @@ running_uuid(){ sed -n 's/.*root=PARTUUID=\([0-9a-fA-F-]*\).*/\1/p' /proc/cmdlin
 committed_uuid(){ sed -n 's/.*root=PARTUUID=\([0-9a-fA-F-]*\).*/\1/p' "$CMDLINE"; }
 is_trial(){ grep -q 'bridge_tryboot=1' /proc/cmdline; }
 
+# A trial slot is healthy when the bridge is a working bridge AND can still be managed:
+#   media services up, the USB gadget bound, the tailnet up, and the fleet agent has completed
+#   a heartbeat in THIS boot (/run is per-boot). The last one matters most — a slot that
+#   cannot reach the fleet cannot be fixed remotely, so it must never be committed.
+# (Until 2026-09-24 this required `fleet-brain` and 127.0.0.1:8000 — the control plane, which
+#  no bridge runs since the fleet moved to AWS — so every trial would have rolled back.)
 health_ok(){
-  local up ts hz
-  up=$(systemctl is-active bridge-gadget bridge-uvcd bridge-feeder-net \
-        bridge-feeder-audio bridge-return-audio fleet-brain 2>/dev/null | grep -c '^active$')
-  tailscale status >/dev/null 2>&1 && ts=1 || ts=0
-  hz=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/healthz 2>/dev/null)
-  [ "$up" = "6" ] && [ "$ts" = "1" ] && [ "$hz" = "200" ]
+  local u
+  for u in bridge-gadget bridge-overrides bridge-uvcd bridge-feeder-net bridge-feeder-audio bridge-web; do
+    [ "$(systemctl is-active "$u" 2>/dev/null)" = active ] || return 1
+  done
+  [ -n "$(cat /sys/kernel/config/usb_gadget/g1/UDC 2>/dev/null)" ] || return 1
+  tailscale status >/dev/null 2>&1 || return 1
+  [ -f /run/bridge-agent/last-ok ] || return 1
+  return 0
+}
+ota_status(){   # the result lands where the fleet can read it: /data/ota-staging/status.json
+  mkdir -p /data/ota-staging 2>/dev/null || return 0
+  printf '{"state":"%s","version":"%s","detail":"%s","ts":%s}\n' "$1" \
+    "$(cat /data/ota-staging/trial-version 2>/dev/null)" "$2" "$(date +%s)" \
+    > /data/ota-staging/status.json 2>/dev/null || true
 }
 
 case "${1:-status}" in
@@ -71,8 +85,8 @@ case "${1:-status}" in
     ;;
   healthcheck)
     if ! is_trial; then echo "normal boot — no trial to evaluate."; exit 0; fi
-    echo "TRYBOOT TRIAL on slot $(slot_of_uuid "$(running_uuid)") — health-checking up to 120s..."
-    for i in $(seq 1 24); do
+    echo "TRYBOOT TRIAL on slot $(slot_of_uuid "$(running_uuid)") — health-checking up to 300s..."
+    for i in $(seq 1 60); do
       if health_ok; then
         : > /run/bridge-ab-trial-ok
         if [ -e "$BOOT/.ota-autocommit" ]; then
@@ -80,6 +94,7 @@ case "${1:-status}" in
           logger -t bridge-ab "TRIAL HEALTHY + auto-commit armed — committing slot $(running_uuid)"
           echo "TRIAL HEALTHY — auto-committing (OTA)."
           "$0" commit
+          ota_status committed "slot $(slot_of_uuid "$(running_uuid)") is now the permanent slot"
         else
           logger -t bridge-ab "TRIAL HEALTHY on $(running_uuid) — awaiting manual 'bridge-ab commit'"
           echo "TRIAL HEALTHY — run 'sudo bridge-ab commit' to persist, or power-cycle to roll back."
@@ -89,6 +104,7 @@ case "${1:-status}" in
       sleep 5
     done
     rm -f "$BOOT/.ota-autocommit"
+    ota_status "rolled back" "the new slot did not become healthy within 300 s; back on the previous slot"
     logger -t bridge-ab "TRIAL FAILED health-check — auto-rolling back (reboot)"
     echo "TRIAL FAILED — auto-rolling back."
     reboot

@@ -835,6 +835,10 @@ def _gather_uncached():
     d["return_rate"] = _return_opened_rate()    # what the pipeline is opened at (0=idle)
     d["mesh_path"] = _cached("mesh_path", 10, mesh_path)   # direct vs DERP relay (runs `tailscale status`)
     d["quarantined"] = _quarantined()           # [] = none; names = deployed code NOT running
+    # Signed updates: which are in effect, which wait for their moment, and safe mode
+    # (bridge-overrides.sh). Whole-OS updates: the last OTA state (bridge-update.sh / bridge-ab).
+    d["overrides"] = _json_file("/run/bridge-overrides/status.json")
+    d["ota"] = _json_file("/data/ota-staging/status.json")
     suspect, detail = clock_verdict()
     d["clock_suspect"] = suspect          # bool (backward compat for the control plane)
     d["clock"] = detail                   # M4: full FFT verdict {verdict,score,reasons,...}
@@ -910,11 +914,21 @@ def _quarantined():
     looks wrong on the panel while the fix you shipped is simply absent. It stayed
     invisible for a whole session before anyone thought to read a diagnostics bundle."""
     try:
-        return sorted(n.split(".")[0] + ".sh"
-                      for n in os.listdir("/data/overrides/quarantine")
-                      if ".sig." not in n)
+        # "<name>.<timestamp>" — names are not only *.sh any more (bridge-web.py, keys, drop-ins)
+        return sorted(set(n.rsplit(".", 1)[0]
+                          for n in os.listdir("/data/overrides/quarantine")
+                          if ".sig." not in n and n.rsplit(".", 1)[-1].isdigit()))
     except Exception:
         return []
+
+
+def _json_file(path):
+    """A small status file written by another service, or None. Never raises."""
+    try:
+        with open(path) as f:
+            return json.loads(f.read(4096))
+    except Exception:
+        return None
 
 def _udc_state():
     udcdir = "/sys/class/udc"

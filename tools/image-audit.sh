@@ -99,11 +99,16 @@ if [ $have_root -eq 1 ]; then
            /usr/local/bin/render-idle-frame.py /usr/local/bin/bridge-deploy-script.sh \
            /etc/systemd/journald.conf.d/no-kmsg.conf \
            /usr/local/bin/wifi-guardian.sh /usr/lib/os-release /etc/default/bridge-agent \
-           /etc/netbridge/control-url /etc/bridge/control-url; do
+           /etc/netbridge/control-url /etc/bridge/control-url \
+           /usr/local/bin/bridge-overrides.sh /usr/local/bin/bridge-ssh.sh \
+           /usr/local/bin/bridge-cmd-run.sh /etc/netbridge/updatable.conf \
+           /etc/netbridge/owner_ssh_authorized_keys /etc/netbridge/ota-pubkey.pem \
+           /etc/netbridge/script-pubkey.pem; do
     "$DEBUGFS" -R "cat $f" "$ROOTDEV" >"$CAT/$(basename "$f")" 2>/dev/null
   done
   for u in bridge-agent bridge-web bridge-media bridge-pitch bridge-crackle-sentry bridge-identity \
-           bridge-jitter-sentry netbridge-gadget; do
+           bridge-jitter-sentry netbridge-gadget bridge-ssh bridge-overrides bridge-ab-healthcheck \
+           netbridge-diagnostics-ssh; do
     "$DEBUGFS" -R "cat /etc/systemd/system/${u}.service" "$ROOTDEV" >"$CAT/${u}.service" 2>/dev/null
   done
   # Enablement lives in the .wants symlink farm — listed ONCE, not once per unit.
@@ -111,6 +116,8 @@ if [ $have_root -eq 1 ]; then
     >"$CAT/.wants" 2>/dev/null
   "$DEBUGFS" -R "ls /etc/systemd/system/timers.target.wants" "$ROOTDEV" \
     >"$CAT/.timers" 2>/dev/null
+  "$DEBUGFS" -R "ls /etc/systemd/system/sysinit.target.wants" "$ROOTDEV" \
+    >"$CAT/.sysinit" 2>/dev/null
 fi
 has() { [ -s "$CAT/$1" ]; }
 grepf() { grep -qE "$2" "$CAT/$1" 2>/dev/null; }
@@ -274,7 +281,7 @@ grep -vE '^[[:space:]]*#' "$CAT/jitter-sentry.sh" 2>/dev/null | grep -q 'switch_
 grepf bridge-uvcd.sh 'netbridge-usb-video.txt' && grepf bridge-uvcd.sh 'USB_IRQ_CPUS="2"' \
   && ok "camera service: USB-miss counter built in, USB interrupt on CPU 2" \
   || no "camera service lacks the USB-miss counter or the CPU 2 interrupt setting"
-awk '/^install -m 0644 "\$STAGE\/\$NAME.sig"/{i=NR} /^sync$/{if(i&&!s)s=NR} /systemctl restart "\$s"/{if(i&&!r)r=NR} END{exit !(i && s && r && s>i && s<r)}' "$CAT/bridge-deploy-script.sh" 2>/dev/null \
+awk '/^install -m 0644 +"\$STAGE\/\$NAME.sig"/{i=NR} /^sync/{if(i&&!s)s=NR} /"\$OVR" policy "\$NAME"/{if(i&&!r)r=NR} END{exit !(i && s && r && s>i && s<r)}' "$CAT/bridge-deploy-script.sh" 2>/dev/null \
   && ok "signed deploys flush to the card before restarting the service" \
   || no "deploy script restarts before flushing — a reset can leave 0-byte overrides"
 # 2026-09-22 CPU sweep: each of these was measured costing CPU on a live bridge.
@@ -530,6 +537,84 @@ grepf bridge-run.sh 'openssl.*(dgst|verify)|script-pubkey' \
   || no "unsigned overrides would execute"
 grepf bridge-agent.py 'quarantine' && ok "auto-rollback quarantine present" \
   || warn "no quarantine — a bad override cannot self-revert"
+
+sec "Remote maintenance: signed updates, rollback, owner SSH, OTA (2026-09-24)"
+# What a signed update may replace is the read-only catalog. The safety net itself must never be
+# in it: the loader, the installer, the rollback guard, the command runner, the A/B switch and
+# the security/provisioning tools change only with a whole new image.
+if has updatable.conf; then
+  ok "update catalog /etc/netbridge/updatable.conf is on the read-only root"
+  _bad=""
+  for _n in bridge-run.sh bridge-deploy-script.sh bridge-overrides.sh bridge-cmd-run.sh bridge-ab \
+            bridge-pin bridge-derive-pass bridge-identity.sh bridge-firstboot.sh; do
+    awk -v n="$_n" '!/^[[:space:]]*#/ && $1==n {f=1} END {exit !f}' "$CAT/updatable.conf" && _bad="$_bad $_n"
+  done
+  [ -z "$_bad" ] && ok "the safety net is NOT remotely replaceable (loader, installer, rollback, A/B, PIN)" \
+                 || no "catalog lets a remote update replace:$_bad"
+  _miss=""
+  for _t in $(awk '!/^[[:space:]]*#/ && NF>=5 && ($3=="bind" || $3=="loader") {print $2}' "$CAT/updatable.conf"); do
+    case "$_t" in
+      /usr/local/bin/*) grep -q " $(basename "$_t")\$" "$IDX" 2>/dev/null || grep -qE "[[:space:]]$(basename "$_t")[[:space:]]*$" "$IDX" || _miss="$_miss $(basename "$_t")" ;;
+      /home/pi/uvc-raw-setup.sh) has uvc-raw-setup.sh || _miss="$_miss uvc-raw-setup.sh" ;;
+    esac
+  done
+  [ -z "$_miss" ] && ok "every updatable file exists in the image (a bind needs a built-in to cover)" \
+                  || no "catalog names files the image does not have:$_miss"
+else
+  no "no update catalog — nothing beyond the four media scripts can be updated without a reflash"
+fi
+grepf bridge-overrides.sh 'openssl dgst -sha256 -verify' && grepf bridge-overrides.sh 'script-pubkey.pem' \
+  && ok "every override is signature-checked at every boot (bridge-overrides.sh)" \
+  || no "bridge-overrides.sh does not verify signatures"
+grepf bridge-overrides.sh 'BOOT_LIMIT=3' && grepf bridge-overrides.sh 'safe-mode' && grepf bridge-run.sh 'safe-mode' \
+  && ok "safe mode: 3 unhealthy boots in a row -> every built-in file, no overrides" \
+  || no "no safe mode — a bad boot-time update could keep the bridge down"
+grepf bridge-overrides.sh 'LIFELINE_QUIET_S' && grepf bridge-overrides.sh 'quarantine' \
+  && ok "lifeline guard + crash-loop rollback (agent / Wi-Fi updates revert if the fleet goes quiet)" \
+  || no "no automatic rollback for bound updates"
+grepf bridge-overrides.sh 'laptop_attached' && grepf updatable.conf 'bridge-uvcd\.sh +[^ ]+ +loader +camera' \
+  && ok "camera updates wait for the laptop to be unplugged (restart with it attached reboots the Pi)" \
+  || no "a camera update could restart the camera under an attached laptop"
+grep -q 'bridge-overrides.service' "$CAT/.sysinit" 2>/dev/null \
+  && ok "bridge-overrides runs at every boot (sysinit)" || no "bridge-overrides is not enabled"
+grep -q 'bridge-overrides-health.timer' "$CAT/.timers" 2>/dev/null \
+  && ok "rollback/pending health timer enabled" || no "bridge-overrides-health.timer not enabled"
+# Owner SSH: tailnet address only, owner key only, no root, no passwords, no forwarding.
+if has bridge-ssh.sh; then
+  _ssh_bad=""
+  for _p in 'PermitRootLogin no' 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' \
+            'AuthenticationMethods publickey' 'AllowTcpForwarding no' 'PermitTunnel no' \
+            'AllowUsers \$USER_ALLOWED@100.64.0.0/10' 'ListenAddress \$1'; do
+    grepf bridge-ssh.sh "$_p" || _ssh_bad="$_ssh_bad [$_p]"
+  done
+  grepf bridge-ssh.sh '12\[0-7\]' || _ssh_bad="$_ssh_bad [tailnet-range check]"
+  [ -z "$_ssh_bad" ] && ok "owner SSH: tailnet address only, key only, no root/passwords/forwarding" \
+                     || no "owner SSH config is missing:$_ssh_bad"
+else
+  no "bridge-ssh.sh missing — no remote shell for fixes"
+fi
+grep -q 'bridge-ssh.service' "$CAT/.wants" 2>/dev/null && ok "bridge-ssh enabled" || no "bridge-ssh not enabled"
+grep -qE '^ssh\.service|[[:space:]]ssh\.service' "$CAT/.wants" 2>/dev/null \
+  && no "the stock sshd is enabled (would listen on every interface)" || ok "stock sshd not enabled"
+has netbridge-diagnostics-ssh.service && no "collaborator's root diagnostic SSH unit is installed" \
+  || ok "no root diagnostic SSH unit"
+grep -qE '^restrict,pty ssh-(ed25519|rsa|ecdsa)' "$CAT/owner_ssh_authorized_keys" 2>/dev/null \
+  && ok "owner SSH key present, restricted (shell only, no forwarding)" \
+  || no "owner SSH key missing or unrestricted"
+# Whole-OS updates: verified with a key on the read-only root, judged by a health check a bridge
+# can actually pass, and run outside the agent so they are not killed half-way.
+has ota-pubkey.pem && ok "OTA public key on the read-only root" || no "OTA public key only on /data (writable)"
+grepf bridge-ab 'fleet-brain' && no "A/B health check still waits for fleet-brain (every trial would roll back)" \
+  || { grepf bridge-ab 'bridge-agent/last-ok' && ok "A/B trial is committed only after a fleet heartbeat" \
+       || no "A/B health check does not require fleet contact"; }
+grepf bridge-update.sh '\-\-fleet' && grepf bridge-update.sh 'meeting laptop is attached' \
+  && ok "OTA refuses live sessions and schedules its trial boot outside the agent" \
+  || no "OTA can start under a live meeting or be killed with the agent"
+grepf bridge-agent.py 'DETACHED' && grepf bridge-agent.py 'collect_results' && has bridge-cmd-run.sh \
+  && ok "slow fleet commands run in the background and still report (fixes D2)" \
+  || no "slow fleet commands still run inside the agent (killed at its timeout, result lost)"
+grepf bridge-agent.py 'mark_ok' && ok "agent records every accepted heartbeat (used by rollback + A/B)" \
+  || no "agent does not record fleet contact"
 
 sec "Every panel button is accepted by THIS image's agent"
 # The real end-to-end gate check. A command must pass three independent allow-lists: the panel

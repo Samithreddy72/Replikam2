@@ -1,0 +1,17 @@
+[Unit]
+Description=NetBridge signed updates: verify every stored update and put it in place before the bridge starts
+# Early and before every service that runs an updatable file, so each one starts with the
+# verified version. /data must be mounted: that is where the updates live.
+DefaultDependencies=no
+After=local-fs.target
+RequiresMountsFor=/data
+Before=sysinit.target shutdown.target bridge-gadget.service bridge-uvcd.service bridge-feeder-net.service bridge-feeder-audio.service bridge-return-audio.service bridge-web.service jitter-sentry.service flight-recorder.service bridge-supervisor.service wifi-guardian.service bridge-powertrim.service bridge-idle-frame.service bridge-agent.service bridge-ssh.service bridge-wifi-portal.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/bridge-overrides.sh apply-all
+
+[Install]
+WantedBy=sysinit.target

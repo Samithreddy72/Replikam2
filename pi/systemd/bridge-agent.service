@@ -8,4 +8,4 @@ Type=oneshot
 EnvironmentFile=-/etc/default/bridge-agent
 ExecStart=/usr/bin/python3 /usr/local/bin/bridge-agent.py
 # Runs as root: writes /etc/bridge/agent.token and the bridge CLI uses passwordless sudo.
-TimeoutStartSec=30
+TimeoutStartSec=45

@@ -1,0 +1,9 @@
+[Unit]
+Description=NetBridge signed updates: healthy-boot mark, automatic rollback, pending changes
+After=bridge-overrides.service
+Requires=bridge-overrides.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bridge-overrides.sh health
+TimeoutStartSec=90

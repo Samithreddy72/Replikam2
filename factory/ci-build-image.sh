@@ -136,6 +136,16 @@ install -d /etc/modprobe.d /etc/systemd/journald.conf.d /etc/systemd/system.conf
 # there could be swapped by whoever can write it.
 install -d /etc/netbridge
 install -m 0644 pi/configs/script-pubkey.pem /etc/netbridge/script-pubkey.pem
+# The same idea for the rest of remote maintenance (2026-09-24), all on the read-only root so
+# nothing a remote update can write is able to widen what remote updates may do:
+#   ota-pubkey.pem             verifies whole-OS updates (bridge-update.sh); /data had the only
+#                              copy before, and /data is writable
+#   updatable.conf             the ONLY files a signed update may replace, and how each applies
+#   owner_ssh_authorized_keys  the owner's SSH key (bridge-ssh.sh: tailnet only, no root, no
+#                              passwords); rotated by a signed update, never by editing
+install -m 0644 pi/configs/ota-pubkey.pem /etc/netbridge/ota-pubkey.pem
+install -m 0644 pi/configs/updatable.conf /etc/netbridge/updatable.conf
+install -m 0644 pi/configs/owner_ssh_authorized_keys /etc/netbridge/owner_ssh_authorized_keys
 install -m 0644 pi/configs/v4l2loopback.conf       /etc/modprobe.d/
 install -m 0644 pi/configs/size-cap.conf           /etc/systemd/journald.conf.d/
 install -m 0644 pi/configs/journald-persistent.conf /etc/systemd/journald.conf.d/
@@ -223,11 +233,15 @@ for u in bridge-gadget bridge-feeder-net bridge-uvcd bridge-feeder-audio bridge-
          wifi-guardian bridge-powertrim flight-recorder jitter-sentry bridge-supervisor \
          bridge-watchdog.timer bridge-web bridge-wifi-portal bridge-idle-frame \
          gadget-clean-detach bridge-agent.timer \
+         bridge-overrides bridge-overrides-health.timer bridge-ssh \
          bridge-ab-healthcheck bridge-wifi-unblock bridge-firstdiag \
          bridge-firstboot bridge-regen-hostkeys bridge-identity; do
   systemctl enable "$u" 2>/dev/null || echo "WARN: could not enable $u"
 done
 systemctl disable bridge-testpattern 2>/dev/null || true
+# The stock sshd stays OFF: it would listen on every interface with the distro config. The
+# bridge's SSH is bridge-ssh.service — tailnet address only, owner key only.
+systemctl disable ssh.service ssh.socket 2>/dev/null || true
 # Installed but deliberately NOT enabled, and both for the same reason: neither has ever been
 # shown to help, and every service running during a live session is another variable in an
 # audio fault we have not yet explained.

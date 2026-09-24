@@ -13,13 +13,31 @@ Config lives in /etc/default/bridge-agent:
     CONTROL_URL=https://control.example.ts.net   # control plane base URL (on the tailnet)
     BOOTSTRAP_TOKEN=...                           # one-time enroll token (injected at flash)
 """
-import json, os, re, ssl, subprocess, urllib.request, urllib.error, importlib.util
+import json, os, re, ssl, subprocess, time, urllib.request, urllib.error, importlib.util
 
 CONF = "/etc/default/bridge-agent"
 STATE_DIR = "/etc/bridge"
 TOKEN_FILE = os.path.join(STATE_DIR, "agent.token")
 WEB_PY = "/usr/local/bin/bridge-web.py"
 TIMEOUT = 10
+# Proof of life for the rest of the bridge: touched after every heartbeat the fleet accepted.
+# The rollback guard (bridge-overrides.sh) reverts an update of anything the bridge needs to stay
+# reachable if this goes stale, and an A/B trial boot is only committed once it exists.
+LAST_OK = os.environ.get("BRIDGE_AGENT_LAST_OK", "/run/bridge-agent/last-ok")
+# Results of commands that ran outside the agent (see DETACHED). On /data so a result survives
+# an agent restart or a reboot and is still reported.
+RESULTS = os.environ.get("BRIDGE_AGENT_RESULTS", "/data/agent-results")
+CMD_RUN = "/usr/local/bin/bridge-cmd-run.sh"
+SYSTEMD_RUN = os.environ.get("BRIDGE_AGENT_SYSTEMD_RUN", "/usr/bin/systemd-run")
+# Commands that can outlive one agent tick. The agent is a oneshot that systemd kills after
+# TimeoutStartSec, taking its children with it — so a deploy, an update or a media restart
+# started inline could be killed half-way and its result was lost ("D2", 2026-08-08). These run
+# in their own systemd job (value = max run time, seconds) and are reported on a later tick.
+DETACHED = {"deploy-script": 900, "revert-script": 600, "unquarantine": 600, "update": 3600,
+            "diagnose": 900, "restart": 600, "start": 600, "stop": 300, "profile": 600,
+            "set-peer": 300, "reset-clock": 300, "gadget-tune": 120, "gadget-tune-clear": 120,
+            "jitter-diagnose": 300, "jitter-fix": 600, "jitter-reset": 600,
+            "golden-save": 300, "golden-restore": 600}
 
 # Map control-plane command types -> argv for the existing bridge CLI. Anything not
 # in this table is refused, so the control plane can never run arbitrary commands.
@@ -30,8 +48,14 @@ ALLOWED = {
     "set-peer":    lambda a: ["bridge", "set-peer", _ip(a.get("ip")), _port(a.get("port", "5004"))],
     # A staged rollout names the image to install; with no source we fall back to
     # the device's own BRIDGE_UPDATE_URL (previous behaviour, unchanged).
-    "update":      lambda a: ["sudo", "/usr/local/bin/bridge-update.sh"]
-                             + ([_src(a["source"])] if a.get("source") else []),
+    # A whole new OS into the standby slot, then a trial boot that commits itself if healthy
+    # and rolls back if not. `version` fetches <fleet>/payloads/ota/<version>; `url`/`source`
+    # name any other signed payload; `force` allows it under a live session (normally refused).
+    "update":      lambda a: ["sudo", "/usr/local/bin/bridge-update.sh", "--fleet"]
+                             + (["--version", _version(a["version"])] if a.get("version") else [])
+                             + (["--url", _src(a.get("url") or a.get("source"))]
+                                if (a.get("url") or a.get("source")) else [])
+                             + (["--force"] if a.get("force") else []),
     "reboot":      lambda a: ["sudo", "systemctl", "reboot"],
     "start":       lambda a: ["bridge", "restart"],
     "stop":        lambda a: ["bridge", "stop"],
@@ -40,7 +64,8 @@ ALLOWED = {
     # the detached EC signature before installing, and bridge-run.sh verifies again at every
     # service start. This command only names WHICH script and WHERE to fetch it.
     "deploy-script": lambda a: ["sudo", "/usr/local/bin/bridge-deploy-script.sh",
-                                _script_name(a.get("name")), _src(a.get("source"))],
+                                _script_name(a.get("name")), _src(a.get("source"))]
+                               + (["--now"] if a.get("now") else []),
     "revert-script": lambda a: ["sudo", "/usr/local/bin/bridge-deploy-script.sh",
                                 "--revert", _script_name(a.get("name"))],
     # Audio parameters that can only be applied at boot. The command WRITES the file; a
@@ -140,11 +165,20 @@ def _src(v):
 
 
 def _script_name(v):
-    """A bare <something>.sh — no paths, no traversal. This value becomes a filename under
-    /data/overrides on the device."""
+    """A bare file name — no paths, no traversal. This value becomes a filename under
+    /data/overrides on the device, and the device only accepts names listed in its own
+    read-only /etc/netbridge/updatable.conf (scripts, Python, keys, unit drop-ins)."""
     v = str(v or "")
-    if not re.fullmatch(r"[a-zA-Z0-9._-]+\.sh", v) or v.startswith("."):
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}", v) or ".." in v:
         raise ValueError("bad script name")
+    return v
+
+
+def _version(v):
+    """An image version as the build names it, e.g. 2.1.0-52a161b."""
+    v = str(v or "").strip()
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-f]{7,40})?", v):
+        raise ValueError("bad version %r" % (v,))
     return v
 
 def _plain(v):
@@ -349,7 +383,12 @@ def upload_latest_bundle(base, token):
         syslog("bundle upload failed: %s" % e)
 
 
+def _cid_ok(cid):
+    return re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(cid)) is not None
+
+
 def run_command(cmd):
+    """-> (cid, status, output); status None = started in the background, reported later."""
     cid, ctype, args = cmd.get("id"), cmd.get("type"), cmd.get("args") or {}
     builder = ALLOWED.get(ctype)
     if not builder:
@@ -358,9 +397,86 @@ def run_command(cmd):
         argv = builder(args)
     except ValueError as e:
         return cid, "rejected", str(e)
+    if ctype in DETACHED and _cid_ok(cid) and os.path.exists(SYSTEMD_RUN) and os.path.exists(CMD_RUN):
+        try:
+            os.makedirs(RESULTS, exist_ok=True)
+            with open(os.path.join(RESULTS, "%s.meta" % cid), "w") as f:
+                json.dump({"type": ctype, "t": int(time.time())}, f)
+            p = subprocess.run([SYSTEMD_RUN, "--unit=bridge-cmd-%s" % cid, "--collect", "--quiet",
+                                "--property=RuntimeMaxSec=%d" % DETACHED[ctype],
+                                CMD_RUN, str(cid), "--"] + argv,
+                               capture_output=True, text=True, timeout=20)
+            if p.returncode == 0:
+                return cid, None, None
+            _forget(cid)
+            return cid, "failed", "could not start in the background: " + (p.stdout + p.stderr)[-500:]
+        except (OSError, subprocess.SubprocessError) as e:
+            _forget(cid)
+            return cid, "failed", "could not start in the background: %s" % e
     p = subprocess.run(argv, capture_output=True, text=True, timeout=300)
     status = "done" if p.returncode == 0 else "failed"
     return cid, status, (p.stdout + p.stderr)[-2000:]
+
+
+def _forget(cid):
+    for ext in (".meta", ".out", ".rc"):
+        try:
+            os.remove(os.path.join(RESULTS, "%s%s" % (cid, ext)))
+        except OSError:
+            pass
+
+
+def collect_results(base, token):
+    """Report background commands that have finished (bridge-cmd-run.sh left <cid>.rc)."""
+    try:
+        names = os.listdir(RESULTS)
+    except OSError:
+        return
+    now = time.time()
+    for n in sorted(names):
+        if not n.endswith(".meta"):
+            continue
+        cid = n[:-5]
+        rc_path = os.path.join(RESULTS, cid + ".rc")
+        try:
+            with open(os.path.join(RESULTS, n)) as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            meta = {}
+        if os.path.exists(rc_path):
+            try:
+                rc = int(open(rc_path).read().strip() or "1")
+            except (OSError, ValueError):
+                rc = 1
+            try:
+                out = open(os.path.join(RESULTS, cid + ".out"), errors="replace").read()[-2000:]
+            except OSError:
+                out = ""
+            status = "done" if rc == 0 else "failed"
+        elif now - float(meta.get("t", now)) > 2 * 3600:
+            status, out = "failed", "interrupted: the background job never finished (reboot or power loss?)"
+        else:
+            continue                      # still running
+        try:
+            http("POST", base + "/v1/commands/%s/result" % cid, token=token,
+                 body={"status": status, "output": out})
+        except urllib.error.HTTPError as e:
+            if e.code not in (404, 409, 410):
+                continue                  # the fleet is having trouble: report on a later tick
+        except urllib.error.URLError:
+            continue
+        _forget(cid)
+        if meta.get("type") == "diagnose" and status == "done":
+            upload_latest_bundle(base, token)
+
+
+def mark_ok():
+    try:
+        os.makedirs(os.path.dirname(LAST_OK), exist_ok=True)
+        with open(LAST_OK, "w") as f:
+            f.write("%d\n" % time.time())
+    except OSError:
+        pass
 
 
 def syslog(msg):
@@ -428,6 +544,7 @@ def main():
         except Exception:
             body["setup_pass"] = None
         http("POST", base + "/v1/telemetry", token=token, body=body)
+        mark_ok()
     except urllib.error.HTTPError as e:
         # 401 = this control plane does not recognise our token. That is what a fleet MOVE
         # looks like from the device: the token was issued by the old control plane and the
@@ -438,12 +555,15 @@ def main():
             syslog("telemetry %s from %s - re-enrolling" % (e.code, base))
             token = enroll(base, conf, tel, force=True)
             http("POST", base + "/v1/telemetry", token=token, body=body)
+            mark_ok()
         else:
             raise SystemExit("telemetry failed: %s" % e)
     except urllib.error.URLError as e:
         raise SystemExit("telemetry failed: %s" % e)
     # apply one-time provisioning issued at claim
     apply_provision(base, token)
+    # report background commands that finished since the last tick
+    collect_results(base, token)
     # pull + run queued commands
     try:
         cmds = http("GET", base + "/v1/commands", token=token) or []
@@ -451,6 +571,8 @@ def main():
         cmds = []
     for c in cmds:
         cid, status, output = run_command(c)
+        if status is None:
+            continue                      # running in the background; reported by collect_results
         try:
             http("POST", base + "/v1/commands/%s/result" % cid, token=token,
                  body={"status": status, "output": output})

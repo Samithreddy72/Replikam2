@@ -1,0 +1,12 @@
+[Unit]
+Description=NetBridge owner SSH — tailnet address only, owner key only, no root, no passwords
+After=tailscaled.service network-online.target bridge-overrides.service
+Wants=tailscaled.service network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/bridge-ssh.sh
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

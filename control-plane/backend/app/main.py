@@ -712,13 +712,29 @@ def set_device_pin(device_id: str, body: dict | None = None,
 PAYLOAD_DIR = os.environ.get("PAYLOAD_DIR", "/data/payloads")
 
 
+# Names a bridge may be sent: the catalog on the device (/etc/netbridge/updatable.conf) is the
+# real gate; this only keeps obvious junk out. Scripts / Python / tools start with "#!", the owner
+# SSH key file is keys, "dropin.<unit>" is a systemd drop-in.
+_PAYLOAD_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
+_PAYLOAD_MAX = 2 * 1024 * 1024
+
+
+def _payload_kind(name: str) -> str:
+    if name == "owner_ssh_authorized_keys":
+        return "keys"
+    if name.startswith("dropin."):
+        return "dropin"
+    return "script"
+
+
 @app.post("/admin/payloads")
 async def upload_payload(request: Request, actor=Depends(auth.require_admin)):
-    """Upload a signed script + its detached signature, ready for a bridge to fetch."""
+    """Upload a signed file (script, Python, owner SSH keys, unit drop-in) + its detached
+    signature, ready for a bridge to fetch."""
     form = await request.form()
     name = (form.get("name") or "").strip()
-    if not re.fullmatch(r"[A-Za-z0-9._-]+\.sh", name or "") or name.startswith("."):
-        raise HTTPException(400, "bad script name")
+    if not _PAYLOAD_NAME.fullmatch(name or "") or ".." in name or name.endswith(".sig"):
+        raise HTTPException(400, "bad file name")
     script, sig = form.get("script"), form.get("sig")
     if script is None or sig is None:
         raise HTTPException(400, "need both 'script' and 'sig'")
@@ -727,14 +743,21 @@ async def upload_payload(request: Request, actor=Depends(auth.require_admin)):
     sigb = await sig.read()
     # Cheap sanity so a truncated upload cannot become a "deployable" payload. The real
     # verification is the device's, against its own pinned key — this only catches accidents.
-    if not body.startswith(b"#!") or len(sigb) < 32:
-        raise HTTPException(400, "that does not look like a signed shell script")
+    if len(sigb) < 32 or not body or len(body) > _PAYLOAD_MAX:
+        raise HTTPException(400, "missing signature, empty, or larger than 2 MB")
+    kind = _payload_kind(name)
+    if kind == "script" and not body.startswith(b"#!"):
+        raise HTTPException(400, "that does not look like a signed script (no #! line)")
+    if kind == "keys" and b"ssh-" not in body:
+        raise HTTPException(400, "that does not look like an SSH authorized_keys file")
+    if kind == "dropin" and not re.search(rb"(?m)^\[(Unit|Service|Install)\]$", body):
+        raise HTTPException(400, "that does not look like a systemd drop-in")
     with open(os.path.join(PAYLOAD_DIR, name), "wb") as f:
         f.write(body)
     with open(os.path.join(PAYLOAD_DIR, name + ".sig"), "wb") as f:
         f.write(sigb)
     _audit(next(get_db()), actor, "payload:upload", name)
-    return {"name": name, "bytes": len(body),
+    return {"name": name, "kind": kind, "bytes": len(body),
             "sha256": hashlib.sha256(body).hexdigest()[:16],
             "url_base": (settings.public_base_url or "").rstrip("/") + "/payloads"}
 
@@ -743,7 +766,8 @@ async def upload_payload(request: Request, actor=Depends(auth.require_admin)):
 def list_payloads(actor=Depends(auth.require_admin)):
     """What is currently available for a bridge to fetch."""
     try:
-        names = sorted(n for n in os.listdir(PAYLOAD_DIR) if n.endswith(".sh"))
+        names = sorted(n for n in os.listdir(PAYLOAD_DIR)
+                       if not n.endswith(".sig") and os.path.isfile(os.path.join(PAYLOAD_DIR, n)))
     except FileNotFoundError:
         return []
     out = []
@@ -755,6 +779,34 @@ def list_payloads(actor=Depends(auth.require_admin)):
                     "sha256": hashlib.sha256(b).hexdigest()[:16],
                     "signed": os.path.exists(pth + ".sig"),
                     "mtime": int(os.path.getmtime(pth))})
+    return out
+
+
+@app.get("/admin/payloads/ota")
+def list_ota_payloads(actor=Depends(auth.require_admin)):
+    """Whole-OS versions a bridge can be updated to (bridge-update.sh --version <v> fetches
+    /payloads/ota/<v>/manifest.txt + .sig + the image it names). Published by
+    tools/publish-ota.sh; the device verifies the signed manifest itself."""
+    root = os.path.join(PAYLOAD_DIR, "ota")
+    out = []
+    try:
+        versions = sorted(os.listdir(root))
+    except FileNotFoundError:
+        return out
+    for v in versions:
+        mf = os.path.join(root, v, "manifest.txt")
+        if not os.path.isfile(mf):
+            continue
+        kv = {}
+        with open(mf) as f:
+            for line in f:
+                if "=" in line:
+                    k, _, val = line.strip().partition("=")
+                    kv[k] = val
+        img = os.path.join(root, v, kv.get("image", ""))
+        out.append({"version": kv.get("version", v), "image": kv.get("image"),
+                    "bytes": os.path.getsize(img) if kv.get("image") and os.path.isfile(img) else None,
+                    "signed": os.path.exists(mf + ".sig"), "built": kv.get("built")})
     return out
 
 

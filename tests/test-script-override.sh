@@ -160,6 +160,13 @@ echo
 # city stayed reverted indefinitely. A recovery path nobody has tested is not a recovery
 # path, which is the whole reason these four cases exist.
 DEPLOY="$(cd "$(dirname "$0")/.." && pwd)/pi/scripts/bridge-deploy-script.sh"
+# Since 2026-09-24 the installer only restores a file the device's read-only catalog lists
+# (/etc/netbridge/updatable.conf). Give the sandbox a catalog that lists demo.sh as a loader
+# script, applied at its next start, and point the installer at the real rollback engine.
+printf 'demo.sh %s loader none -\n' "$T/baked/demo.sh" > "$T/updatable.conf"
+export BRIDGE_OVR_CATALOG="$T/updatable.conf" BRIDGE_OVR_DIR="$T/data/overrides" \
+       BRIDGE_OVR_PUBKEY="$T/root/script-pubkey.pem" BRIDGE_OVR_RUN="$T/run" BRIDGE_OVR_SYSTEMCTL=true \
+       BRIDGE_DEPLOY_OVERRIDES="$(cd "$(dirname "$0")/.." && pwd)/pi/scripts/bridge-overrides.sh"
 sed -e "s#^DIR=.*#DIR=\"$T/data/overrides\"#" \
     -e "s#^PUBKEY=.*#PUBKEY=\"$T/root/script-pubkey.pem\"#" \
     -e "s#systemctl#true systemctl#g" \
