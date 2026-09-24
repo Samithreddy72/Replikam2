@@ -342,26 +342,38 @@ FIRSTBOOT_UNITS = ("bridge-firstboot", "bridge-regen-hostkeys", "bridge-firstdia
 # binding would race tailscaled at boot, would need rebinding whenever the tailnet address
 # changes (it changed twice during testing), and would break read-only LAN diagnostics that
 # are genuinely useful. This is checked per request, so there is nothing to race.
-TAILNET_V4 = ("100.",)            # CGNAT 100.64.0.0/10, which is what tailscale hands out
-LOOPBACK = ("127.", "::1", "localhost")
+import ipaddress
+TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")   # CGNAT range tailscale hands out
+
+
+def _parse_ip(addr):
+    """The caller's address as an IP, IPv4-mapped IPv6 (what a dual-stack bind reports) unwrapped.
+    None for anything that is not an address."""
+    a = str(addr or "").strip()
+    if a.lower().startswith("::ffff:") and "." in a:
+        a = a[7:]
+    try:
+        return ipaddress.ip_address(a)
+    except ValueError:
+        return None
+
+
+def _is_local(addr):
+    """The bridge itself. Decided by PARSING the address, never by its text: a prefix check let
+    "::1:2:3:4" and "::127.0.0.1" pass as loopback (2026-09-25 audit)."""
+    ip = _parse_ip(addr)
+    return bool(ip and ip.is_loopback)
 
 
 def _mesh_or_local(addr):
-    """Is this caller on the mesh (or the device itself)?"""
-    a = str(addr or "")
-    if a.startswith("::ffff:"):   # IPv4-mapped IPv6, which is what a dual-stack bind reports
-        a = a[7:]
-    if any(a.startswith(p) for p in LOOPBACK):
+    """Is this caller on the mesh (or the device itself)? 100.64.0.0/10 only - 100.1.2.3 is
+    ordinary public address space, not the tailnet."""
+    ip = _parse_ip(addr)
+    if ip is None:
+        return False
+    if ip.is_loopback:
         return True
-    if not a.startswith(TAILNET_V4):
-        return False
-    # 100.64.0.0/10 is 100.64.x - 100.127.x. Plain "100." would also accept 100.1.2.3, which is
-    # ordinary public address space and not the tailnet at all.
-    try:
-        second = int(a.split(".")[1])
-    except Exception:
-        return False
-    return 64 <= second <= 127
+    return ip.version == 4 and ip in TAILNET_V4
 
 
 def _audit(action, addr, allowed, detail=""):
@@ -398,8 +410,8 @@ PIN_PROTOCOL = 2                  # the app refuses to unlock older bridges (the
 
 
 def _caller_ip(addr):
-    a = str(addr or "")
-    return a[7:] if a.startswith("::ffff:") else a
+    ip = _parse_ip(addr)
+    return str(ip) if ip else str(addr or "")
 
 
 def _pin_run(args, secret="", timeout=20):
@@ -1422,6 +1434,13 @@ class H(http.server.BaseHTTPRequestHandler):
                 self._send(json.dumps({"ok": False, "error": "bad ip"}).encode("utf-8"),
                            "application/json; charset=utf-8")
                 return
+            if not _is_local(caller) and ip != caller:
+                # The presenter app always names itself; a ticket is not permission to send the
+                # room's microphone to a third address (2026-09-25 audit).
+                self._send(json.dumps({"ok": False, "error": "forbidden",
+                                       "detail": "the return destination must be the caller's own mesh address"}
+                                      ).encode("utf-8"), "application/json; charset=utf-8", status=403)
+                return
             cur = read("/etc/default/bridge-return-audio")
             if ("RETURN_DEST_IP=%s" % ip) in cur and ("RETURN_DEST_PORT=%s" % port) in cur:
                 self._send(json.dumps({"ok": True, "changed": False,
@@ -1474,7 +1493,7 @@ class H(http.server.BaseHTTPRequestHandler):
             # never logged, never on a command line. Presenter app -> this bridge over the mesh.
             # A correct PIN opens the session for the CALLER's mesh address (where its media will
             # come from). A tool on the bridge itself (loopback) may name the presenter instead.
-            local = caller.startswith(("127.", "::1")) or caller == "localhost"
+            local = _is_local(caller)
             who = str(body.get("peer") or "") if local else caller
             args = ["unlock", "-"] + (["--peer", who] if who else [])
             code, j = _pin_run(args, str(body.get("pin", "")))
@@ -1483,10 +1502,19 @@ class H(http.server.BaseHTTPRequestHandler):
             resp = {"ok": code == 0 and bool(j.get("ticket")), "reason": reason,
                     "message": j.get("message") or ("unlock failed on device" if code == 4 else ""),
                     "protocol": PIN_PROTOCOL}
+            # Only an app that asks for protocol 2 receives the ticket. Older apps display this
+            # whole answer on screen, and a ticket read off a shared screen opens the gate for
+            # whoever copies it (2026-09-25 audit). They unlock without it; the PIN still counted.
+            try:
+                wants_ticket = int(body.get("protocol") or 1) >= PIN_PROTOCOL
+            except (TypeError, ValueError):
+                wants_ticket = False
             for k in ("ticket", "peer", "gate", "expires_in", "idle_timeout", "superseded",
                       "attempt", "attempts_left", "retry_in"):
-                if k in j:
+                if k in j and (k != "ticket" or wants_ticket):
                     resp[k] = j[k]
+            if code == 0 and not wants_ticket:
+                resp["ok"] = True
             self._send(json.dumps(resp).encode("utf-8"), "application/json; charset=utf-8")
         elif path == "/api/end-session":
             # Stop in the app. Ends THIS ticket's session and closes the media gate; a stale
@@ -1503,7 +1531,7 @@ class H(http.server.BaseHTTPRequestHandler):
         """Go-live actions need the open session's ticket. Refused = HTTP 401 with the reason,
         so the app knows to ask for the PIN (and an old app without tickets is refused plainly).
         The session follows the caller's mesh address: the app's helper may restart mid-session."""
-        args = ["check", "-", "--rebind"] + (["--peer", caller] if caller and not caller.startswith(("127.", "::1")) else [])
+        args = ["check", "-", "--rebind"] + (["--peer", caller] if caller and not _is_local(caller) else [])
         code, j = _pin_run(args, str(body.get("ticket", "")))
         if code == 0:
             return True

@@ -64,6 +64,23 @@ for imposter in ("100.1.2.3", "100.63.255.255", "100.128.0.1", "100.200.5.5"):
     else:
         no("%s is NOT in 100.64.0.0/10 but was allowed" % imposter)
 
+print("\n  ---- parsed, not prefix-matched (2026-09-25 audit) ----")
+# A text-prefix check took all of these for loopback or tailnet.
+for spoof in ("::1:2:3:4", "::127.0.0.1", "::100.64.0.1", "::1abc", "127.evil", "100.64.0.1.nip.io"):
+    if not bw._mesh_or_local(spoof):
+        ok("refused: %r" % spoof)
+    else:
+        no("%r passed as the bridge itself or the mesh" % spoof)
+for local in ("127.0.0.1", "127.9.9.9", "::1", "::ffff:127.0.0.1"):
+    if bw._is_local(local):
+        ok("loopback: %s" % local)
+    else:
+        no("%s is loopback and was not recognised" % local)
+if not bw._is_local("100.64.0.1") and not bw._is_local("::1:2:3:4"):
+    ok("a mesh address and a look-alike are not 'the bridge itself'")
+else:
+    no("_is_local accepts a non-loopback address")
+
 print("\n  ---- malformed input cannot slip through ----")
 for junk in ("", None, "not-an-ip", "100.", "100", "100.abc.1.1", "::ffff:192.168.1.9"):
     if not bw._mesh_or_local(junk):

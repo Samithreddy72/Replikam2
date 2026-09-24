@@ -516,6 +516,9 @@ function kb(n){ return n == null ? "—" : n >= 1048576 ? (n / 1048576).toFixed(
 function devName(d){ return (d && (d.name || d.pairing_code || d.id)) || "bridge"; }
 function devLabel(d){ return [d && d.label, devName(d)].filter(Boolean).join(" · "); }
 function T(d){ return (d && d.latest) || {}; }
+// 2 = the PIN gate of the 2026-09-25 (2.2) image. Older software reports no protocol at all.
+function modern(d){ return ((T(d).pin || {}).protocol || 1) >= 2; }
+const OLD_SW = "runs software from before 2026-09-25 (older than 2.2)";
 function cfgState(d){ return (T(d).config || {}).state || null; }
 
 // ------------------------------------------------------------------------------ server calls
@@ -1237,6 +1240,15 @@ async function doAction(devId, value){
     return;
   }
   if (type === "jitter-diagnose") return runDiagnosis(d);
+  if ((type === "lock" || type === "clear-lockout") && !modern(d)){
+    openDialog({title: (type === "lock" ? "Lock" : "Clear the lockout on") + " " + devLabel(d) + " — not on this software",
+      body: [h("div", {class: "warnline"}, devLabel(d) + " " + OLD_SW + "."),
+        h("p", {}, type === "lock"
+          ? "On that software, Lock stops ALL media — the camera service included, which has rebooted bridges while a meeting laptop was attached. The fleet refuses it there."
+          : "That software has no remote clear-lockout; its lockout ends by itself within an hour."),
+        h("p", {class: "hint"}, "Update the bridge to 2.2 or later to lock and clear lockouts from here.")], ok: null, cancel: "Close"});
+    return;
+  }
   return confirmAndRun(d, type, value, args);
 }
 function confirmAndRun(d, type, value, args){
@@ -1280,8 +1292,8 @@ function setPinDialog(d){
   gen.onchange = own.onchange = () => { pinIn.disabled = !own.checked; if (own.checked) pinIn.focus(); };
   const p = T(d).pin || {};
   openDialog({title: "Set the PIN for " + devLabel(d),
-    body: [h("p", {}, "Presenters type this PIN in the NetBridge app every time they go live on this bridge. Changing it does not end a session that is already live."),
-      p.protocol && p.protocol < 2 ? h("div", {class: "warnline"}, "This bridge runs older software that does not require the PIN on every go-live. Update it (Updates tab) to enforce it.") : null,
+    body: [modern(d) ? h("p", {}, "Presenters type this PIN in the NetBridge app every time they go live on this bridge. Changing it ends a session that is live right now — the presenter must enter the new PIN.")
+        : h("div", {class: "warnline"}, devLabel(d) + " " + OLD_SW + ": it does not require the PIN on every go-live, and setting a PIN writes it into the bridge's own log. Update the bridge first, then set the PIN again."),
       h("label", {class: "radio"}, gen, "Generate a random 6-digit PIN"),
       h("label", {class: "radio"}, own, "Choose it myself"), pinIn,
       h("p", {class: "hint"}, "You see the PIN once, on the next screen. The fleet keeps no copy — hand it to your presenter yourself.")],
@@ -1295,6 +1307,7 @@ function setPinDialog(d){
       followCommand(d.id, devLabel(d), "set-pin", r.command_id, 120);
       openDialog({title: "The new PIN for " + devLabel(d),
         body: [h("div", {class: "pinbig", "aria-label": "PIN"}, r.pin),
+          r.warning ? h("div", {class: "warnline"}, "⚠ " + r.warning) : null,
           h("p", {}, d.online ? "The bridge applies it on its next check-in (~15 s)." : "The bridge is offline — it applies the PIN when it is back."),
           h("p", {class: "hint"}, "This is the only time the PIN is shown. Deliver it yourself — a call, a message, in person.")],
         ok: "Copy PIN", cancel: "Done",
@@ -1350,10 +1363,13 @@ async function osUpdateDialog(preselected, presetVersion){
     h("p", {class: "hint"}, "On the Mac: bash tools/publish-ota.sh <image> — it signs the manifest and uploads it here.")], ok: null, cancel: "Close"}); return; }
   const sel = h("select", {}, vers.map(v => h("option", {value: v.version, selected: v.version === presetVersion}, v.version + (v.bytes ? " · " + kb(v.bytes) : "") + (v.built ? " · built " + v.built : ""))));
   const force = h("input", {type: "checkbox"});
-  const pick = bridgePicker(preselected);
+  const pick = bridgePicker(preselected.filter(modern), modern);
+  const old = [...S.devices.values()].filter(x => x.claimed && !modern(x));
   let confirmed = false;
   openDialog({title: "Install an OS version", wide: true,
     body: [h("label", {class: "fl"}, "Version"), sel, h("label", {class: "fl"}, "On which bridges"), pick.el,
+      old.length ? h("div", {class: "warnline", style: "margin-top:10px"}, old.map(devLabel).join(", ") + (old.length === 1 ? " runs" : " run")
+        + " software older than 2.2, which cannot install an OS version remotely — flash " + (old.length === 1 ? "its card" : "their cards") + " with the 2.2 image instead.") : null,
       h("p", {}, "The bridge downloads the OS into its spare slot, reboots into it (~1 min offline) and keeps it only if it comes back healthy and reaches the fleet — otherwise it switches back to the current OS by itself."),
       h("label", {class: "check"}, force, "Install even if a presenter is live (normally refused)")],
     ok: "Install and reboot", okClass: "danger",

@@ -104,13 +104,20 @@ echo "[deploy] live commit  $LIVE_SHA  (matches)"
 # The panel is part of what shipped: prove the page being served is the one in this commit, and
 # that the admin stream refuses anyone without a credential.
 D="https://${DOMAIN:-fleet.scine.online}"
+# Retried, and never silent: under `set -e` a failed curl inside $(...) used to end the script with
+# no message at all - exactly the kind of "deploy finished?" the checks exist to rule out.
 WANT_PANEL="$(shasum -a 256 "$CP/panel-dist/index.html" | cut -c1-16)"
-GOT_PANEL="$(curl -fsS -m 15 "$D/" | shasum -a 256 | cut -c1-16)"
-[ "$WANT_PANEL" = "$GOT_PANEL" ] && echo "[deploy] panel        $GOT_PANEL  (matches)" \
-  || { echo "[deploy] FAILED: the panel being served ($GOT_PANEL) is not this commit's ($WANT_PANEL)." >&2; exit 1; }
-STREAM_CODE="$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$D/admin/stream")"
-[ "$STREAM_CODE" = "401" ] && echo "[deploy] /admin/stream refuses anonymous callers (401)" \
-  || { echo "[deploy] FAILED: /admin/stream answered $STREAM_CODE to an anonymous caller." >&2; exit 1; }
+GOT_PANEL="unreachable"
+for i in $(seq 1 10); do
+  if PAGE="$(curl -fsS -m 20 "$D/" 2>/dev/null)"; then GOT_PANEL="$(printf '%s' "$PAGE" | shasum -a 256 | cut -c1-16)"; fi
+  [ "$GOT_PANEL" = "$WANT_PANEL" ] && break
+  sleep 3
+done
+if [ "$WANT_PANEL" = "$GOT_PANEL" ]; then echo "[deploy] panel        $GOT_PANEL  (matches)"
+else echo "[deploy] FAILED: the panel being served ($GOT_PANEL) is not this commit's ($WANT_PANEL)." >&2; exit 1; fi
+STREAM_CODE="$(curl -s -o /dev/null -w '%{http_code}' -m 15 "$D/admin/stream" || true)"
+if [ "$STREAM_CODE" = "401" ]; then echo "[deploy] /admin/stream refuses anonymous callers (401)"
+else echo "[deploy] FAILED: /admin/stream answered '$STREAM_CODE' to an anonymous caller (want 401)." >&2; exit 1; fi
 echo "[deploy] database backup kept at /data/$BACKUP (fleetdata volume)"
 echo "[deploy] api docs public: ${DOCS_PUBLIC:-unknown}"
 [ "$DOCS_PUBLIC" = "true" ] && echo "[deploy] NOTE: interactive API docs are PUBLIC on this deployment (NB_API_DOCS=1)."

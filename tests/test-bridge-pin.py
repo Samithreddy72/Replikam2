@@ -225,11 +225,11 @@ check(state()["locked"] is True and state()["last_end"]["reason"] == "stop", "st
 
 print("\n  ---- 10 min without video relocks; video keeps it open ----")
 rc, j, o = pin("unlock", "-", "--peer", A, stdin="246810\n"); T3 = j.get("ticket", "")
-edit_session(last_video=time.time() - 601)
+edit_session(last_video_m=time.monotonic() - 601)
 st = nftstate(); st["video_in"] += 500; NFTSTATE.write_text(json.dumps(st))
 pin("sweep")
 check(state()["session"]["active"] and state()["session"]["idle_s"] < 5, "video counted since the last look -> still open")
-edit_session(last_video=time.time() - 601)
+edit_session(last_video_m=time.monotonic() - 601)
 pin("sweep")
 check(not state()["session"]["active"] and state()["last_end"]["reason"] == "idle"
       and nftstate().get("peer4") == [], "no video for 10 min -> relocked, gate closed")
@@ -238,7 +238,7 @@ check(rc == 10, "…and that ticket no longer works")
 
 print("\n  ---- 12 h limit ----")
 rc, j, o = pin("unlock", "-", "--peer", A, stdin="246810\n"); T4 = j.get("ticket", "")
-edit_session(created=time.time() - 12 * 3600 - 5)
+edit_session(created_m=time.monotonic() - 12 * 3600 - 5)
 rc, j, o = pin("check", "-", "--peer", A, stdin=T4 + "\n")
 check(rc == 12 and j.get("why") == "max_age" and nftstate().get("peer4") == [], "after 12 h the ticket expires and the gate closes", o)
 
@@ -247,6 +247,24 @@ rc, j, o = pin("unlock", "-", "--peer", A, stdin="246810\n"); T5 = j.get("ticket
 rc, j, o = pin("lock")
 check(rc == 0 and "ended" in o and nftstate().get("peer4") == [], "lock ends the live session and closes the gate", o)
 check(pin("check", "-", "--peer", A, stdin=T5 + "\n")[0] == 10, "…the presenter's ticket is dead")
+
+print("\n  ---- changing the PIN ends the live session ----")
+rc, j, o = pin("unlock", "-", "--peer", A, stdin="246810\n"); T5b = j.get("ticket", "")
+rc, j, o = pin("set", "-", stdin="246810\n")
+check(rc == 0 and "live session was ended" in o and nftstate().get("peer4") == [], "a new PIN ends the live session and closes the gate", o)
+check(pin("check", "-", "--peer", A, stdin=T5b + "\n")[0] == 10 and state()["last_end"]["reason"] == "pin_changed",
+      "…the old ticket is dead (last end: pin_changed)")
+
+print("\n  ---- storage that cannot count a try refuses every PIN ----")
+os.chmod(ETC, 0o555)
+try:
+    wrongs = [pin("unlock", "-", "--peer", A, stdin="999999\n") for _ in range(4)]
+    right = pin("unlock", "-", "--peer", A, stdin="246810\n")
+finally:
+    os.chmod(ETC, 0o755)
+check(all(w[0] == 4 and w[1].get("reason") == "error" for w in wrongs), "wrong PINs are refused as errors, not quietly uncounted", [w[1] for w in wrongs][:1])
+check(right[0] == 4 and "ticket" not in right[1], "…and even the RIGHT PIN is refused until the count can be kept (fails closed)", right[1])
+check(state().get("lockout") is False and nftstate().get("peer4") == [], "no session was opened meanwhile")
 
 print("\n  ---- the gate heals itself ----")
 rc, j, o = pin("unlock", "-", "--peer", A, stdin="246810\n"); T6 = j.get("ticket", "")
@@ -280,7 +298,7 @@ check(rc == 1, "…the PIN is still checked")
 pin("clear-lockout", env=env2)
 rc, j, o = pin("unlock", "-", "--peer", A, stdin="567890\n", env=env2); T8 = j.get("ticket", "")
 check(rc == 0 and j.get("gate") == "unavailable", "…a session still needs the right PIN", o)
-edit_session(last_video=time.time() - 3600)
+edit_session(last_video_m=time.monotonic() - 3600)
 pin("sweep", env=env2)
 check(pin("state", env=env2)[1]["session"]["active"], "…and an unmeasurable session is NOT relocked for 'idle'")
 pin("end", "-", stdin=T8 + "\n", env=env2)

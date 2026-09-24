@@ -245,6 +245,20 @@ grepf bridge-agent.py 'STDIN = \{"set-pin"' && ! grepf bridge-agent.py '"sudo", 
   && ok "fleet set-pin sends the PIN on stdin; the fleet cannot open a session" \
   || no "agent passes the PIN in argv or can still unlock remotely"
 [ -s "$CAT/.nft" ] && ok "nft present (package nftables)" || no "no nft - the media gate cannot be armed"
+# The 2026-09-25 audit findings, each of which the previous code got wrong.
+grepf bridge-pin 'COUNT FIRST' && ok "a wrong PIN is counted before it is checked (full storage cannot mean unlimited guesses)" \
+  || no "PIN tries counted after the check - a full /etc/bridge allows unlimited guesses"
+grepf bridge-web.py 'ip\.is_loopback' && ! grepf bridge-web.py 'LOOPBACK = \("127\.", "::1"' \
+  && ok "callers are recognised by parsing the address (no ::1:2:3:4 posing as loopback)" \
+  || no "the loopback/mesh check is a text prefix - ::1:2:3:4 passes as the bridge itself"
+grepf bridge-web.py 'wants_ticket' && ok "the ticket is given only to apps that ask for protocol 2 (old apps display replies)" \
+  || no "old apps are handed the session ticket and show it on screen"
+grepf bridge-web.py "the return destination must be the caller's own mesh address" \
+  && ok "set-peer sends the room's audio only to the caller itself" || no "a ticket holder can send the room's audio to any address"
+! grepf bridge-agent.py '"set-peer": +lambda' && ok "the fleet cannot repoint a room's audio (no set-peer in the agent)" \
+  || no "the agent still runs set-peer from the fleet - no PIN needed to redirect a room's audio"
+grepf bridge-read.py 'etc/bridge\|etc-bridge\)/pin' && ok "read-file refuses the PIN hash, tries, lockout and session" \
+  || no "read-file can fetch the PIN hash (cracks offline in minutes)"
 grep -q 'bridge-pin-gate.service' "$CAT/.sysinit" 2>/dev/null \
   && ok "media gate closed at every boot (bridge-pin-gate, sysinit)" || no "bridge-pin-gate not enabled - media open after boot"
 grep -q 'bridge-pin-sessions.service' "$CAT/.wants" 2>/dev/null \

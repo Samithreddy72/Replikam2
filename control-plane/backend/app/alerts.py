@@ -92,7 +92,11 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
     if not is_online(dev):
         out.append({"kind": "offline", "detail": "no heartbeat"})
         return out  # offline has no one-click fix; a human must power-cycle it
-    t = dev.latest or {}
+    t = dev.latest if isinstance(dev.latest, dict) else {}
+    # Telemetry comes from devices, so every nested field is checked for its shape: one odd value
+    # must not hide a bridge's other alerts (or, before 2026-09-25, 500 the whole fleet list).
+    D = lambda k: t.get(k) if isinstance(t.get(k), dict) else {}
+    L = lambda k: t.get(k) if isinstance(t.get(k), list) else []
     # POWER. Alert on what is HAPPENING, not on a flag that can never clear.
     #
     # The raw throttle word carries STICKY bits: once a board has browned out, bit16 and
@@ -103,8 +107,8 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
     # Prefer the decoded verdict: alert while it is ACTUALLY browning out, or when the
     # measured rate is high enough to be audible (2%+; 0.5% was confirmed clean by ear).
     # Fall back to the raw word only for older bridges that do not send `power` yet.
-    pw = t.get("power") or {}
-    rate = (pw.get("rate") or {}).get("pct")
+    pw = D("power")
+    rate = (pw.get("rate") if isinstance(pw.get("rate"), dict) else {}).get("pct")
     if pw:
         if pw.get("live"):
             out.append({"kind": "throttled", "detail": "browning out now (%s)" % pw.get("raw")})
@@ -112,7 +116,7 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
             out.append({"kind": "throttled",
                         "detail": "browning out %.1f%% of recent seconds" % rate})
     else:
-        thr = (t.get("throttled") or "").strip()
+        thr = str(t.get("throttled") or "").strip()
         if thr and thr not in ("0x0", "throttled=0x0", ""):
             out.append({"kind": "throttled", "detail": thr})
 
@@ -123,10 +127,13 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
     # and on 2026-08-12 that produced 18 alerts in 20 minutes, every one emailed. Real
     # failure is `failed` or `inactive`; `activating`, `deactivating` and `reloading` mean
     # systemd is mid-transition and will settle without anyone being told.
-    for name, st in (t.get("services") or []):
+    for item in L("services"):
+        if not (isinstance(item, (list, tuple)) and len(item) == 2):
+            continue
+        name, st = item
         if st in ("failed", "inactive", "dead"):
             out.append({"kind": "service_down", "detail": "%s=%s" % (name, st)})
-    temp = (t.get("temp") or "").replace("'C", "").replace("C", "")
+    temp = str(t.get("temp") or "").replace("'C", "").replace("C", "")
     try:
         if float(temp) >= settings.temp_alert_c:
             out.append({"kind": "temp_high", "detail": t.get("temp")})
@@ -138,7 +145,7 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
     # moment device pace and pipeline caps disagree; the file (and so this alert) clears on
     # the next successful re-open. Discovered 2026-08-01: 36 or 69 RTP pkts/s where
     # real-time is 50 = exactly this, and NOTHING else in the system could see it.
-    mm = t.get("return_mismatch")
+    mm = D("return_mismatch")
     if mm:
         out.append({"kind": "return_mismatch",
                     "detail": "return audio wrong-rate: device %sHz vs pipeline %sHz "
@@ -146,9 +153,12 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
                                   mm.get("device_rate", "?"), mm.get("pipeline_rate", "?"))})
     # PIN brute-force: the device locked itself after 3 wrong tries. This alert IS
     # the "pages its admin" of the walkthrough — no auto-fix (rotate the PIN offline).
-    pin = t.get("pin") or {}
+    pin = D("pin")
     if pin.get("lockout"):
-        left = int(pin.get("lockout_remaining") or 0)
+        try:
+            left = int(pin.get("lockout_remaining") or 0)
+        except (TypeError, ValueError):
+            left = 0
         out.append({"kind": "pin_lockout",
                     "detail": "3 wrong PIN tries — bridge locked for %d more min; rotate the PIN if unexpected" % max(1, left // 60)})
     # PIN. Every bridge must be PIN-gated: without a PIN anyone who can reach it over the
@@ -172,15 +182,15 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
     free = t.get("data_free_mb")
     if isinstance(free, (int, float)) and free < settings.disk_low_mb:
         out.append({"kind": "disk_low", "detail": "only %d MB free on /data" % free})
-    parked = t.get("quarantined") or []
+    parked = [str(x) for x in L("quarantined")]
     if parked:
         out.append({"kind": "update_rolled_back",
                     "detail": "automatic rollback parked %s — the bridge runs the built-in "
                               "file instead" % ", ".join(parked)})
-    if (t.get("overrides") or {}).get("safe_mode"):
+    if D("overrides").get("safe_mode"):
         out.append({"kind": "safe_mode",
                     "detail": "3 boots in a row were unhealthy — every update is OFF this boot"})
-    ota = t.get("ota") or {}
+    ota = D("ota")
     try:
         ota_recent = (dt.datetime.now(dt.timezone.utc).timestamp() - float(ota.get("ts") or 0)) < 24 * 3600
     except (TypeError, ValueError):
@@ -189,7 +199,7 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
         out.append({"kind": "os_update_failed",
                     "detail": "OS update %s %s — %s" % (ota.get("version") or "", ota["state"],
                                                           ota.get("detail") or "no detail")})
-    if (t.get("streams") or {}).get("video") and (t.get("mesh_path") or {}).get("via") == "relay":
+    if D("streams").get("video") and D("mesh_path").get("via") == "relay":
         out.append({"kind": "mesh_relayed",
                     "detail": "the live session is relayed, not direct — expect extra delay"})
     # Restart storm needs history, so it only runs when a db is supplied (the panel

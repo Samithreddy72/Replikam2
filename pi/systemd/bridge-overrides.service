@@ -11,6 +11,9 @@ Conflicts=shutdown.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# Bounded: a hung sync on a failing card must not stall boot before safe mode can act. On timeout
+# the unit fails and everything else starts with the built-in files (2026-09-25 audit).
+TimeoutStartSec=120
 ExecStart=/usr/local/bin/bridge-overrides.sh apply-all
 
 [Install]

@@ -22,7 +22,10 @@ HOW IT WORKS NOW
   * This tool never starts, stops or restarts a media service. (The old one ran a full media
     restart on every unlock - the operation that rebooted under-powered bridges.)
   * A session ends on Stop in the app (end), after 10 min without video, after 12 h, at reboot,
-    when an admin locks the bridge, or when someone else enters the PIN (the last PIN wins).
+    when an admin locks the bridge, when the PIN is changed, or when someone else enters the PIN
+    (the last PIN wins). Session times use the monotonic clock: an NTP jump cannot end or extend one.
+  * A wrong try is COUNTED before the PIN is checked; if it cannot be counted (full or read-only
+    storage) every PIN is refused - storage trouble never turns into unlimited guesses.
   * Salted PBKDF2-SHA256. An old unsalted hash is upgraded on the first correct entry.
   * 3 wrong tries = 1 h lockout. An admin clears it from the fleet (clear-lockout).
   * Secrets are read from stdin ("-"), never taken from the command line.
@@ -74,6 +77,12 @@ TAILNET6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
 # ------------------------------------------------------------------ small helpers
 def now():
     return time.time()
+
+
+def mono():
+    """CLOCK_MONOTONIC: system-wide, since boot - the same in every process, and immune to the
+    wall-clock jumps of a Pi without an RTC. Sessions live in /run, so they never outlive a boot."""
+    return time.monotonic()
 
 
 def log(msg):
@@ -347,10 +356,11 @@ def end_session(reason, detail=""):
     gate = gate_apply(None)
     write_atomic(os.path.join(RUN, "gate"), gate, 0o644)
     if s:
+        lasted = int(mono() - s.get("created_m", mono()))
         write_atomic(LAST_END, json.dumps({"reason": reason, "at": int(now()), "peer": s.get("peer"),
-                                           "lasted_s": int(now() - s.get("created", now()))}), 0o644)
+                                           "lasted_s": lasted}), 0o644)
         log("session ended (%s)%s peer=%s after %ds" % (reason, (" " + detail) if detail else "",
-                                                        s.get("peer"), int(now() - s.get("created", now()))))
+                                                        s.get("peer"), lasted))
     return s, gate
 
 
@@ -360,22 +370,23 @@ def refresh_video(s):
     if n is None:
         # Cannot measure (no gate): never relock for "idle" on a guess - a live meeting would be
         # cut every 10 min. Without the gate media is not blocked anyway; the 12 h limit still holds.
-        s["last_video"] = now()
+        s["last_video_m"] = mono()
         return s
     seen = s.get("video_packets")
     if seen is None or n < seen:          # first look, or the table was rebuilt (counter reset)
         s["video_packets"] = n
     elif n > seen:
         s["video_packets"] = n
-        s["last_video"] = now()
+        s["last_video_m"] = mono()
     return s
 
 
 def expiry_reason(s, t=None):
-    t = t or now()
-    if t - s.get("created", t) >= MAX_AGE_S:
+    t = mono() if t is None else t
+    created = s.get("created_m", t)
+    if t - created >= MAX_AGE_S:
         return "max_age"
-    if t - s.get("last_video", s.get("created", t)) >= IDLE_S:
+    if t - s.get("last_video_m", created) >= IDLE_S:
         return "idle"
     return None
 
@@ -399,10 +410,12 @@ def render(s=None, gate=None):
           "idle_limit_s": IDLE_S, "max_age_s": MAX_AGE_S,
           "session": {"active": False}}
     if s:
+        m = mono()
+        created = s.get("created_m", m)
         st["session"] = {"active": True, "peer": s.get("peer"),
-                         "age_s": int(t - s.get("created", t)),
-                         "idle_s": int(t - s.get("last_video", s.get("created", t))),
-                         "expires_in": int(max(0, s.get("created", t) + MAX_AGE_S - t))}
+                         "age_s": int(m - created),
+                         "idle_s": int(m - s.get("last_video_m", created)),
+                         "expires_in": int(max(0, created + MAX_AGE_S - m))}
     last = load_json(LAST_END)
     if last:
         st["last_end"] = last
@@ -430,9 +443,14 @@ def cmd_set(argv):
         remove(TRIES)
         remove(LOCKOUT)
         remove(LEGACY_FLAG)
-        publish()
-    log("PIN set")
-    print("PIN set (stored salted and hashed; wrong tries and any lockout cleared)")
+        # A new PIN ends the live session: if the old PIN leaked, rotating it must also shut out
+        # whoever used it (2026-09-25 audit). The presenter re-enters the new one.
+        ended = session() is not None
+        gate = end_session("pin_changed")[1] if ended else None
+        publish(None, gate)
+    log("PIN set" + (" - the live session was ended" if ended else ""))
+    print("PIN set (stored salted and hashed; wrong tries and any lockout cleared%s)"
+          % ("; the live session was ended" if ended else ""))
     return 0
 
 
@@ -456,11 +474,21 @@ def cmd_unlock(argv):
                             "anyone can go live"}, 5)
         if not pin_ok_format(pin):
             out({"ok": False, "reason": "bad_format", "message": "the PIN is 4-8 digits"}, 6)
+        # COUNT FIRST. The try is recorded before the PIN is checked, and an attempt that cannot be
+        # recorded is refused: with /etc/bridge full or read-only the old order let every wrong PIN
+        # through uncounted - unlimited guesses (2026-09-25 audit).
+        try:
+            n = int(read(TRIES) or 0) + 1
+        except ValueError:
+            n = 1
+        try:
+            write_atomic(TRIES, "%d\n" % n, 0o600)
+        except OSError as e:
+            log("cannot record a PIN attempt (%s) - refusing every PIN until storage works" % e.__class__.__name__)
+            out({"ok": False, "reason": "error",
+                 "message": "the bridge cannot record PIN attempts right now (storage full or read-only) - "
+                            "it refuses every PIN until that is fixed"}, 4)
         if not verify(pin, stored):
-            try:
-                n = int(read(TRIES) or 0) + 1
-            except ValueError:
-                n = 1
             if n >= MAX_TRIES:
                 write_atomic(LOCKOUT, "%d\n" % int(now()), 0o600)
                 remove(TRIES)
@@ -469,7 +497,6 @@ def cmd_unlock(argv):
                 out({"ok": False, "reason": "locked_out_now", "retry_in": LOCKOUT_S,
                      "message": "wrong PIN - that was try %d of %d, so the bridge is locked for 1 hour"
                                 % (n, MAX_TRIES)}, 2)
-            write_atomic(TRIES, "%d\n" % n, 0o600)
             log("wrong PIN (%d/%d)" % (n, MAX_TRIES))
             publish()
             out({"ok": False, "reason": "wrong", "attempt": n, "attempts_left": MAX_TRIES - n,
@@ -485,9 +512,9 @@ def cmd_unlock(argv):
         if old:
             end_session("superseded", "by a new PIN entry")
         ticket = secrets.token_hex(32)
-        t = now()
-        s = {"ticket_sha256": ticket_hash(ticket), "peer": peer, "created": t, "last_video": t,
-             "video_packets": video_packets()}
+        m = mono()
+        s = {"ticket_sha256": ticket_hash(ticket), "peer": peer, "created": int(now()), "created_m": m,
+             "last_video_m": m, "video_packets": video_packets()}
         if old:
             s["previous_ticket_sha256"] = old.get("ticket_sha256")
         save_session(s)
@@ -540,7 +567,7 @@ def cmd_check(argv):
         save_session(s)
         publish(s, gate_apply(caller) if moved else None)
     out({"ok": True, "reason": "ok", "peer": s.get("peer"), "moved": moved,
-         "expires_in": int(max(0, s["created"] + MAX_AGE_S - now()))}, 0)
+         "expires_in": int(max(0, s.get("created_m", mono()) + MAX_AGE_S - mono()))}, 0)
 
 
 def cmd_end(argv):

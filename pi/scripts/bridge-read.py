@@ -67,6 +67,10 @@ DENY_PAT = (
     re.compile(r"\.pem$"),                         # keys and certs
     re.compile(r"/(id_rsa|id_ed25519)$"),
     re.compile(r"/(shadow|gshadow|sudoers)$"),
+    # The PIN gate (2026-09-25 audit): a 4-8 digit PIN's hash cracks offline in minutes, so the
+    # hash, the try counter, the lockout and the live session (its ticket hash) are never read out.
+    re.compile(r"/(etc/bridge|etc-bridge)/pin\.[a-z]+$"),
+    re.compile(r"/run/bridge-pin(/|$)"),
 )
 
 # Redaction net. A file inside an allowed root can acquire a secret long after this list was

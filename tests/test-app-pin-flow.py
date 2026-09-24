@@ -238,6 +238,8 @@ def run(platform):
         check(sp and len(sp[-1][2].get("ticket", "")) == 64, "[%s] set-peer carried the session ticket" % platform, sp)
         tk = sp[-1][2].get("ticket", "") if sp else ""
         check(tk and tk not in json.dumps(r), "[%s] the ticket is NOT in the page's reply" % platform)
+        ub = [x[2] for x in BRIDGE_LOG[n0:] if x[1] == "/api/unlock"]
+        check(ub and all(b.get("protocol") == 2 for b in ub), "[%s] the app asks the bridge for protocol 2" % platform, ub)
         st, s = call("/api/state")
         check(s.get("pin", {}).get("unlocked") is True and tk not in json.dumps(s),
               "[%s] /api/state says unlocked but never shows the ticket" % platform, s.get("pin"))

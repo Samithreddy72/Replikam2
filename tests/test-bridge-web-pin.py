@@ -79,7 +79,8 @@ def call(method, path, body=None, caller="100.101.1.10"):
     h.headers = {"Content-Length": str(len(raw))}
     h.path, h.command, h.request_version = path, method, "HTTP/1.1"
     h.requestline = "%s %s HTTP/1.1" % (method, path)
-    h.client_address = ("::ffff:" + caller if "." in caller else caller, 50000)
+    # what a dual-stack socket reports: IPv4 callers arrive IPv4-mapped; IPv6 ones as they are
+    h.client_address = ("::ffff:" + caller if "." in caller and ":" not in caller else caller, 50000)
     h.server = None
     (h.do_POST if method == "POST" else h.do_GET)()
     out = h.wfile.getvalue().decode()
@@ -133,6 +134,9 @@ check(st == 200 and j.get("ok") is False and j.get("reason") == "wrong" and j.ge
 
 print("\n  ---- right PIN -> ticket -> go live ----")
 st, j = call("POST", "/api/unlock", {"pin": "135790"}, caller=A)
+check(st == 200 and j.get("ok") and "ticket" not in j,
+      "an OLD app (no protocol) unlocks with the right PIN but never receives the ticket to display", j)
+st, j = call("POST", "/api/unlock", {"pin": "135790", "protocol": 2}, caller=A)
 TK = j.get("ticket", "")
 check(st == 200 and j.get("ok") and len(TK) == 64 and j.get("peer") == A and j.get("protocol") == 2,
       "right PIN from %s: ticket issued for that caller" % A, j)
@@ -144,6 +148,9 @@ check(st == 401 and j.get("reason") == "invalid" and not BRIDGE_CALLS,
 st, j = call("POST", "/api/set-peer", {"ip": A, "port": 5004, "ticket": TK}, caller=A)
 check(st == 200 and j.get("ok") and BRIDGE_CALLS and BRIDGE_CALLS[-1] == ["set-peer", A, "5004"],
       "with the ticket, set-peer goes through exactly as before", (j, BRIDGE_CALLS))
+st, j = call("POST", "/api/set-peer", {"ip": "100.101.9.9", "port": 5004, "ticket": TK}, caller=A)
+check(st == 403 and len(BRIDGE_CALLS) == 1,
+      "even with the ticket, the room's audio can only go to the caller's own address", j)
 st, j = call("POST", "/api/set-peer", {"ip": B, "port": 5004, "ticket": TK}, caller=B)
 gate = json.loads((T / "nft.json").read_text())
 check(st == 200 and gate.get("peer4") == [B],
@@ -164,6 +171,11 @@ check(gate.get("peer4") == [], "media gate closed again", gate)
 n = len(BRIDGE_CALLS)
 st, j = call("POST", "/api/set-peer", {"ip": B, "port": 5004, "ticket": TK}, caller=B)
 check(st == 401 and len(BRIDGE_CALLS) == n, "after Stop the old ticket cannot go live again", j)
+
+print("\n  ---- addresses are parsed, not prefix-matched ----")
+for spoof in ("::1:2:3:4", "::127.0.0.1", "::100.64.0.1", "100.1.2.3", "fe80::1"):
+    st, j = call("POST", "/api/unlock", {"pin": "135790", "protocol": 2}, caller=spoof)
+    check(st == 403, "caller %s is neither the bridge nor the mesh (403)" % spoof, (st, j))
 
 print("\n  ---- nothing secret on a command line ----")
 flat = [" ".join(a) for a in ARGV]

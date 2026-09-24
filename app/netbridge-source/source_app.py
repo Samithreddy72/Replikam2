@@ -1471,6 +1471,7 @@ SESSION_LOST = {
     "expired": "The session expired on the bridge. Enter the PIN to continue.",
     "admin": "An admin locked this bridge. Enter the PIN to go live again.",
     "superseded": "Someone else entered the PIN on this bridge, so your session ended.",
+    "pin_changed": "The bridge's PIN was changed. Enter the new PIN to continue.",
     "invalid": "Your session is no longer valid on the bridge. Enter the PIN again.",
     "reboot": "The bridge restarted, so it locked itself. Enter the PIN to reconnect.",
 }
@@ -1557,7 +1558,8 @@ def _unlock_bridge(host, st, pin):
         if proto is not None:
             if proto < PIN_PROTOCOL:
                 return {"ok": False, "reason": "old_bridge", "message": PIN_MESSAGES["old_bridge"]}
-            last = api("POST", route["base"] + "/api/unlock", body={"pin": pin}, timeout=15)
+            # protocol 2: this app keeps the ticket in memory. Older apps get no ticket back.
+            last = api("POST", route["base"] + "/api/unlock", body={"pin": pin, "protocol": PIN_PROTOCOL}, timeout=15)
             if not last.get("_error"):
                 break
         if attempt == 0:

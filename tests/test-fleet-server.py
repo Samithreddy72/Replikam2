@@ -74,7 +74,7 @@ try:
     def tel(serial, **kw):
         body = {"version": "2.1.0-test", "ip": "192.168.1.%d" % (ids.index(serial) + 50), "udc": "not attached",
                 "streams": {"video": False, "voice": False, "return": False},
-                "pin": {"pin_set": True, "locked": True, "lockout": False, "required": True}}
+                "pin": {"pin_set": True, "locked": True, "lockout": False, "required": True, "protocol": 2}}
         body.update(kw)
         return c.post("/v1/telemetry", headers=dev_tok[serial], json=body)
     for sid in ids:
@@ -137,7 +137,7 @@ try:
     tel(ids[2], usb_misses_per_s=31.5, data_free_mb=120, quarantined=["bridge-web.py"],
         overrides={"safe_mode": True, "pending": [], "active": []},
         ota={"state": "rolled back", "version": "2.1.1-abc1234", "detail": "unhealthy", "ts": time.time()},
-        pin={"pin_set": False, "required": True})
+        pin={"pin_set": False, "required": True, "protocol": 2})
     view = {d["id"]: d for d in c.get("/admin/devices", headers=A).json()}
     check(view[ids[1]]["state"] == "live" and view[ids[1]]["laptop"] is True,
           "NB-001 is LIVE, laptop attached")
@@ -191,7 +191,7 @@ try:
     check(r.status_code == 400, "a 9-digit PIN is refused by the fleet (the bridge takes 4-8)", r.text)
     r = c.post("/admin/devices/%s/pin" % ids[1], headers=A, json={})
     check(r.status_code == 200 and len(r.json().get("pin", "")) == 6, "…a generated PIN is 6 digits, shown once", r.text)
-    tel(ids[2], pin={"pin_set": True, "lockout": True, "lockout_remaining": 1800, "required": True},
+    tel(ids[2], pin={"pin_set": True, "lockout": True, "lockout_remaining": 1800, "required": True, "protocol": 2},
         quarantined=["bridge-web.py"])
     fixes = {a["kind"]: (a.get("fix") or {}).get("command")
              for a in {d["id"]: d for d in c.get("/admin/devices", headers=A).json()}[ids[2]]["alerts"]}
@@ -214,6 +214,52 @@ try:
         t = db.query(_RT).filter(_RT.command_id == u.id).first()
         check(t is not None and t.status == "failed", "an update that never reported back counts as failed (halts widening)",
               t.status if t else None)
+
+    # ---- audit fixes (2026-09-25) ---------------------------------------------------------------
+    r = c.post("/admin/devices/%s/commands" % ids[0], headers=A, json={"type": "set-peer", "args": {"ip": "203.0.113.9"}})
+    check(r.status_code == 400, "the fleet can no longer point a room's audio anywhere (set-peer refused)", r.text)
+    # a bridge on older software: lock would stop all media there, clear-lockout does not exist there
+    tel(ids[3], pin={"pin_set": True, "locked": False, "lockout": False, "lockout_remaining": 0})   # no protocol = old image
+    r = c.post("/admin/devices/%s/commands" % ids[3], headers=A, json={"type": "lock", "confirm": True})
+    check(r.status_code == 409 and "STOPS ALL MEDIA" in r.text, "lock is refused on older bridge software (it stops all media there)", r.text)
+    r = c.post("/admin/devices/%s/commands" % ids[3], headers=A, json={"type": "clear-lockout"})
+    check(r.status_code == 409, "clear-lockout is refused on older software (it has none)", r.text)
+    r = c.post("/admin/commands/broadcast", headers=A, json={"type": "lock", "confirm": True})
+    sk = [x["device"] for x in r.json().get("skipped", [])] if r.status_code == 200 else []
+    check(r.status_code == 200 and len(sk) == 1 and len(r.json()["queued"]) == 3,
+          "a broadcast lock skips the older bridge and says so", r.text)
+    r = c.post("/admin/devices/%s/pin" % ids[3], headers=A, json={"pin": "4321"})
+    check(r.status_code == 200 and "writes the PIN into its own log" in r.json().get("warning", ""),
+          "setting a PIN on older software comes with a warning", r.text)
+    # PINs never outlive delivery: expired and cancelled set-pin rows are scrubbed too
+    from app.models import Command as _C
+    r1 = c.post("/admin/devices/%s/commands" % ids[1], headers=A, json={"type": "set-pin", "args": {"pin": "555555"}}).json()
+    c.delete("/admin/devices/%s/commands/%s" % (ids[1], r1["id"]), headers=A)
+    r2 = c.post("/admin/devices/%s/commands" % ids[2], headers=A, json={"type": "set-pin", "args": {"pin": "666666"}}).json()
+    c.get("/v1/commands", headers=dev_tok[ids[2]])                         # delivered ...
+    db.expire_all(); row = db.get(_C, r2["id"]); row.sent_at = row.sent_at - dt.timedelta(seconds=600); db.commit()
+    c.get("/admin/devices/%s/commands" % ids[2], headers=A)               # ... never answered: the sweep expires it
+    db.expire_all()
+    a1, a2 = db.get(_C, r1["id"]), db.get(_C, r2["id"])
+    check(a1.status == "cancelled" and "555555" not in json.dumps(a1.args), "a cancelled set-pin keeps no PIN in the database", a1.args)
+    check(a2.status == "expired" and "666666" not in json.dumps(a2.args), "an expired set-pin keeps no PIN in the database", (a2.status, a2.args))
+    # payloads are downloads, never pages
+    r = c.post("/admin/payloads", headers=A, files={"script": ("x", b"#!<script>alert(1)</script>"), "sig": ("s", b"0" * 72)},
+               data={"name": "evil.html"})
+    check(r.status_code == 400, "an .html payload is refused (it could run as a page on the fleet's origin)", r.text)
+    r = c.post("/admin/payloads", headers=A, files={"script": ("x", b"#!/bin/bash\necho hi\n"), "sig": ("s", b"0" * 72)},
+               data={"name": "bridge-web-probe.sh"})
+    check(r.status_code == 200, "a catalog-shaped payload is accepted", r.text)
+    r = c.get("/payloads/bridge-web-probe.sh")
+    check(r.status_code == 200 and r.headers.get("content-disposition") == "attachment"
+          and r.headers.get("x-content-type-options") == "nosniff" and "sandbox" in r.headers.get("content-security-policy", "")
+          and r.headers.get("content-type") == "application/octet-stream",
+          "payloads are served as downloads (attachment, nosniff, sandboxed)", dict(r.headers))
+    # one bridge's malformed telemetry never breaks the list or the stream
+    tel(ids[3], pin="x", quarantined=[1], mesh_path="relay", temp=71.5, services=[["a"], "b"], power="weird")
+    r = c.get("/admin/devices", headers=A)
+    check(r.status_code == 200 and len(r.json()) == 4, "malformed telemetry from one bridge: the fleet list still answers", r.status_code)
+    tel(ids[3])
 
     # ---- nb: the terminal tool speaks fleet numbers ---------------------------------------------
     (T / "tok").write_text("ADMIN")

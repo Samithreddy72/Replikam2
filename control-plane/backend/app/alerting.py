@@ -29,7 +29,12 @@ def evaluate(db) -> dict:
         # The panel read-path calls device_alerts(dev) WITHOUT db to stay a cheap
         # single-snapshot check; restart storms surface via the notification +
         # /admin/alerts/history instead of a live panel card.
-        current = {a["kind"]: a for a in device_alerts(dev, db)}
+        try:
+            current = {a["kind"]: a for a in device_alerts(dev, db)}
+        except Exception:
+            # One bridge's malformed telemetry must not stop every other bridge's alerts.
+            log.exception("alert evaluation skipped %s (unreadable telemetry)", dev.id)
+            continue
         open_events = {e.kind: e for e in db.scalars(
             select(AlertEvent).where(AlertEvent.device_id == dev.id,
                                      AlertEvent.resolved_at.is_(None))).all()}
@@ -87,13 +92,17 @@ def evaluate(db) -> dict:
 async def evaluate_loop(session_factory, interval_s: int = 30):
     """Background task: evaluate on startup, then every interval."""
     import asyncio
+    def once():
+        db = session_factory()
+        try:
+            evaluate(db)
+        finally:
+            db.close()
     while True:
         try:
-            db = session_factory()
-            try:
-                evaluate(db)
-            finally:
-                db.close()
+            # In a worker thread: email delivery is blocking SMTP, and on the event loop a slow
+            # mail server stalled every request and the panel's live stream (2026-09-25 audit).
+            await asyncio.to_thread(once)
         except Exception:
             log.exception("alert evaluation failed; retrying next interval")
         await asyncio.sleep(interval_s)

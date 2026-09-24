@@ -34,7 +34,9 @@ from .schemas import (EnrollIn, EnrollOut, CommandOut, CommandResultIn,
 # command missing from any of them fails. Adding the recovery commands to the device and
 # the panel was not enough: the API refused them here with "unsupported command type"
 # before they were ever queued, so every new button would have failed on first click.
-ALLOWED_COMMANDS = {"restart", "reset-clock", "profile", "set-peer", "update", "reboot",
+# No "set-peer" (2026-09-25 audit): it let any admin token point a room's microphone at any address
+# with no PIN session. The return destination is set only by the presenter app, with its ticket.
+ALLOWED_COMMANDS = {"restart", "reset-clock", "profile", "update", "reboot",
                     "start", "stop", "diagnose",
                     # PIN gate (2026-09-25): set a PIN, lift a brute-force lockout, end the live
                     # session. There is deliberately NO remote unlock: only a presenter typing the
@@ -121,6 +123,30 @@ def _refuse_by_policy(body) -> None:
                                   "detail": "bridges stay on the WAN profile (owner's rule)"})
 
 
+def _pin_protocol(dev) -> int:
+    """2 = the bridge's PIN gate from the 2026-09-25 image; 1 = older software."""
+    pin = (dev.latest or {}).get("pin") if isinstance(dev.latest, dict) else None
+    try:
+        return int((pin or {}).get("protocol") or 1) if isinstance(pin, dict) else 1
+    except (TypeError, ValueError):
+        return 1
+
+
+OLD_SOFTWARE_REFUSALS = {
+    # On older bridge software `lock` runs `bridge stop`, stopping the camera service - with a meeting
+    # laptop attached that has rebooted bridges - and the panel would have promised "media keeps running".
+    "lock": "this bridge runs software from before 2026-09-25: its lock STOPS ALL MEDIA (camera "
+            "included - with a laptop attached that has rebooted bridges). Update the bridge first.",
+    "clear-lockout": "this bridge runs software from before 2026-09-25, which has no clear-lockout: "
+                     "its lockout ends by itself within an hour. Update the bridge to clear it remotely.",
+}
+
+
+def _refuse_for_old_software(dev, ctype: str) -> None:
+    if ctype in OLD_SOFTWARE_REFUSALS and _pin_protocol(dev) < 2:
+        raise HTTPException(409, OLD_SOFTWARE_REFUSALS[ctype])
+
+
 def _timeout_for(ctype: str) -> int:
     return TIMEOUT_S.get(ctype, DEFAULT_TIMEOUT_S)
 
@@ -145,6 +171,7 @@ def _sweep_expired(db: Session) -> int:
             started = started.replace(tzinfo=dt.timezone.utc)
         if (now - started).total_seconds() > (c.timeout_s or DEFAULT_TIMEOUT_S):
             c.status = "expired"
+            _scrub_secret_args(c)
             c.fail_reason = ("no result within %ds of delivery — the device may have rebooted, "
                              "lost its uplink, or died mid-command" % (c.timeout_s or DEFAULT_TIMEOUT_S))
             c.completed_at = now
@@ -154,9 +181,16 @@ def _sweep_expired(db: Session) -> int:
     return n
 
 
-# Commands whose args contain a secret. Their args are scrubbed once the device confirms
-# execution, so a PIN never lives in the fleet database beyond its delivery window.
+# Commands whose args contain a secret. Their args are scrubbed as soon as the command reaches
+# ANY final state - done, failed, rejected, expired, cancelled, or a late report - so a PIN never
+# lives in the fleet database beyond its delivery window. (Until 2026-09-25 only a normal result
+# scrubbed it; an expired or cancelled set-pin kept the PIN in plaintext forever.)
 PIN_BEARING_COMMANDS = {"set-pin", "unlock"}
+
+
+def _scrub_secret_args(c) -> None:
+    if c.type in PIN_BEARING_COMMANDS and (c.args or {}) != {"_scrubbed": True}:
+        c.args = {"_scrubbed": True}
 
 # LAN-only mode: when the tailnet/Funnel is unreachable on the deployment's network
 # (e.g. an ISP that drops the Tailscale handshake), a bridge's advertised mesh IP is a
@@ -277,6 +311,27 @@ def _backfill_numbers():
 
 
 _backfill_numbers()
+
+
+def _scrub_old_secrets():
+    """Once per start: PINs left in final-state rows by builds before the 2026-09-25 fix."""
+    from .db import SessionLocal
+    db = SessionLocal()
+    try:
+        n = 0
+        for c in db.scalars(select(Command).where(Command.type.in_(PIN_BEARING_COMMANDS),
+                                                  Command.status.in_(TERMINAL_STATES))).all():
+            if (c.args or {}) != {"_scrubbed": True}:
+                _scrub_secret_args(c)
+                n += 1
+        if n:
+            db.commit()
+            print("[secrets] scrubbed the PIN from %d finished command row(s)" % n)
+    finally:
+        db.close()
+
+
+_scrub_old_secrets()
 
 
 @app.on_event("startup")
@@ -446,6 +501,7 @@ def command_result(cmd_id: int, body: CommandResultIn,
     # verdict stands and the late report is appended as evidence -- both facts survive, which
     # is what an operator needs to reconstruct what actually happened.
     if c.status in TERMINAL_STATES:
+        _scrub_secret_args(c)
         stamp = utcnow().isoformat(timespec="seconds")
         late = ("\n--- late report from the device at %s: status=%s "
                 "(the control plane had already recorded '%s'; that verdict stands) ---\n%s"
@@ -551,15 +607,25 @@ def _device_state(dev: Device, online: bool, alerts: list) -> str:
         return "new"
     if not online:
         return "offline"
-    if ((dev.latest or {}).get("streams") or {}).get("video"):
+    t = dev.latest if isinstance(dev.latest, dict) else {}
+    streams = t.get("streams") if isinstance(t.get("streams"), dict) else {}
+    if streams.get("video"):
         return "live"
     return "degraded" if alerts else "active"
 
 
+def _safe_alerts(dev: Device) -> list:
+    try:
+        return device_alerts(dev)
+    except Exception as e:                  # malformed telemetry from one bridge
+        print("[alerts] could not evaluate %s: %r" % (dev.id, e))
+        return [{"kind": "telemetry_unreadable", "detail": "this bridge sent telemetry the fleet could not read"}]
+
+
 def _device_view(dev: Device) -> dict:
     online = is_online(dev)
-    alerts = device_alerts(dev)
-    t = dev.latest or {}
+    alerts = _safe_alerts(dev)
+    t = dev.latest if isinstance(dev.latest, dict) else {}
     return {
         "id": dev.id,
         "number": dev.number,
@@ -809,8 +875,12 @@ def set_device_pin(device_id: str, body: dict | None = None,
     db.commit()
     # never audit the value itself - only that a rotation happened, and by whom
     _audit(db, actor, "pin:rotate", dev.name or device_id)
-    return {"command_id": c.id, "pin": pin,
-            "note": "shown once - deliver it to the presenter offline"}
+    out = {"command_id": c.id, "pin": pin, "note": "shown once - deliver it to the presenter offline"}
+    if _pin_protocol(dev) < 2:
+        out["warning"] = ("this bridge runs software from before 2026-09-25: it does not require the PIN on "
+                          "every go-live, and it writes the PIN into its own log. Update the bridge, then "
+                          "set the PIN again.")
+    return out
 
 
 # ---------------------------------------------------------------- script payloads
@@ -853,6 +923,12 @@ async def upload_payload(request: Request, actor=Depends(auth.require_admin)):
     name = (form.get("name") or "").strip()
     if not _PAYLOAD_NAME.fullmatch(name or "") or ".." in name or name.endswith(".sig"):
         raise HTTPException(400, "bad file name")
+    # Only the shapes the bridges' catalog uses: *.sh, *.py, extension-less tools, the owner SSH
+    # key file, and dropin.<unit>. Anything else - an .html above all - could be served back from
+    # this origin as a page and read an admin's credentials (2026-09-25 audit).
+    if not (name.endswith((".sh", ".py")) or "." not in name or name == "owner_ssh_authorized_keys"
+            or re.fullmatch(r"dropin\.bridge-[a-z0-9-]{1,40}", name)):
+        raise HTTPException(400, "not a catalog file name (*.sh, *.py, a tool name, owner_ssh_authorized_keys, dropin.<unit>)")
     script, sig = form.get("script"), form.get("sig")
     if script is None or sig is None:
         raise HTTPException(400, "need both 'script' and 'sig'")
@@ -989,6 +1065,7 @@ def cancel_command(device_id: str, cmd_id: int, actor=Depends(auth.require_admin
         raise HTTPException(404, "no such command for this device")
     if c.status == "pending":
         c.status = "cancelled"
+        _scrub_secret_args(c)
         c.fail_reason = "cancelled by %s before the device collected it" % (
             getattr(actor, "email", None) or "an operator")
         c.completed_at = utcnow()
@@ -1017,6 +1094,7 @@ def issue_command(device_id: str, body: IssueCommandIn, actor=Depends(auth.requi
         raise HTTPException(400, "unsupported command type")
     _refuse_by_policy(body)
     dev = _scoped_device(db, device_id, actor)
+    _refuse_for_old_software(dev, body.type)
     # A destructive command must be asked for on purpose. The panel already shows a warning,
     # but a warning in a browser is not a control: the API is reachable without it, which is
     # precisely how a `reboot` reached a live bridge during the 2026-08-24 audit. Requiring
@@ -1098,8 +1176,11 @@ def broadcast_command(body: IssueCommandIn, actor=Depends(auth.require_admin),
             "detail": ("this command interrupts service on EVERY device in the org; "
                        "re-issue it with confirm=true"),
         })
-    ids = []
+    ids, skipped = [], []
     for dev in db.scalars(select(Device).where(Device.org_id == actor.org)).all():
+        if body.type in OLD_SOFTWARE_REFUSALS and _pin_protocol(dev) < 2:
+            skipped.append({"device": dev.name or dev.id, "reason": OLD_SOFTWARE_REFUSALS[body.type]})
+            continue
         # timeout_s was omitted here, so broadcast commands fell back to the column default
         # instead of the per-class table the single-device path uses.
         c = Command(device_id=dev.id, type=body.type, args=body.args or {},
@@ -1109,14 +1190,14 @@ def broadcast_command(body: IssueCommandIn, actor=Depends(auth.require_admin),
         ids.append({"device": dev.name or dev.id, "command_id": c.id})
     db.commit()
     _audit(db, actor, "broadcast:%s" % body.type, "%d device(s)" % len(ids))
-    return {"queued": ids}
+    return {"queued": ids, "skipped": skipped}
 
 
 @app.get("/admin/alerts")
 def all_alerts(actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
     out = []
     for dev in db.scalars(select(Device).where(Device.org_id == actor.org)).all():
-        for a in device_alerts(dev):
+        for a in _safe_alerts(dev):
             out.append({"device_id": dev.id, "name": dev.name, **a})
     return out
 
@@ -1714,7 +1795,16 @@ def _mount_payloads():
     d = PAYLOAD_DIR
     os.makedirs(d, exist_ok=True)
     print("[payloads] serving signed script payloads from %s" % d)
-    app.mount("/payloads", StaticFiles(directory=d), name="payloads")
+    class _DownloadOnly(StaticFiles):
+        """Every payload is a download: never rendered, never sniffed, never scripted."""
+        async def get_response(self, path, scope):
+            resp = await super().get_response(path, scope)
+            resp.headers["Content-Type"] = "application/octet-stream"
+            resp.headers["Content-Disposition"] = "attachment"
+            resp.headers["X-Content-Type-Options"] = "nosniff"
+            resp.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+            return resp
+    app.mount("/payloads", _DownloadOnly(directory=d), name="payloads")
 
 
 def _mount_panel():

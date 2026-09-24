@@ -35,7 +35,7 @@ SYSTEMD_RUN = os.environ.get("BRIDGE_AGENT_SYSTEMD_RUN", "/usr/bin/systemd-run")
 # in their own systemd job (value = max run time, seconds) and are reported on a later tick.
 DETACHED = {"deploy-script": 900, "revert-script": 600, "unquarantine": 600, "update": 3600,
             "diagnose": 900, "restart": 600, "start": 600, "stop": 300, "profile": 600,
-            "set-peer": 300, "reset-clock": 300, "gadget-tune": 120, "gadget-tune-clear": 120,
+            "reset-clock": 300, "gadget-tune": 120, "gadget-tune-clear": 120,
             "jitter-diagnose": 300, "jitter-fix": 600, "jitter-reset": 600,
             "golden-save": 300, "golden-restore": 600}
 
@@ -45,7 +45,8 @@ ALLOWED = {
     "restart":     lambda a: ["bridge", "restart"],
     "reset-clock": lambda a: ["bridge", "reset-clock"],
     "profile":     lambda a: ["bridge", "profile", _enum(a.get("mode"), ("lan", "wan"))],
-    "set-peer":    lambda a: ["bridge", "set-peer", _ip(a.get("ip")), _port(a.get("port", "5004"))],
+    # No "set-peer" (2026-09-25 audit): from the fleet it pointed the room's microphone at any
+    # address with no PIN session. Only the presenter app sets it, through bridge-web, with a ticket.
     # A staged rollout names the image to install; with no source we fall back to
     # the device's own BRIDGE_UPDATE_URL (previous behaviour, unchanged).
     # A whole new OS into the standby slot, then a trial boot that commits itself if healthy
