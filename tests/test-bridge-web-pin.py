@@ -172,6 +172,11 @@ n = len(BRIDGE_CALLS)
 st, j = call("POST", "/api/set-peer", {"ip": B, "port": 5004, "ticket": TK}, caller=B)
 check(st == 401 and len(BRIDGE_CALLS) == n, "after Stop the old ticket cannot go live again", j)
 
+st, j = call("POST", "/api/unlock", {"pin": "135790", "protocol": float("inf")}, caller=B)
+check(st == 200 and "ticket" not in j, '"protocol": Infinity still gets an answer (and no ticket)', (st, j))
+TK = call("POST", "/api/unlock", {"pin": "135790", "protocol": 2}, caller=B)[1].get("ticket", "")
+call("POST", "/api/end-session", {"ticket": TK}, caller=B)
+
 print("\n  ---- addresses are parsed, not prefix-matched ----")
 for spoof in ("::1:2:3:4", "::127.0.0.1", "::100.64.0.1", "100.1.2.3", "fe80::1"):
     st, j = call("POST", "/api/unlock", {"pin": "135790", "protocol": 2}, caller=spoof)

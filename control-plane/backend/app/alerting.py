@@ -46,7 +46,11 @@ def evaluate(db) -> dict:
                 continue
             ev = AlertEvent(device_id=dev.id, kind=kind, detail=a.get("detail"))
             db.add(ev)
-            db.flush()                       # get ev.id / opened_at
+            # COMMIT BEFORE EMAILING. SQLite holds its write lock from the first write to the
+            # commit; with an email (seconds) in between, every other request waiting to write -
+            # telemetry, command pulls, even sign-in bookkeeping - failed with "database is
+            # locked" during an alert burst (review, 2026-09-25). Short transactions only.
+            db.commit()
             stats["opened"] += 1
             if configured:
                 payload = notifier.build_message(
@@ -54,6 +58,7 @@ def evaluate(db) -> dict:
                 res = notifier.deliver(payload)
                 if any(res.values()):
                     ev.notified_at = utcnow()
+                    db.commit()
                     stats["notified"] += 1
 
         # 2) RESOLVED alerts: an open event whose kind is no longer firing.
@@ -61,6 +66,7 @@ def evaluate(db) -> dict:
             if kind in current:
                 continue
             ev.resolved_at = utcnow()
+            db.commit()
             stats["resolved"] += 1
             # Only announce a resolution for something we actually announced firing.
             if configured and ev.notified_at:
@@ -69,6 +75,7 @@ def evaluate(db) -> dict:
                 res = notifier.deliver(payload)
                 if any(res.values()):
                     ev.resolve_notified_at = utcnow()
+                    db.commit()
                     stats["resolve_notified"] += 1
 
         # 3) RETRY: an open, un-notified event (delivery failed earlier, or the
@@ -81,6 +88,7 @@ def evaluate(db) -> dict:
                     name, dev.id, kind, ev.detail or "", "firing", alert_fix(kind))
                 if any(notifier.deliver(payload).values()):
                     ev.notified_at = utcnow()
+                    db.commit()
                     stats["notified"] += 1
 
     db.commit()

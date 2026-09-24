@@ -46,8 +46,21 @@ echo "[deploy] build id $BUILD_ID"
 # rollback is: redeploy the previous commit and, only if needed, copy this file back.
 BACKUP="bridge.db.pre-${GIT_SHA:0:7}-$(date -u +%Y%m%d%H%M%S)"
 echo "[deploy] backing up the database -> /data/$BACKUP"
-$S "cd /opt/netbridge && sudo docker compose exec -T fleet python -c \"import sqlite3; s=sqlite3.connect('/data/bridge.db'); d=sqlite3.connect('/data/$BACKUP'); s.backup(d); d.close(); print('backup ok', sum(1 for _ in s.execute('select 1 from devices')), 'devices')\"" \
+# The script travels on stdin (ssh -> docker exec -T -> python -), so no quoting can mangle it.
+$S "cd /opt/netbridge && sudo docker compose exec -T fleet python - /data/bridge.db /data/$BACKUP" <<'PY' \
   || { echo "[deploy] REFUSING: could not back up the database - nothing was changed." >&2; exit 1; }
+import sqlite3, sys
+src, dst = sys.argv[1], sys.argv[2]
+s, d = sqlite3.connect(src), sqlite3.connect(dst)
+s.backup(d)
+# The copy keeps no PINs: a finished set-pin/unlock never needs its PIN again (review, 2026-09-25).
+n = d.execute("update commands set args = ? where type in ('set-pin', 'unlock') and status in "
+              "('done', 'succeeded', 'failed', 'rejected', 'cancelled', 'expired') and args like '%pin%'",
+              ('{"_scrubbed": true}',)).rowcount
+d.commit(); d.close()
+print("[deploy] backup ok: %d devices; %d finished PIN row(s) scrubbed in the copy"
+      % (s.execute("select count(*) from devices").fetchone()[0], n))
+PY
 
 echo "[deploy] sending source (backend + built panel + Dockerfile)"
 tar -C "$CP" -czf - Dockerfile backend/requirements.txt backend/app panel-dist \
@@ -108,11 +121,15 @@ D="https://${DOMAIN:-fleet.scine.online}"
 # no message at all - exactly the kind of "deploy finished?" the checks exist to rule out.
 WANT_PANEL="$(shasum -a 256 "$CP/panel-dist/index.html" | cut -c1-16)"
 GOT_PANEL="unreachable"
+PAGE_FILE="$(mktemp)"
 for i in $(seq 1 10); do
-  if PAGE="$(curl -fsS -m 20 "$D/" 2>/dev/null)"; then GOT_PANEL="$(printf '%s' "$PAGE" | shasum -a 256 | cut -c1-16)"; fi
+  # Hash the bytes as served, from a file: $(...) would strip the page's final newline and the
+  # hashes could never match (found in review, 2026-09-25).
+  if curl -fsS -m 20 -o "$PAGE_FILE" "$D/" 2>/dev/null; then GOT_PANEL="$(shasum -a 256 "$PAGE_FILE" | cut -c1-16)"; fi
   [ "$GOT_PANEL" = "$WANT_PANEL" ] && break
   sleep 3
 done
+rm -f "$PAGE_FILE"
 if [ "$WANT_PANEL" = "$GOT_PANEL" ]; then echo "[deploy] panel        $GOT_PANEL  (matches)"
 else echo "[deploy] FAILED: the panel being served ($GOT_PANEL) is not this commit's ($WANT_PANEL)." >&2; exit 1; fi
 STREAM_CODE="$(curl -s -o /dev/null -w '%{http_code}' -m 15 "$D/admin/stream" || true)"

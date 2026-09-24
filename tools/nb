@@ -426,9 +426,11 @@ def cmd_pin(a):
         if not re.fullmatch(r"\d{4,8}", a[1]):
             die("the PIN is 4-8 digits")
         body["pin"] = a[1]
-    confirm("Set a new go-live PIN (a session already live is not ended)", [d])
+    confirm("Set a new go-live PIN (on 2.2+ this also ends a session that is live now)", [d])
     r = api("POST", "/admin/devices/%s/pin" % d["id"], body)
     print("  PIN for %s:  %s   ← shown once; the fleet keeps no copy. Hand it to your presenter yourself." % (label(d), r.get("pin")))
+    if r.get("warning"):
+        print("  ⚠ " + r["warning"])
     for _ in range(45):
         time.sleep(4)
         for c in api("GET", "/admin/devices/%s/commands?limit=30" % d["id"]):

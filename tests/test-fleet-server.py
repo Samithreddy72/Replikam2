@@ -24,7 +24,7 @@ BACKEND = ROOT / "control-plane/backend"
 T = pathlib.Path(tempfile.mkdtemp())
 DB = T / "fleet.db"
 ENV = dict(os.environ, DATABASE_URL="sqlite:///%s" % DB, BOOTSTRAP_TOKENS="boot-test",
-           PAYLOAD_DIR=str(T / "payloads"), OFFLINE_AFTER_S="60")
+           PAYLOAD_DIR=str(T / "payloads"), OFFLINE_AFTER_S="60", ALERT_EVAL_INTERVAL_S="3600")
 os.environ.update(ENV)
 sys.path.insert(0, str(BACKEND))
 
@@ -201,6 +201,8 @@ try:
                                                    "stage_pct": 100})
     check(r.status_code == 200, "a rollout can be started", r.text)
     ro_id = r.json().get("id")
+    check(r.status_code == 200 and "BRIDGE-0004" in r.json().get("excluded", []),
+          "the rollout leaves out the unclaimed bridge and names it (it cannot be updated remotely)", r.json().get("excluded"))
     from app.models import Command as _Cmd, RolloutTarget as _RT
     db.expire_all()
     ups = db.query(_Cmd).filter(_Cmd.type == "update").all()
@@ -250,6 +252,9 @@ try:
     r = c.post("/admin/payloads", headers=A, files={"script": ("x", b"#!/bin/bash\necho hi\n"), "sig": ("s", b"0" * 72)},
                data={"name": "bridge-web-probe.sh"})
     check(r.status_code == 200, "a catalog-shaped payload is accepted", r.text)
+    r = c.post("/admin/payloads", headers=A, files={"script": ("x", b"[Service]\nNice=5\n"), "sig": ("s", b"0" * 72)},
+               data={"name": "dropin.jitter-sentry"})
+    check(r.status_code == 200, "every catalog drop-in name is accepted (dropin.jitter-sentry)", r.text)
     r = c.get("/payloads/bridge-web-probe.sh")
     check(r.status_code == 200 and r.headers.get("content-disposition") == "attachment"
           and r.headers.get("x-content-type-options") == "nosniff" and "sandbox" in r.headers.get("content-security-policy", "")
@@ -260,6 +265,29 @@ try:
     r = c.get("/admin/devices", headers=A)
     check(r.status_code == 200 and len(r.json()) == 4, "malformed telemetry from one bridge: the fleet list still answers", r.status_code)
     tel(ids[3])
+
+    # ---- a slow mail server must not lock the database for everyone else ----------------------------
+    from app import alerting as AL, notifier as NT
+    tel(ids[1], temp="91.0'C")                                  # a fresh alert for the loop to email
+    orig = (NT.any_channel_configured, NT.deliver)
+    NT.any_channel_configured = lambda: True
+    NT.deliver = lambda payload: (time.sleep(6), {"email": True})[1]     # 6 s > SQLite's 5 s lock wait
+    done = {}
+    def run_eval():
+        s2 = SessionLocal()
+        try:
+            done["stats"] = AL.evaluate(s2)
+        finally:
+            s2.close()
+    th2 = threading.Thread(target=run_eval, daemon=True); th2.start()
+    time.sleep(1.0)                                             # the loop is now inside the "email"
+    t0 = time.monotonic(); r = tel(ids[0]); took = time.monotonic() - t0
+    th2.join(30)
+    NT.any_channel_configured, NT.deliver = orig
+    check(r.status_code == 200 and took < 3, "a bridge's heartbeat is saved at once while an alert email is being sent (%.1f s)" % took,
+          (r.status_code, r.text[:120]))
+    check(done.get("stats", {}).get("notified", 0) >= 1, "…and the alert was still emailed and recorded", done)
+    tel(ids[1], streams={"video": True, "voice": True, "return": True}, udc="configured")   # live again
 
     # ---- nb: the terminal tool speaks fleet numbers ---------------------------------------------
     (T / "tok").write_text("ADMIN")

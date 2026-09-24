@@ -1507,7 +1507,7 @@ class H(http.server.BaseHTTPRequestHandler):
             # whoever copies it (2026-09-25 audit). They unlock without it; the PIN still counted.
             try:
                 wants_ticket = int(body.get("protocol") or 1) >= PIN_PROTOCOL
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):     # "protocol": Infinity is valid JSON
                 wants_ticket = False
             for k in ("ticket", "peer", "gate", "expires_in", "idle_timeout", "superseded",
                       "attempt", "attempts_left", "retry_in"):

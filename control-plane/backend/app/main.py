@@ -927,7 +927,7 @@ async def upload_payload(request: Request, actor=Depends(auth.require_admin)):
     # key file, and dropin.<unit>. Anything else - an .html above all - could be served back from
     # this origin as a page and read an admin's credentials (2026-09-25 audit).
     if not (name.endswith((".sh", ".py")) or "." not in name or name == "owner_ssh_authorized_keys"
-            or re.fullmatch(r"dropin\.bridge-[a-z0-9-]{1,40}", name)):
+            or re.fullmatch(r"dropin\.[a-z][a-z0-9-]{0,40}", name)):
         raise HTTPException(400, "not a catalog file name (*.sh, *.py, a tool name, owner_ssh_authorized_keys, dropin.<unit>)")
     script, sig = form.get("script"), form.get("sig")
     if script is None or sig is None:
@@ -1980,17 +1980,32 @@ def create_rollout(body: RolloutCreateIn, actor=Depends(auth.require_admin),
     db.add(ro)
     db.flush()
     # Devices already on the target version are not targets — re-running a
-    # rollout must never re-flash a device that is already there.
+    # rollout must never re-flash a device that is already there. Nor are unclaimed bridges, or
+    # bridges older than 2.2: their software cannot install an OS version remotely (the update
+    # is killed after 30 s, the target sits "updating" until it expires, and widening stalls) -
+    # those are flashed by hand (review, 2026-09-25). The response names them.
+    excluded, targets = [], 0
     for dev in db.scalars(select(Device).where(Device.org_id == actor.org)).all():
         if (dev.version or "") == body.version:
             continue
+        if dev.claimed_at is None or _pin_protocol(dev) < 2:
+            excluded.append(dev.name or dev.pairing_code or dev.id)
+            continue
         db.add(RolloutTarget(rollout_id=ro.id, device_id=dev.id))
+        targets += 1
+    if not targets:
+        db.rollback()                     # an empty rollout would sit "active" doing nothing
+        raise HTTPException(409, "no bridge can install %s remotely%s" % (
+            body.version, (": %s run software older than 2.2 or are unclaimed - flash their cards "
+                           "with the image instead" % ", ".join(excluded)) if excluded else
+            " (they are all on it already)"))
     db.commit()
     sent = _dispatch_rollout(db, ro)
     _audit(db, actor, "rollout:create", "%s -> %d device(s), wave %d%%" %
            (body.version, len(_ro_targets(db, ro)), ro.stage_pct))
     out = _rollout_view(db, ro)
     out["dispatched_now"] = sent
+    out["excluded"] = excluded
     return out
 
 
