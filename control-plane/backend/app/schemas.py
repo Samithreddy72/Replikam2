@@ -50,6 +50,12 @@ class IssueCommandIn(BaseModel):
     idempotency_key: str | None = None
 
 
+class DeviceUpdateIn(BaseModel):
+    """Admin edits to a bridge's identity in the fleet (PATCH /admin/devices/{id})."""
+    name: Optional[str] = None         # display name, 1-64 characters
+    number: Optional[int] = None       # fleet number, shown as NB-001; unique within the org
+
+
 class RolloutCreateIn(BaseModel):
     version: str                       # target image version, e.g. "1.4.2"
     source: str                        # base URL/dir that holds manifest.txt + image

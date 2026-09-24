@@ -145,6 +145,47 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
         left = int(pin.get("lockout_remaining") or 0)
         out.append({"kind": "pin_lockout",
                     "detail": "3 wrong PIN tries — bridge locked for %d more min; rotate the PIN if unexpected" % max(1, left // 60)})
+    # PIN. Every bridge must be PIN-gated: without a PIN anyone who can reach it over the
+    # mesh can go live on it. Bridges from the 2026-09-24 image refuse go-live outright
+    # until a PIN is set (pin.required); older ones stay open, which is worse.
+    if pin and pin.get("pin_set") is False:
+        out.append({"kind": "pin_not_set",
+                    "detail": ("no PIN set — go-live is BLOCKED until you set one"
+                               if pin.get("required") else
+                               "no PIN set — anyone on the mesh can go live on this bridge")})
+    if pin.get("gate") == "unavailable":
+        out.append({"kind": "pin_gate_unavailable",
+                    "detail": "the media gate could not be armed — go-live still needs the PIN, "
+                              "but media is not blocked at the network level"})
+    # USB camera: missed isochronous slots per second (the bridge's camera service counts them).
+    um = t.get("usb_misses_per_s")
+    if isinstance(um, (int, float)) and um >= settings.usb_miss_alert_per_s:
+        out.append({"kind": "usb_misses",
+                    "detail": "USB camera missing %.1f slots/s — video freezes likely; "
+                              "check the power supply and wiring" % um})
+    free = t.get("data_free_mb")
+    if isinstance(free, (int, float)) and free < settings.disk_low_mb:
+        out.append({"kind": "disk_low", "detail": "only %d MB free on /data" % free})
+    parked = t.get("quarantined") or []
+    if parked:
+        out.append({"kind": "update_rolled_back",
+                    "detail": "automatic rollback parked %s — the bridge runs the built-in "
+                              "file instead" % ", ".join(parked)})
+    if (t.get("overrides") or {}).get("safe_mode"):
+        out.append({"kind": "safe_mode",
+                    "detail": "3 boots in a row were unhealthy — every update is OFF this boot"})
+    ota = t.get("ota") or {}
+    try:
+        ota_recent = (dt.datetime.now(dt.timezone.utc).timestamp() - float(ota.get("ts") or 0)) < 24 * 3600
+    except (TypeError, ValueError):
+        ota_recent = False
+    if ota.get("state") in ("failed", "rolled back") and ota_recent:
+        out.append({"kind": "os_update_failed",
+                    "detail": "OS update %s %s — %s" % (ota.get("version") or "", ota["state"],
+                                                          ota.get("detail") or "no detail")})
+    if (t.get("streams") or {}).get("video") and (t.get("mesh_path") or {}).get("via") == "relay":
+        out.append({"kind": "mesh_relayed",
+                    "detail": "the live session is relayed, not direct — expect extra delay"})
     # Restart storm needs history, so it only runs when a db is supplied (the panel
     # read-path and the alert loop both have one; a bare device_alerts(dev) skips it).
     if db is not None:

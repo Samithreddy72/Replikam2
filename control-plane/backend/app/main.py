@@ -11,9 +11,12 @@ import datetime as dt
 import os
 import re
 import hashlib
+import json
+import time
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc
 from sqlalchemy.orm import Session
 
@@ -24,7 +27,7 @@ from .alerts import device_alerts, is_online
 from .models import (Device, Telemetry, Command, DiagBundle, User, AuditLog,
                      Rollout, RolloutTarget, utcnow)
 from .schemas import (EnrollIn, EnrollOut, CommandOut, CommandResultIn,
-                      ClaimIn, IssueCommandIn, RolloutCreateIn)
+                      ClaimIn, IssueCommandIn, RolloutCreateIn, DeviceUpdateIn)
 
 # Must stay in step with the agent's own ALLOWED dict on the device. There are THREE
 # gates a command passes — this one, the panel menu, and the device allow-list — and a
@@ -101,6 +104,15 @@ NO_DOUBLE_EXECUTE = {"reboot", "restart", "update", "deploy-script", "revert-scr
 # device says afterwards may overwrite it -- see command_result(). `pending` and `sent` are the
 # only states from which a result is accepted.
 TERMINAL_STATES = {"done", "succeeded", "failed", "rejected", "cancelled", "expired"}
+
+
+def _refuse_by_policy(body) -> None:
+    """Commands the fleet refuses whatever the client says. The LAN profile is one: the owner's
+    standing rule is that bridges stay on WAN (latency is cut in the video feeder instead), and a
+    profile switch restarts the whole media stack — which rebooted an under-powered bridge 4/4."""
+    if body.type == "profile" and str((body.args or {}).get("mode", "")).strip().lower() == "lan":
+        raise HTTPException(400, {"error": "LAN profile disabled",
+                                  "detail": "bridges stay on the WAN profile (owner's rule)"})
 
 
 def _timeout_for(ctype: str) -> int:
@@ -196,6 +208,9 @@ def _migrate():
         if "devices" in insp.get_table_names():
             if "setup_pass" not in cols("devices"):
                 conn.execute(_text("ALTER TABLE devices ADD COLUMN setup_pass VARCHAR"))
+            # Fleet numbers (NB-001 …), 2026-09-24.
+            if "number" not in cols("devices"):
+                conn.execute(_text("ALTER TABLE devices ADD COLUMN number INTEGER"))
         # M6 magic-link sign-in: one-time login code on the user row.
         if "users" in insp.get_table_names():
             ucols = cols("users")
@@ -221,6 +236,41 @@ def _migrate():
             if "fail_reason" not in ccols:
                 conn.execute(_text("ALTER TABLE commands ADD COLUMN fail_reason VARCHAR"))
 _migrate()
+
+
+def fleet_label(number):
+    """NB-001 style label for a fleet number (None while a bridge has no number)."""
+    return ("NB-%03d" % number) if number else None
+
+
+def _next_number(db: Session, org: str) -> int:
+    used = [n for n in db.scalars(select(Device.number).where(Device.org_id == org)).all() if n]
+    return (max(used) + 1) if used else 1
+
+
+def _backfill_numbers():
+    """Give every CLAIMED bridge a fleet number, in the order they were claimed.
+
+    Fleets older than numbering get theirs here, once; new claims take the next free number in
+    claim_device(). A number never changes on its own — only an admin renumbers (PATCH)."""
+    from .db import SessionLocal
+    db = SessionLocal()
+    try:
+        devs = db.scalars(select(Device)).all()
+        changed = False
+        for org in sorted({d.org_id for d in devs}):
+            mine = [d for d in devs if d.org_id == org]
+            nxt = max([d.number for d in mine if d.number] or [0]) + 1
+            for d in sorted((d for d in mine if d.claimed_at is not None and not d.number),
+                            key=lambda d: (str(d.claimed_at), d.id)):
+                d.number, nxt, changed = nxt, nxt + 1, True
+        if changed:
+            db.commit()
+    finally:
+        db.close()
+
+
+_backfill_numbers()
 
 
 @app.on_event("startup")
@@ -483,9 +533,31 @@ def upload_diagnostics(body: dict, dev: Device = Depends(auth.require_device),
 
 # ----------------------------- operator-facing (/admin) -----------------------------
 
+def _device_state(dev: Device, online: bool, alerts: list) -> str:
+    """One word for "how is this bridge right now" — the same in the panel, nb and alerts.
+
+      new       joined the fleet, not claimed yet
+      offline   no heartbeat within OFFLINE_AFTER_S
+      live      a presenter's video is flowing through it right now
+      degraded  online and idle, but something needs attention (any alert)
+      active    online, healthy, idle — ready for a presenter"""
+    if dev.claimed_at is None:
+        return "new"
+    if not online:
+        return "offline"
+    if ((dev.latest or {}).get("streams") or {}).get("video"):
+        return "live"
+    return "degraded" if alerts else "active"
+
+
 def _device_view(dev: Device) -> dict:
+    online = is_online(dev)
+    alerts = device_alerts(dev)
+    t = dev.latest or {}
     return {
         "id": dev.id,
+        "number": dev.number,
+        "label": fleet_label(dev.number),
         "name": dev.name,
         "pairing_code": dev.pairing_code,
         "claimed": dev.claimed_at is not None,
@@ -493,21 +565,24 @@ def _device_view(dev: Device) -> dict:
         "version": dev.version,
         "tailscale_ip": dev.tailscale_ip,
         "last_seen": dev.last_seen.isoformat() if dev.last_seen else None,
-        "online": is_online(dev),
+        "online": online,
+        "state": _device_state(dev, online, alerts),
+        # the meeting laptop is plugged in and has enumerated the USB camera/mic/speaker
+        "laptop": (t.get("udc") == "configured") if online else None,
         "latest": dev.latest,
-        "alerts": device_alerts(dev),
+        "alerts": alerts,
     }
 
 
 @app.get("/admin/devices")
-def list_devices(actor=Depends(auth.require_viewer), db: Session = Depends(get_db)):
+def list_devices(actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
     devs = db.scalars(select(Device).where(Device.org_id == actor.org)
                       .order_by(Device.name.is_(None), Device.name)).all()
     return [_device_view(d) for d in devs]
 
 
 @app.get("/admin/devices/{device_id}")
-def device_detail(device_id: str, actor=Depends(auth.require_viewer),
+def device_detail(device_id: str, actor=Depends(auth.require_admin),
                   db: Session = Depends(get_db)):
     dev = _scoped_device(db, device_id, actor)
     view = _device_view(dev)
@@ -520,10 +595,42 @@ def device_detail(device_id: str, actor=Depends(auth.require_viewer),
         select(Command).where(Command.device_id == device_id)
         .order_by(desc(Command.created_at)).limit(20)
     ).all()
-    view["commands"] = [{"id": c.id, "type": c.type, "args": c.args, "status": c.status,
+    view["commands"] = [{"id": c.id, "type": c.type, "status": c.status,
+                         "args": {} if c.type in PIN_BEARING_COMMANDS else c.args,
                          "output": c.output,
                          "created_at": c.created_at.isoformat()} for c in cmds]
     return view
+
+
+@app.patch("/admin/devices/{device_id}")
+def update_device(device_id: str, body: DeviceUpdateIn, actor=Depends(auth.require_admin),
+                  db: Session = Depends(get_db)):
+    """Rename a bridge or change its fleet number (NB-###). Admin only; audited."""
+    dev = _scoped_device(db, device_id, actor)
+    changes = []
+    if body.name is not None:
+        name = body.name.strip()
+        if not 1 <= len(name) <= 64:
+            raise HTTPException(400, "name must be 1-64 characters")
+        if name != dev.name:
+            changes.append("name %r -> %r" % (dev.name, name))
+            dev.name = name
+    if body.number is not None:
+        if not 1 <= body.number <= 9999:
+            raise HTTPException(400, "number must be between 1 and 9999")
+        taken = db.scalar(select(Device).where(Device.org_id == dev.org_id,
+                                               Device.number == body.number,
+                                               Device.id != dev.id))
+        if taken is not None:
+            raise HTTPException(409, "%s is already %s" % (fleet_label(body.number),
+                                                           taken.name or taken.id))
+        if body.number != dev.number:
+            changes.append("number %s -> %s" % (fleet_label(dev.number), fleet_label(body.number)))
+            dev.number = body.number
+    if changes:
+        db.commit()
+        _audit(db, actor, "device:update", "%s: %s" % (dev.name or dev.id, "; ".join(changes)))
+    return _device_view(dev)
 
 
 @app.post("/admin/devices/{device_id}/claim")
@@ -533,6 +640,8 @@ def claim_device(device_id: str, body: ClaimIn, actor=Depends(auth.require_admin
     dev.name = body.name
     if dev.claimed_at is None:
         dev.claimed_at = utcnow()
+    if not dev.number:
+        dev.number = _next_number(db, dev.org_id)
     prov = dict(body.provision) if body.provision is not None else {}
     # "Claiming binds it to your org, names it, AND ISSUES ITS MESH-NETWORK KEY. That's the
     # whole enrollment ceremony." (walkthrough J4 step 2). Until now claim only passed
@@ -829,7 +938,7 @@ def list_commands(device_id: str, limit: int = 20, actor=Depends(auth.require_ad
     rows = db.scalars(select(Command).where(Command.device_id == device_id)
                       .order_by(desc(Command.id)).limit(max(1, min(limit, 100)))).all()
     return [{"id": c.id, "type": c.type, "status": c.status,
-             "args": c.args, "output": c.output,
+             "args": {} if c.type in PIN_BEARING_COMMANDS else c.args, "output": c.output,
              "created_at": c.created_at.isoformat() if c.created_at else None,
              "sent_at": c.sent_at.isoformat() if c.sent_at else None,
              "completed_at": c.completed_at.isoformat() if c.completed_at else None,
@@ -897,6 +1006,7 @@ def issue_command(device_id: str, body: IssueCommandIn, actor=Depends(auth.requi
                   db: Session = Depends(get_db)):
     if body.type not in ALLOWED_COMMANDS:
         raise HTTPException(400, "unsupported command type")
+    _refuse_by_policy(body)
     dev = _scoped_device(db, device_id, actor)
     # A destructive command must be asked for on purpose. The panel already shows a warning,
     # but a warning in a browser is not a control: the API is reachable without it, which is
@@ -964,6 +1074,7 @@ def broadcast_command(body: IssueCommandIn, actor=Depends(auth.require_admin),
     """Queue the same command for every device IN THE CALLER'S ORG."""
     if body.type not in ALLOWED_COMMANDS:
         raise HTTPException(400, "unsupported command type")
+    _refuse_by_policy(body)
     # THE CONFIRM GATE APPLIES HERE TOO.
     #
     # issue_command has required explicit confirmation for destructive types since the audit
@@ -993,7 +1104,7 @@ def broadcast_command(body: IssueCommandIn, actor=Depends(auth.require_admin),
 
 
 @app.get("/admin/alerts")
-def all_alerts(actor=Depends(auth.require_viewer), db: Session = Depends(get_db)):
+def all_alerts(actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
     out = []
     for dev in db.scalars(select(Device).where(Device.org_id == actor.org)).all():
         for a in device_alerts(dev):
@@ -1002,7 +1113,7 @@ def all_alerts(actor=Depends(auth.require_viewer), db: Session = Depends(get_db)
 
 
 @app.get("/admin/devices/{device_id}/uptime")
-def device_uptime(device_id: str, actor=Depends(auth.require_viewer),
+def device_uptime(device_id: str, actor=Depends(auth.require_admin),
                   db: Session = Depends(get_db)):
     """Uptime/SLA from telemetry ticks (~15s): minute-coverage over rolling 24h
     windows for the last 7 days, plus outage incidents (tick gaps > 120s).
@@ -1356,6 +1467,24 @@ def issue_mesh_key(actor=Depends(auth.require_viewer), db: Session = Depends(get
     }
 
 
+@app.get("/auth/bridges")
+def presenter_bridges(actor=Depends(auth.require_viewer), db: Session = Depends(get_db)):
+    """What the presenter app needs to go live — and nothing more.
+
+    Any signed-in user (a presenter, or an admin who is presenting) gets the org's CLAIMED
+    bridges with just enough to route to them. Live telemetry, alerts, commands and history stay
+    admin-only under /admin/*."""
+    out = []
+    for d in db.scalars(select(Device).where(Device.org_id == actor.org,
+                                             Device.claimed_at.is_not(None))).all():
+        out.append({"id": d.id, "number": d.number, "label": fleet_label(d.number),
+                    "name": d.name or d.pairing_code, "pairing_code": d.pairing_code,
+                    "online": is_online(d), "tailscale_ip": d.tailscale_ip,
+                    "ip": (d.latest or {}).get("ip")})
+    out.sort(key=lambda b: (b["number"] is None, b["number"] or 0, b["name"] or ""))
+    return out
+
+
 @app.get("/auth/whoami")
 def whoami(actor=Depends(auth.require_viewer), db: Session = Depends(get_db)):
     if actor.is_bootstrap:
@@ -1415,6 +1544,126 @@ def alerts_test(who=Depends(auth.require_admin)):
         {"command": "none", "label": "no action — test only"})
     results = notifier.deliver(payload)
     return {"sent": results, "ok": any(results.values())}
+
+
+# ----------------------------- live stream for the panel -----------------------------
+# The panel used to poll every 5 s and rebuild whole sections of the page, which wiped whatever
+# the operator was typing and made buttons jump. The server now PUSHES what changed — Server-Sent
+# Events over an ordinary authenticated GET, checked about once a second — and the page updates
+# values in place. Deltas only: a quiet fleet sends a keep-alive every 15 s and nothing else.
+STREAM_TICK_S = 1.0
+
+
+def _command_view(c, device_name=None) -> dict:
+    out = c.output or ""
+    return {"id": c.id, "device_id": c.device_id, "device": device_name, "type": c.type,
+            "status": c.status,
+            # never ship a PIN to a browser, not even an admin's
+            "args": {} if c.type in PIN_BEARING_COMMANDS else (c.args or {}),
+            "output": out[-4000:], "output_truncated": len(out) > 4000,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "sent_at": c.sent_at.isoformat() if c.sent_at else None,
+            "completed_at": c.completed_at.isoformat() if c.completed_at else None,
+            "timeout_s": c.timeout_s, "fail_reason": c.fail_reason,
+            "cancellable": c.status == "pending",
+            "retryable": c.status in ("failed", "rejected", "expired", "cancelled")}
+
+
+@app.get("/admin/stream")
+async def admin_stream(request: Request, actor=Depends(auth.require_admin)):
+    """Everything the panel shows, pushed as it changes: bridges (with state and alerts),
+    commands (with their progress and output) and alert episodes (fired / resolved)."""
+    import asyncio
+    from .db import SessionLocal
+    from .models import AlertEvent
+    org = actor.org
+    token = (request.headers.get("authorization") or "").split(" ", 1)[-1].strip()
+
+    def snapshot():
+        db = SessionLocal()
+        try:
+            _sweep_expired(db)
+            devs = db.scalars(select(Device).where(Device.org_id == org)).all()
+            names = {d.id: " ".join(x for x in (fleet_label(d.number), d.name or d.pairing_code or d.id) if x)
+                     for d in devs}
+            dviews = {d.id: _device_view(d) for d in devs}
+            ids = list(dviews)
+            cviews, aviews = {}, {}
+            if ids:
+                for c in db.scalars(select(Command).where(Command.device_id.in_(ids))
+                                    .order_by(desc(Command.id)).limit(80)).all():
+                    cviews[c.id] = _command_view(c, names.get(c.device_id))
+                for e in db.scalars(select(AlertEvent).where(AlertEvent.device_id.in_(ids))
+                                    .order_by(desc(AlertEvent.id)).limit(60)).all():
+                    aviews[e.id] = {"id": e.id, "device_id": e.device_id, "device": names.get(e.device_id),
+                                    "kind": e.kind, "detail": e.detail,
+                                    "opened_at": e.opened_at.isoformat() if e.opened_at else None,
+                                    "resolved_at": e.resolved_at.isoformat() if e.resolved_at else None,
+                                    "notified": e.notified_at is not None}
+            return dviews, cviews, aviews
+        finally:
+            db.close()
+
+    def still_admin():
+        db = SessionLocal()
+        try:
+            try:
+                return auth.require_admin(authorization="Bearer " + token, db=db).org == org
+            except HTTPException:
+                return False
+        finally:
+            db.close()
+
+    def fingerprint(v):
+        return hashlib.sha1(json.dumps(v, sort_keys=True, default=str).encode()).hexdigest()
+
+    async def events():
+        seen = {"device": {}, "command": {}, "alert": {}}
+        last_beat = last_auth = time.monotonic()
+        first = True
+        yield "retry: 3000\n\n"
+        while True:
+            if await request.is_disconnected():
+                return
+            if time.monotonic() - last_auth >= 60:           # a revoked admin stops receiving
+                last_auth = time.monotonic()
+                if not await asyncio.to_thread(still_admin):
+                    yield "event: revoked\ndata: {}\n\n"
+                    return
+            try:
+                dviews, cviews, aviews = await asyncio.to_thread(snapshot)
+            except Exception:
+                await asyncio.sleep(STREAM_TICK_S)
+                continue
+            out = []
+            if first:
+                out.append(("hello", {"server_time": utcnow().isoformat(), "who": actor.email,
+                                      "org": org, "tick_s": STREAM_TICK_S}))
+            for kind, views in (("device", dviews), ("command", cviews), ("alert", aviews)):
+                s = seen[kind]
+                for k, v in views.items():
+                    f = fingerprint(v)
+                    if s.get(k) != f:
+                        s[k] = f
+                        out.append((kind, v))
+                if kind == "device":
+                    for k in [k for k in s if k not in views]:
+                        del s[k]
+                        out.append(("device_removed", {"id": k}))
+            if first:
+                out.append(("ready", {"devices": len(dviews)}))
+                first = False
+            for kind, data in out:
+                yield "event: %s\ndata: %s\n\n" % (kind, json.dumps(data, default=str))
+            now = time.monotonic()
+            if now - last_beat >= 15:
+                last_beat = now
+                yield ": keep-alive\n\n"
+            await asyncio.sleep(STREAM_TICK_S)
+
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache, no-transform",
+                                      "X-Accel-Buffering": "no"})
 
 
 # ----------------------------- admin panel (static) -----------------------------
@@ -1638,7 +1887,7 @@ def create_rollout(body: RolloutCreateIn, actor=Depends(auth.require_admin),
 
 
 @app.get("/admin/rollouts")
-def list_rollouts(actor=Depends(auth.require_viewer), db: Session = Depends(get_db)):
+def list_rollouts(actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
     ros = db.scalars(select(Rollout).where(Rollout.org_id == actor.org)
                      .order_by(desc(Rollout.created_at))).all()
     for ro in ros:
@@ -1654,7 +1903,7 @@ def _scoped_rollout(db: Session, rollout_id: int, actor) -> Rollout:
 
 
 @app.get("/admin/rollouts/{rollout_id}")
-def get_rollout(rollout_id: int, actor=Depends(auth.require_viewer),
+def get_rollout(rollout_id: int, actor=Depends(auth.require_admin),
                 db: Session = Depends(get_db)):
     ro = _scoped_rollout(db, rollout_id, actor)
     _sync_rollout(db, ro)

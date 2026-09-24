@@ -19,6 +19,9 @@ class Device(Base):
     org_id: Mapped[str] = mapped_column(String, default="default")  # reserved for multi-tenant
     pairing_code: Mapped[str] = mapped_column(String, index=True)
     name: Mapped[str | None] = mapped_column(String, nullable=True)       # set when claimed
+    # Fleet number, shown as NB-001: assigned at claim (next free in the org), stable for
+    # the life of the device, changeable only by an admin (PATCH /admin/devices/{id}).
+    number: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     claimed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     hostname: Mapped[str | None] = mapped_column(String, nullable=True)
     version: Mapped[str | None] = mapped_column(String, nullable=True)

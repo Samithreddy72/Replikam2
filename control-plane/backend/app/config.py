@@ -80,6 +80,11 @@ class Settings:
 
     # Alert thresholds.
     temp_alert_c = _env_float("TEMP_ALERT_C", 75)
+    # USB camera: missed isochronous slots per second, counted by the bridge's camera service.
+    # Smooth video measured 1-10/s on 2026-09-24; the freezes came with 14-16/s.
+    usb_miss_alert_per_s = _env_float("USB_MISS_ALERT_PER_S", 15)
+    # Free space on the bridge's /data (overrides, logs, OTA staging, flight recorder).
+    disk_low_mb = _env_int("DISK_LOW_MB", 500)
 
     # ── Alert delivery (notifier.py). All optional; unset = that channel off.
     # With NOTHING set, alerts are still detected and shown in the panel — they

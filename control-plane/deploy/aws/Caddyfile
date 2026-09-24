@@ -2,7 +2,10 @@
 # which is why port 80 must stay open (the ACME challenge uses it) even though everything
 # real happens on 443.
 {$FLEET_DOMAIN} {
-	encode zstd gzip
+	# Compress everything EXCEPT the panel's live stream: a compressor holds bytes back until it
+	# has a block worth compressing, which turns "pushed within a second" into "whenever".
+	@compressible not path /admin/stream
+	encode @compressible zstd gzip
 
 	# The device tokens and admin sessions crossing this proxy are bearer credentials, so
 	# say plainly that this host is HTTPS-only and should never be downgraded.
@@ -14,5 +17,7 @@
 
 	reverse_proxy fleet:8000 {
 		header_up X-Forwarded-Proto {scheme}
+		# pass the live stream through as it is written (no proxy buffering)
+		flush_interval -1
 	}
 }
