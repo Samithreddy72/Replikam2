@@ -41,6 +41,17 @@ for t in tests/test-*.py tests/test-*.sh; do
   fi
 
   line=$(printf '%s' "$out" | grep -oE "[0-9]+ passed, [0-9]+ failed" | tail -1)
+  # unittest files end with their own summary: "Ran N tests ..." then "OK" or "FAILED (failures=F, errors=E)".
+  # That IS a result, so read it rather than calling the file broken.
+  if [ -z "$line" ] && ran=$(printf '%s' "$out" | grep -oE "^Ran [0-9]+ tests?" | tail -1 | grep -oE "[0-9]+"); then
+    if printf '%s' "$out" | grep -qE "^OK( |$)"; then
+      sk=$(printf '%s' "$out" | grep -oE "^OK \(.*skipped=[0-9]+" | grep -oE "skipped=[0-9]+" | grep -oE "[0-9]+" || true)
+      line="$(( ran - ${sk:-0} )) passed, 0 failed"
+    elif fl=$(printf '%s' "$out" | grep -E "^FAILED \("); then
+      nf=$(printf '%s' "$fl" | grep -oE "(failures|errors)=[0-9]+" | grep -oE "[0-9]+" | paste -sd+ - | bc)
+      line="$(( ran - nf )) passed, $nf failed"
+    fi
+  fi
   if [ -z "$line" ]; then
     # No summary at all: the file crashed, exited early, or never reached its own footer.
     # This is the case that hid a broken test for two phases.
