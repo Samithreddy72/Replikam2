@@ -5,7 +5,7 @@ state that was tested against real hardware; each `app-v*` tag is a published pr
 build on the [Releases](https://github.com/Samithreddy72/Replikam2/releases) page.
 
 ## WORKING-CONFIG-2026-09-24 — verified smooth A/V setup, now the default
-*2026-09-24 · branch `opt/pi-2026-09-22` · `6f8a60a` and later*
+*2026-09-24 · branch `Everything-good-(sound+audio)` (was `opt/pi-2026-09-22`) · `6f8a60a` and later*
 
 **Restore point.** Presenter confirmed smooth video, no freezes, no latency issues. Image `2.1.0-52a161b`
 (audited 107/107 + 54/54) + camera-service update `97219e9c` + Mac app 1.4.3. Video: Mac 1280×720@30 →

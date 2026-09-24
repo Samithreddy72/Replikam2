@@ -9,7 +9,7 @@ and 0 lost packets from the Mac to the Pi.
 - the live USB gadget (configfs);
 - the Pi's own files.
 
-Each value was then cross-checked against the code on branch `opt/pi-2026-09-22`. Nothing was changed
+Each value was then cross-checked against the code on branch `Everything-good-(sound+audio)`. Nothing was changed
 to take these readings.
 
 A Word copy is next to this file: `docs/NetBridge-Working-Configuration-2026-09-24.docx`.
@@ -26,7 +26,7 @@ A Word copy is next to this file: `docs/NetBridge-Working-Configuration-2026-09-
 | Mac app | NetBridge **1.4.3**, the default app in `~/Desktop/NetBridge`. Older builds are in its `Older versions` folder |
 | Mesh | Tailscale, on the **direct** path over the local Wi-Fi |
 | Media profile | **WAN** (`NET_VIDEO_LATENCY=300`, `NET_AUDIO_LATENCY=300`), seeded in `/data/config/bridge-net` and bind-mounted onto `/etc/default/bridge-net`. The video feeder caps video at 100 ms |
-| Code | Branch `opt/pi-2026-09-22` (pushed; **not merged into `main`**) |
+| Code | Branch `Everything-good-(sound+audio)` (renamed on 2026-09-24 from `opt/pi-2026-09-22`, the name used in the image audit reports; pushed; **not merged into `main`**) |
 
 ---
 
@@ -126,7 +126,7 @@ Voice probably trails the picture by about 0.2–0.3 s. It has not been reported
 
 ---
 
-## 8. What changed 22–24 Sep and why (branch `opt/pi-2026-09-22`)
+## 8. What changed 22–24 Sep and why (branch `Everything-good-(sound+audio)`)
 
 | Commit | Change | Why |
 |---|---|---|
@@ -175,7 +175,7 @@ WaysToGo reached the same conclusion on 16 Sep. Moving the IRQ to CPU 2 reduced 
 |---|---|---|---|
 | 1 | USB camera misses, 6.6–12/s in bursts | The source of the earlier freezes; they can come back with more motion or worse power | Test variant C (CPU 2 reserved for USB), variant B (IRQ on CPU 0), WaysToGo's kernel patch and an MJPEG prototype, measuring each with the counter |
 | 2 | Power: under-voltage 57–67% of the time | USB misses; resets on camera restarts and at go-live | GPIO wiring (both 5 V pins 2 and 4, grounds 6 and 14, short thick wires) or the supply |
-| 3 | **`main` does not contain this configuration** | A future build from `main` (for example by a collaborator) reverts to 640×360@20, which does not match app 1.4.3 | Merge `opt/pi-2026-09-22` into `main` (the owner's decision) |
+| 3 | **`main` does not contain this configuration** | A future build from `main` (for example by a collaborator) reverts to 640×360@20, which does not match app 1.4.3 | Merge `Everything-good-(sound+audio)` into `main` (the owner's decision) |
 | 4 | The app's self-updater decides by file digest, not by version | It could install an OLDER build if one were published | Add a "never install a lower version" rule in the next app build |
 | 5 | All bridges share USB serial `0123456789` | Windows caches per serial, so two bridges on one laptop conflict | Give each bridge its own serial (C-01) |
 | 6 | The Mac return player logged 3 "timestamp discontinuity, resyncing" warnings in about 11 minutes | Possible brief skips in return audio | Watch; investigate only if heard |
@@ -190,7 +190,7 @@ WaysToGo reached the same conclusion on 16 Sep. Moving the IRQ to CPU 2 reduced 
   3. On the Mac, run `~/Desktop/NetBridge/Launch NetBridge.command` (1.4.3).
   4. Keep the WAN profile.
 - **Build an image from this branch.**
-  1. Run `gh workflow run build-image.yml --ref opt/pi-2026-09-22 -f draft=true`.
+  1. Run `gh workflow run build-image.yml --ref 'Everything-good-(sound+audio)' -f draft=true` (keep the quotes: the name has brackets).
   2. Verify both manifest signatures with the OTA public key.
   3. Run `bash tools/image-audit.sh <image.img>`.
 - **Build the Mac app.** In `app/netbridge-source`, using the Python 3.11 venv that has PyInstaller, run
