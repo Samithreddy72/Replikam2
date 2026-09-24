@@ -201,6 +201,7 @@ For Pi flashing and Studio version releases, follow the [release runbook](releas
 
 | Document | What it covers |
 |---|---|
+| [WORKING-CONFIG-2026-09-24.md](docs/WORKING-CONFIG-2026-09-24.md) | **The verified working configuration** (24 Sep 2026): every video and audio setting, Pi system config, history, rules, open issues |
 | [SETUP-GUIDE.md](docs/SETUP-GUIDE.md) | **Start here.** Blank SD card → working bridge, in ten phases |
 | [FLEET.md](docs/FLEET.md) | The fleet page: every action, what it fixes, what interrupts a stream |
 | [REMOTE-RECOVERY.md](docs/REMOTE-RECOVERY.md) | Fixing a bridge you cannot physically reach |

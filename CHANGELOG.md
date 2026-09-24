@@ -4,6 +4,18 @@ Verified restore points and released builds, newest first. Each `netbridge-*` ta
 state that was tested against real hardware; each `app-v*` tag is a published presenter
 build on the [Releases](https://github.com/Samithreddy72/Replikam2/releases) page.
 
+## WORKING-CONFIG-2026-09-24 — verified smooth A/V setup, now the default
+*2026-09-24 · branch `opt/pi-2026-09-22` · `6f8a60a` and later*
+
+**Restore point.** Presenter confirmed smooth video, no freezes, no latency issues. Image `2.1.0-52a161b`
+(audited 107/107 + 54/54) + camera-service update `97219e9c` + Mac app 1.4.3. Video: Mac 1280×720@30 →
+**424×240 @ 30 fps**, H.264 Baseline 600 kbps, GOP 30 → Pi 100 ms buffer, software decode → USB camera
+YUY2 424×240@30 with **one 1,024-byte isochronous packet per microframe**. Audio unchanged (voice Opus 64k
+→ Pi 300 ms + AGC → UAC2 48 kHz stereo; return Opus 128k → Mac 250 ms). WAN profile seeded; the network
+watcher never switches to LAN; journald no longer ingests kernel messages; USB-miss counter built into
+the camera service; signed deploys flush before restarting.
+Full record, every setting, history and open issues: `docs/WORKING-CONFIG-2026-09-24.md` (+ `.docx`).
+
 ## netbridge-os-2.0.0-3359b3e — image, audited, not yet flashed
 *2026-08-13 · `3359b3e`*
 
