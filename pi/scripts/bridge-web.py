@@ -449,7 +449,7 @@ def _video_frame_bytes():
     m = re.search(r"(\d+)x(\d+)", caps)
     if m:
         return int(m.group(1)) * int(m.group(2)) * 2      # YUY2 = 2 bytes/pixel
-    return 640 * 360 * 2                                   # the configured default
+    return 480 * 270 * 2                                   # the configured default
 
 
 _VIDEO_SEEN = {}

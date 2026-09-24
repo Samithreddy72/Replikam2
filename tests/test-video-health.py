@@ -50,7 +50,8 @@ else:
 bw._VIDEO_SEEN.clear()
 bw._video_bytes = lambda pid: 0
 bw.video_throughput("1", 100.0)
-bw._video_bytes = lambda pid: 460800 * 20 * 2        # two seconds of 20fps
+FRAME = bw._video_frame_bytes()      # bytes per frame as the bridge computes it (480x270 YUY2 fallback off-Pi)
+bw._video_bytes = lambda pid: FRAME * 20 * 2        # two seconds of 20fps
 r = bw.video_throughput("1", 102.0)
 if r is not None and abs(r - 20.0) < 0.5:
     ok("20fps of bytes over 2s reads as %.1f fps" % r)
@@ -61,7 +62,7 @@ print("\n  ---- a degraded stream is called degraded ----")
 bw._VIDEO_SEEN.clear()
 bw._video_bytes = lambda pid: 0
 bw.video_throughput("1", 200.0)
-bw._video_bytes = lambda pid: 460800 * 4            # 4 frames in 2s = 2fps
+bw._video_bytes = lambda pid: FRAME * 4            # 4 frames in 2s = 2fps
 slow = bw.video_throughput("1", 202.0)
 want = bw._expected_fps()
 if slow is not None and slow < want * 0.66:
@@ -80,7 +81,7 @@ if "framerate=(" in src and "def _expected_fps" in src:
     ok("expected fps is parsed from the gadget setup, with a documented fallback")
 else:
     no("expected frame rate is a bare constant")
-if bw._video_frame_bytes() == 640 * 360 * 2:
+if bw._video_frame_bytes() == 480 * 270 * 2:
     ok("frame size derives from the configured format (YUY2, 2 bytes/pixel)")
 else:
     no("frame size is wrong", bw._video_frame_bytes())
@@ -89,7 +90,7 @@ print("\n  ---- a stale sample is not evidence about now ----")
 bw._VIDEO_SEEN.clear()
 bw._video_bytes = lambda pid: 0
 bw.video_throughput("1", 300.0)
-bw._video_bytes = lambda pid: 460800 * 1000
+bw._video_bytes = lambda pid: FRAME * 1000
 if bw.video_throughput("1", 300.0 + 3600) is None:
     ok("an hour-old sample is discarded rather than averaged into a rate")
 else:
@@ -99,7 +100,7 @@ print("\n  ---- negative control ----")
 bw._VIDEO_SEEN.clear()
 bw._video_bytes = lambda pid: 0
 bw.video_throughput("1", 400.0)
-bw._video_bytes = lambda pid: 460800 * 40
+bw._video_bytes = lambda pid: FRAME * 40
 fast = bw.video_throughput("1", 402.0)
 if fast and slow and fast > slow:
     ok("healthy and degraded streams produce different numbers")

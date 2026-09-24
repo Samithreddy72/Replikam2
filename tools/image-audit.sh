@@ -96,6 +96,7 @@ if [ $have_root -eq 1 ]; then
            /usr/local/bin/bridge-status.sh /usr/local/bin/bridge-diagnose.sh \
            /usr/local/bin/bridge-crackle-sentry.sh /usr/local/bin/flight-recorder.sh \
            /usr/local/bin/flight-recorder.py /usr/local/bin/bridge-feeder-net.sh \
+           /usr/local/bin/render-idle-frame.py \
            /etc/systemd/journald.conf.d/no-kmsg.conf \
            /usr/local/bin/wifi-guardian.sh /usr/lib/os-release /etc/default/bridge-agent \
            /etc/netbridge/control-url /etc/bridge/control-url; do
@@ -226,6 +227,23 @@ grepf bridge-web.py 'd\["pcm"\] *= *_return_pcm\(\)' && ok "status exposes the c
 
 sec "Stage 6 — it keeps running"
 has bridge-watchdog.sh && ok "watchdog present" || warn "no watchdog script"
+# 2026-09-24: the camera stream must fit in ONE isochronous packet per microframe. At 640x360 it
+# needed 2048-byte "high-bandwidth" packets, where the Pi 4's USB controller missed slots and the
+# meeting laptop saw choppy video in every app. Every place that sets the frame size must agree.
+UW=$(grep -oE 'create_frame \$FUNCTION [0-9]+ [0-9]+ uncompressed' "$CAT/uvc-raw-setup.sh" 2>/dev/null | awk '{print $3"x"$4}')
+UMP=$(grep -oE 'echo [0-9]+ > functions/\$FUNCTION/streaming_maxpacket' "$CAT/uvc-raw-setup.sh" 2>/dev/null | awk '{print $2}')
+LCAP=$(grep -oE 'YUYV:[0-9]+x[0-9]+@' "$CAT/bridge-gadget-setup.sh" 2>/dev/null | head -1 | sed 's/YUYV://; s/@//')
+FCAP=$(grep -oE 'format=YUY2,width=[0-9]+,height=[0-9]+' "$CAT/bridge-feeder-net.sh" 2>/dev/null | sed -E 's/.*width=([0-9]+),height=([0-9]+)/\1x\2/')
+ICAP=$(grep -oE '^W, H = [0-9]+, [0-9]+' "$CAT/render-idle-frame.py" 2>/dev/null | sed -E 's/W, H = ([0-9]+), ([0-9]+)/\1x\2/')
+[ "$UW" = 480x270 ] && ok "USB camera advertises 480x270 (fits one packet per microframe)" \
+  || no "USB camera advertises ${UW:-?} — expected 480x270"
+[ -n "$UMP" ] && [ "$UMP" -le 1024 ] && ok "streaming_maxpacket $UMP (no high-bandwidth isochronous)" \
+  || no "streaming_maxpacket ${UMP:-?} — high-bandwidth mode is where the USB controller missed slots"
+if [ -n "$UW" ] && [ "$UW" = "$LCAP" ] && [ "$UW" = "$FCAP" ] && [ "$UW" = "$ICAP" ]; then
+  ok "frame size agrees everywhere: descriptor, loopback, feeder, idle frame ($UW)"
+else
+  no "frame size disagrees: descriptor=${UW:-?} loopback=${LCAP:-?} feeder=${FCAP:-?} idle=${ICAP:-?}"
+fi
 # 2026-09-22 CPU sweep: each of these was measured costing CPU on a live bridge.
 has flight-recorder.py && grepf flight-recorder.sh 'exec /usr/bin/python3 /usr/local/bin/flight-recorder.py' \
   && ok "flight recorder is the no-launch Python loop" \

@@ -112,21 +112,23 @@ else:
     else:
         no("scale filter should be derived from STREAM_W/STREAM_H")
 
-    # Bitrate sanity: 640x360@20 must not be starved. The old rule of thumb ("4x the pixels needs
-    # ~4x the 400k", i.e. >= 1280k) was replaced by measurement on 2026-09-24: through the bridge's
-    # own pipeline, H.264 Baseline 640x360 at 800k scored SSIM 0.957/0.972 on two scenes against
-    # 0.926/0.947 for the old 320x180 at 400k - clearly better, not worse - with less Pi CPU.
-    # Nothing below 700k was measured, so that is the floor.
+    # Bitrate sanity: the frame must not be starved. Judged per pixel, from measurement
+    # (2026-09-24, H.264 Baseline through the bridge's own pipeline, two scenes):
+    #   640x360 @800k = 0.174 bit/px, SSIM 0.972/0.957   480x270 @600k = 0.231, SSIM 0.961/0.941
+    #   480x270 @500k = 0.193,        SSIM 0.960/0.938   (old 320x180 @400k = 0.347 but soft: 0.940/0.917)
+    # The lowest point judged acceptable was 640x360 at 700k = 0.152 bit/px, so the floor is 0.15.
+    # (It replaced a "4x the pixels needs 4x the bits" rule of thumb that measurement contradicted.)
     mb = re.search(r'^STREAM_BITRATE\s*=\s*"(\d+)k"', APP, re.M)
     if not mb:
         no("STREAM_BITRATE not declared")
     else:
         kb = int(mb.group(1))
-        if kb >= 700:
-            ok("bitrate %dk is at or above the measured floor for 640x360 (700k)" % kb)
+        bpp = kb * 1000.0 / (ew * eh * 20)
+        if bpp >= 0.15:
+            ok("bitrate %dk = %.3f bit/px at %dx%d@20, at or above the measured floor (0.15)" % (kb, bpp, ew, eh))
         else:
-            no("bitrate %dk is below the measured floor for 640x360 (700k)" % kb,
-               "4x the pixels at the old bitrate looks worse, not better")
+            no("bitrate %dk = %.3f bit/px at %dx%d@20 is below the measured floor (0.15)" % (kb, bpp, ew, eh),
+               "the picture will be starved at this frame size")
 
 print("\n  ---- USB bandwidth must stay inside what the bus can carry ----")
 # Pi 4 OTG is USB 2.0. The gadget streams UNCOMPRESSED YUY2 (2 bytes/pixel).
@@ -143,6 +145,31 @@ if mg and mi:
            "this needs a compressed (MJPEG) UVC format, not a bigger uncompressed frame")
 else:
     no("could not compute the gadget's USB bandwidth from the descriptor")
+
+print("\n  ---- the camera stream must fit in ONE isochronous packet per microframe ----")
+# The lesson of 2026-09-24: bandwidth was never the limit, the packet MODE was. At 640x360 the
+# stream needed streaming_maxpacket 2048 = "high-bandwidth" isochronous (two packets per 125 us
+# microframe); the Pi 4's dwc2 missed slots there ("VS request completed with status -61", 14-16/s)
+# and the meeting laptop saw choppy video in every app while everything upstream was clean.
+mp = re.search(r"echo\s+(\d+)\s*>\s*functions/\$FUNCTION/streaming_maxpacket", UVC)
+if not (mg and mi and mp):
+    no("could not read frame size, rate and streaming_maxpacket from uvc-raw-setup.sh")
+else:
+    maxpacket = int(mp.group(1))
+    need = gw * gh * 2 * fps                      # bytes per second, YUY2
+    ceiling = min(maxpacket, 1024) * 8000         # ONE packet per microframe carries at most 1024 bytes
+    if maxpacket > 1024:
+        no("streaming_maxpacket %d = high-bandwidth isochronous (more than one packet per microframe)" % maxpacket,
+           "the mode where the Pi's USB controller missed slots; keep it at 1024 or less")
+    else:
+        ok("streaming_maxpacket %d: one packet per microframe (no high-bandwidth mode)" % maxpacket)
+    if need <= ceiling * 0.8:
+        ok("%dx%d@%dfps needs %.1f MB/s of a %.1f MB/s single-packet ceiling (%.0f%% - headroom kept)"
+           % (gw, gh, fps, need / 1e6, ceiling / 1e6, 100.0 * need / ceiling))
+    else:
+        no("%dx%d@%dfps needs %.1f MB/s of a %.1f MB/s single-packet ceiling (%.0f%%)"
+           % (gw, gh, fps, need / 1e6, ceiling / 1e6, 100.0 * need / ceiling),
+           "too close to (or over) what one packet per microframe carries")
 
 print("\n  %d passed, %d failed" % (P, F))
 sys.exit(1 if F else 0)

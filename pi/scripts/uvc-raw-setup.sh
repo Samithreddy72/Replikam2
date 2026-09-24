@@ -94,7 +94,7 @@ create_uvc() {
 	echo "	Creating UVC gadget functionality : $FUNCTION"
 	mkdir functions/$FUNCTION
 
-	create_frame $FUNCTION 640 360 uncompressed u
+	create_frame $FUNCTION 480 270 uncompressed u
 
 	mkdir functions/$FUNCTION/streaming/header/h
 	cd functions/$FUNCTION/streaming/header/h
@@ -132,8 +132,13 @@ create_uvc() {
 		popd
 	fi
 
-	# Set the packet size: uvc gadget max size is 3k...
-	echo 2048 > functions/$FUNCTION/streaming_maxpacket
+	# ONE 1024-byte packet per 125 us microframe (8.2 MB/s ceiling). 480x270 YUY2 @20 fps needs
+	# 5.2 MB/s, so it fits with ~35% headroom. 640x360 needed 9.2 MB/s, which forced 2048 =
+	# "high-bandwidth" isochronous (two packets per microframe) - the mode where the Pi 4's dwc2
+	# controller missed slots ("uvc: VS request completed with status -61", 14-16/s live) and the
+	# meeting laptop saw choppy video in every app while everything upstream was clean
+	# (2026-09-24: 0 packet loss Mac->Pi, CPU half idle, 21 fps handed to the gadget).
+	echo 1024 > functions/$FUNCTION/streaming_maxpacket
 
 	ln -s functions/$FUNCTION configs/c.1
 }

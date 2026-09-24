@@ -282,31 +282,31 @@ AV_FMT = "dshow" if IS_WIN else "avfoundation"
 
 # WHAT THE MEETING ROOM ACTUALLY SEES.
 #
-# The USB gadget advertises ONE frame size -- 640x360 uncompressed at 20 fps (see
-# pi/scripts/uvc-raw-setup.sh, create_frame ... 640 360 uncompressed). Until 26 Aug 2026 this
-# encoder produced 320x180 at 400 kbps, so the laptop was upscaling 2x from a quarter of the
-# pixels the USB path was already carrying, for free. Nobody had compared the two numbers.
+# The USB gadget advertises ONE frame size -- 480x270 uncompressed at 20 fps since 2026-09-24
+# (see pi/scripts/uvc-raw-setup.sh, create_frame ... 480 270 uncompressed; it was 640x360 from
+# 17 Jul, and before that 320x180). Until 26 Aug 2026 this encoder produced 320x180 into the
+# 640x360 gadget, so the bridge upscaled it - the two numbers had never been compared.
 #
-# Encode at the gadget's own size: no scaling on the host, no wasted USB bandwidth, and the
-# picture stops being the weakest part of the product.
+# Encode at the gadget's own size: no scaling on the host or the bridge, and the picture stops
+# being the weakest part of the product.
 #
-# The ceiling above this is NOT the network, it is USB. The Pi 4's OTG port is USB 2.0
-# (the bridge reports "high-speed"), and 640x360 YUY2 @20fps is already ~74 Mbps of the
-# ~480 Mbps theoretical bus. Uncompressed 720p would be ~295 Mbps and is not viable; reaching
-# 720p needs an MJPEG UVC format, which is tracked separately.
-STREAM_W, STREAM_H = 640, 360
+# The ceiling is NOT the network, it is USB - and not its bandwidth but its packet mode. The Pi 4's
+# OTG port is USB 2.0 high-speed; an isochronous endpoint gets one slot per 125 us microframe.
+# 640x360 YUY2 @20fps (9.2 MB/s) did not fit in one 1024-byte packet per slot and needed
+# "high-bandwidth" mode (two packets per slot), where the Pi's dwc2 controller missed slots and
+# the meeting laptop saw choppy video in every app (2026-09-24: everything upstream measured
+# clean). 480x270 (5.2 MB/s) fits in ONE packet per slot with ~35% headroom. Must equal the UVC
+# frame in pi/scripts/uvc-raw-setup.sh (tests/test-artifact-identity.py checks it).
+STREAM_W, STREAM_H = 480, 270
 
-# 400 kbps was sized for 320x180. Four times the pixels needs roughly four times the bits to
-# hold the same quality; 1500 kbps at 640x360/20fps is comfortable for h264 and is still a
-# rounding error next to the 74 Mbps the USB leg carries. Deliberately a fixed value: this
-# encoder has no congestion feedback, so a "smart" bitrate here would be a guess wearing a
-# suit. Adaptive rate control is a real feature and belongs behind real RTCP feedback.
-# 800 kbps (2026-09-24). Measured through the bridge's own pipeline, H.264 Baseline at 640x360/20fps:
-# 1500k -> 0.30 s Pi CPU per 30 s, SSIM 0.967/0.974, 33 KB keyframes; 800k -> 0.22 s, SSIM 0.957/0.972,
-# 20 KB keyframes. The bridge runs throttled (under-voltage), so less decode work and smaller
-# once-a-second keyframe bursts over Wi-Fi matter more than the last 1% of sharpness. (320x180 was
-# worse on both counts: the bridge must upscale it to its 640x360 USB camera format.)
-STREAM_BITRATE = "800k"
+# Deliberately a fixed value: this encoder has no congestion feedback, so a "smart" bitrate here
+# would be a guess wearing a suit. Adaptive rate control belongs behind real RTCP feedback.
+# Measured 2026-09-24 through the bridge's own pipeline (H.264 Baseline, 20fps, no scaling):
+#   640x360 @800k -> 0.21-0.22 s Pi CPU per 30 s, SSIM 0.972 / 0.957 (webcam-like / busy scene)
+#   480x270 @600k -> 0.16 s,                      SSIM 0.961 / 0.941
+#   480x270 @500k -> 0.14-0.15 s,                 SSIM 0.960 / 0.938
+#   320x180 @400k -> 0.11 s,                      SSIM 0.940 / 0.917 (visibly soft)
+STREAM_BITRATE = "600k"
 
 
 def _is_exe(path):
