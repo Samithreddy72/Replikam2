@@ -112,16 +112,20 @@ else:
     else:
         no("scale filter should be derived from STREAM_W/STREAM_H")
 
-    # Bitrate sanity: 640x360@20 needs materially more than the 400k that sized 320x180.
+    # Bitrate sanity: 640x360@20 must not be starved. The old rule of thumb ("4x the pixels needs
+    # ~4x the 400k", i.e. >= 1280k) was replaced by measurement on 2026-09-24: through the bridge's
+    # own pipeline, H.264 Baseline 640x360 at 800k scored SSIM 0.957/0.972 on two scenes against
+    # 0.926/0.947 for the old 320x180 at 400k - clearly better, not worse - with less Pi CPU.
+    # Nothing below 700k was measured, so that is the floor.
     mb = re.search(r'^STREAM_BITRATE\s*=\s*"(\d+)k"', APP, re.M)
     if not mb:
         no("STREAM_BITRATE not declared")
     else:
         kb = int(mb.group(1))
-        if kb >= 4 * 400 * 0.8:
-            ok("bitrate %dk is scaled for the larger frame (was 400k at a quarter the pixels)" % kb)
+        if kb >= 700:
+            ok("bitrate %dk is at or above the measured floor for 640x360 (700k)" % kb)
         else:
-            no("bitrate %dk is still sized for 320x180" % kb,
+            no("bitrate %dk is below the measured floor for 640x360 (700k)" % kb,
                "4x the pixels at the old bitrate looks worse, not better")
 
 print("\n  ---- USB bandwidth must stay inside what the bus can carry ----")
