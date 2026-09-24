@@ -284,7 +284,11 @@ if [ -s "${TMPDIR:-/tmp}/nb-seed/bridge-agent" ]; then
 else
   printf '# managed on /data (read-only root)\n' > "$MNT/p4/config/bridge-agent"
 fi
-printf '# managed on /data (read-only root)\n' > "$MNT/p4/config/bridge-net"
+# Seed the WAN profile - the owner's standing choice - so a freshly flashed card starts exactly
+# like the validated bridge (voice 300 ms; video capped at 100 ms by bridge-feeder-net.sh) instead
+# of the unset defaults, and jitter-sentry never needs a first "switch to wan", which restarts the
+# whole media stack (followed by a reboot 4/4 times on an under-powered bridge, 2026-09-22).
+printf '# NetBridge media tuning (bridge profile wan)\nNET_VIDEO_LATENCY=300\nNET_AUDIO_LATENCY=300\n' > "$MNT/p4/config/bridge-net"
 # Seed the VERSION into the /data bind source, which is the only copy that exists at runtime.
 #
 # fstab binds /data/etc-bridge over /etc/bridge, and this build creates that directory EMPTY.

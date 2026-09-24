@@ -255,6 +255,20 @@ if [ "${UFPS:-x}" = 30 ] && [ "$UFPS" = "$LFPS" ] && [ "$UFPS" = "$FFPS" ]; then
 else
   no "frame rate: descriptor=${UFPS:-?} loopback=${LFPS:-?} feeder=${FFPS:-?} — expected 30 in all three"
 fi
+# 2026-09-24: no automatic media restarts on a fresh card. The WAN profile (owner's standing choice)
+# is seeded on /data, and jitter-sentry never switches back to lan - every switch restarts the
+# whole media stack, which on an under-powered bridge was followed by a reboot 4/4 times.
+if [ -n "$DATADEV" ]; then
+  NETSEED=$("$DEBUGFS" -R "cat /config/bridge-net" "$DATADEV" 2>/dev/null)
+  echo "$NETSEED" | grep -qx 'NET_AUDIO_LATENCY=300' && echo "$NETSEED" | grep -qx 'NET_VIDEO_LATENCY=300' \
+    && ok "WAN profile seeded on /data (voice 300 ms as validated; video capped to 100 ms by the feeder)" \
+    || no "/data/config/bridge-net is not the WAN profile — a fresh card starts on unset defaults"
+else
+  no "no /data partition to check the seeded media profile on"
+fi
+grep -vE '^[[:space:]]*#' "$CAT/jitter-sentry.sh" 2>/dev/null | grep -q 'switch_profile lan' \
+  && no "jitter-sentry can still switch the bridge to lan (owner's rule: never)" \
+  || ok "jitter-sentry never switches to lan (and so never restarts media for it)"
 # 2026-09-22 CPU sweep: each of these was measured costing CPU on a live bridge.
 has flight-recorder.py && grepf flight-recorder.sh 'exec /usr/bin/python3 /usr/local/bin/flight-recorder.py' \
   && ok "flight recorder is the no-launch Python loop" \

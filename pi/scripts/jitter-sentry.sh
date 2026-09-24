@@ -3,7 +3,10 @@
 # auto-switches jitter profiles (lan 100/120ms <-> wan 200/200ms) with hysteresis.
 # bad sample = loss>2% OR jitter(mdev)>25ms OR rtt>80ms
 # 3 consecutive bad -> wan (rough network: bigger buffers beat brief gap)
-# 30 consecutive good on wan -> back to lan (low latency)
+# It NEVER switches back to lan (owner's standing rule, 2026-09-22: "we never switch pi back to
+# the LAN"). Latency is cut elsewhere - the video feeder caps its own buffer at 100 ms whatever
+# the profile says. Every switch also restarts the whole media stack, and on an under-powered
+# bridge that restart was followed by a reboot 4 times out of 4 (2026-09-22).
 LOG(){ logger -t jitter-sentry "$*"; }
 PEER_FILE=/etc/default/bridge-return-audio
 
@@ -126,8 +129,7 @@ while true; do
 
   if [ $bad -ge 3 ] && [ "${cur:-200}" -lt 300 ]; then
     switch_profile wan "network degraded (loss=$loss% jitter=${mdev}ms rtt=${avg}ms)" && bad=0
-  elif [ $good -ge 30 ] && [ "${cur:-200}" -ge 300 ]; then
-    switch_profile lan "network pristine for 10min" && good=0
   fi
+  # (No automatic switch back to lan - see the header. A pristine network is left as it is.)
   sleep 20
 done
