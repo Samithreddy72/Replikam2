@@ -186,6 +186,35 @@ try:
     st = {h["id"]: h["status"] for h in c.get("/admin/devices/%s/commands" % ids[0], headers=A).json()}
     check(st.get(rid) == "done", "the result comes back to the fleet")
 
+    # ---- set-pin endpoint, alert fixes, rollouts ----------------------------------------------------
+    r = c.post("/admin/devices/%s/pin" % ids[1], headers=A, json={"pin": "123456789"})
+    check(r.status_code == 400, "a 9-digit PIN is refused by the fleet (the bridge takes 4-8)", r.text)
+    r = c.post("/admin/devices/%s/pin" % ids[1], headers=A, json={})
+    check(r.status_code == 200 and len(r.json().get("pin", "")) == 6, "…a generated PIN is 6 digits, shown once", r.text)
+    tel(ids[2], pin={"pin_set": True, "lockout": True, "lockout_remaining": 1800, "required": True},
+        quarantined=["bridge-web.py"])
+    fixes = {a["kind"]: (a.get("fix") or {}).get("command")
+             for a in {d["id"]: d for d in c.get("/admin/devices", headers=A).json()}[ids[2]]["alerts"]}
+    check(fixes.get("pin_lockout") == "clear-lockout" and fixes.get("update_rolled_back") == "unquarantine",
+          "PIN-lockout and rolled-back-update alerts carry their fix buttons", fixes)
+    r = c.post("/admin/rollouts", headers=A, json={"version": "2.1.1-abc1234", "source": BASE + "/payloads/ota/2.1.1-abc1234",
+                                                   "stage_pct": 100})
+    check(r.status_code == 200, "a rollout can be started", r.text)
+    ro_id = r.json().get("id")
+    from app.models import Command as _Cmd, RolloutTarget as _RT
+    db.expire_all()
+    ups = db.query(_Cmd).filter(_Cmd.type == "update").all()
+    check(ups and all(u.timeout_s == 3600 for u in ups),
+          "rollout OS updates get the 1-hour timeout, not 120 s (they used to expire mid-download)",
+          [u.timeout_s for u in ups])
+    if ups:
+        u = ups[0]; u.status = "expired"; db.commit()
+        c.get("/admin/rollouts/%s" % ro_id, headers=A)
+        db.expire_all()
+        t = db.query(_RT).filter(_RT.command_id == u.id).first()
+        check(t is not None and t.status == "failed", "an update that never reported back counts as failed (halts widening)",
+              t.status if t else None)
+
     # ---- live stream -----------------------------------------------------------------------------
     r = httpx.get(BASE + "/admin/stream", headers=P, timeout=5)
     check(r.status_code == 401, "presenter cannot open the live stream")

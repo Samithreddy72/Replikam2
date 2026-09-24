@@ -30,6 +30,12 @@ _FIXES = {
     # already fixed - the alert's job is the AUDIT TRAIL (it kept happening silently for
     # a whole evening once). The fix restarts media services for the stubborn case.
     "return_mismatch": {"command": "restart", "args": {}, "label": "Re-sync return audio now"},
+    # PIN gate and updates (2026-09-25): each alert an admin can act on carries its button. The
+    # panel routes these through the same action path as the menu, so set-pin opens its dialog
+    # and unquarantine asks for confirmation exactly as it does there.
+    "pin_lockout":        {"command": "clear-lockout", "args": {}, "label": "Clear the lockout"},
+    "pin_not_set":        {"command": "set-pin", "args": {}, "label": "Set a PIN…"},
+    "update_rolled_back": {"command": "unquarantine", "args": {}, "label": "Put the parked update back…"},
 }
 
 

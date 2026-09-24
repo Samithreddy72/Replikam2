@@ -796,12 +796,15 @@ def set_device_pin(device_id: str, body: dict | None = None,
     dev = _scoped_device(db, device_id, actor)
     pin = str((body or {}).get("pin") or "").strip()
     if pin:
-        if not (pin.isdigit() and 4 <= len(pin) <= 12):
-            raise HTTPException(400, "pin must be 4-12 digits")
+        # 4-8, the same rule as the bridge (bridge-pin) and the agent: a 9-12 digit PIN used to
+        # be accepted here, queued, and then refused on the bridge.
+        if not (pin.isdigit() and 4 <= len(pin) <= 8):
+            raise HTTPException(400, "pin must be 4-8 digits")
     else:
         import secrets as _s
         pin = "".join(_s.choice("0123456789") for _ in range(6))
-    c = Command(device_id=device_id, type="set-pin", args={"pin": pin})
+    c = Command(device_id=device_id, type="set-pin", args={"pin": pin},
+                timeout_s=_timeout_for("set-pin"))
     db.add(c)
     db.commit()
     # never audit the value itself - only that a rotation happened, and by whom
@@ -1793,9 +1796,14 @@ def _sync_rollout(db: Session, ro: Rollout) -> None:
             continue
         if c.status == "done":
             t.status, t.updated_at, changed = "succeeded", utcnow(), True
-        elif c.status in ("failed", "rejected"):
-            # The device already rolled itself back into the previous slot.
+        elif c.status in ("failed", "rejected", "expired"):
+            # The device already rolled itself back into the previous slot - or it never
+            # reported back at all (expired), which must halt widening just the same rather
+            # than leave the target "updating" forever.
             t.status, t.updated_at, changed = "failed", utcnow(), True
+        elif c.status == "cancelled":
+            # An admin recalled it before the bridge collected it: send it again next wave.
+            t.status, t.command_id, t.updated_at, changed = "queued", None, utcnow(), True
     if changed:
         db.commit()
 
@@ -1825,7 +1833,11 @@ def _dispatch_rollout(db: Session, ro: Rollout) -> int:
         dev = db.get(Device, t.device_id)
         if not dev or not is_online(dev):
             continue                      # "queued until online"
-        c = Command(device_id=dev.id, type="update", args={"source": ro.source})
+        # timeout_s: an OS update may take an hour over a venue uplink. Without it the command
+        # took the column default (120 s), was marked EXPIRED mid-download, the bridge's later
+        # "done" was refused, and the rollout sat "updating" forever and could never widen.
+        c = Command(device_id=dev.id, type="update", args={"source": ro.source},
+                    timeout_s=_timeout_for("update"))
         db.add(c)
         db.flush()
         t.command_id, t.status, t.wave, t.updated_at = c.id, "dispatched", ro.stage_pct, utcnow()

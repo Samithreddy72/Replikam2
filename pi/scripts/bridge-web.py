@@ -899,6 +899,10 @@ def _gather_uncached():
     # (bridge-overrides.sh). Whole-OS updates: the last OTA state (bridge-update.sh / bridge-ab).
     d["overrides"] = _json_file("/run/bridge-overrides/status.json")
     d["ota"] = _json_file("/data/ota-staging/status.json")
+    # The two numbers the fleet's usb_misses and disk_low alerts read. Both alerts existed while
+    # nothing reported either field, so neither could ever fire (found 2026-09-25).
+    d["usb_misses_per_s"] = _usb_misses_per_s()
+    d["data_free_mb"] = _data_free_mb()
     suspect, detail = clock_verdict()
     d["clock_suspect"] = suspect          # bool (backward compat for the control plane)
     d["clock"] = detail                   # M4: full FFT verdict {verdict,score,reasons,...}
@@ -980,6 +984,32 @@ def _quarantined():
                           if ".sig." not in n and n.rsplit(".", 1)[-1].isdigit()))
     except Exception:
         return []
+
+
+USB_VIDEO_STATS = "/run/netbridge-usb-video.txt"
+
+
+def _usb_misses_per_s():
+    """Missed USB video transfers per second over the camera service's last 10 s window
+    (bridge-uvcd's kernel-log counter writes one line every 10 s). None when the counter is
+    not running or its newest line is stale - "unknown" must never read as "zero misses"."""
+    try:
+        if time.time() - os.stat(USB_VIDEO_STATS).st_mtime > 35:
+            return None
+        with open(USB_VIDEO_STATS) as f:
+            last = f.read().splitlines()[-1]
+        vals = dict(kv.split("=", 1) for kv in last.split()[1:] if "=" in kv)
+        return round(sum(int(vals.get(k, 0)) for k in ("enodata", "exdev", "other")) / 10.0, 1)
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _data_free_mb():
+    try:
+        st = os.statvfs("/data")
+        return int(st.f_bavail * st.f_frsize // (1024 * 1024))
+    except OSError:
+        return None
 
 
 def _json_file(path):
