@@ -64,7 +64,7 @@ RTP_VIDEO, RTP_VOICE = 5000, 5002
 # Build stamp. build.py rewrites this line, and it is what the updater compares against
 # the signed manifest — so a build that forgets to bump it simply never updates, rather
 # than update-looping.
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 
 
 # --------------------------------------------------------------------------- state
@@ -301,7 +301,12 @@ STREAM_W, STREAM_H = 640, 360
 # rounding error next to the 74 Mbps the USB leg carries. Deliberately a fixed value: this
 # encoder has no congestion feedback, so a "smart" bitrate here would be a guess wearing a
 # suit. Adaptive rate control is a real feature and belongs behind real RTCP feedback.
-STREAM_BITRATE = "1500k"
+# 800 kbps (2026-09-24). Measured through the bridge's own pipeline, H.264 Baseline at 640x360/20fps:
+# 1500k -> 0.30 s Pi CPU per 30 s, SSIM 0.967/0.974, 33 KB keyframes; 800k -> 0.22 s, SSIM 0.957/0.972,
+# 20 KB keyframes. The bridge runs throttled (under-voltage), so less decode work and smaller
+# once-a-second keyframe bursts over Wi-Fi matter more than the last 1% of sharpness. (320x180 was
+# worse on both counts: the bridge must upscale it to its 640x360 USB camera format.)
+STREAM_BITRATE = "800k"
 
 
 def _is_exe(path):

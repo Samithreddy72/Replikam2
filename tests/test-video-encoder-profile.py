@@ -52,7 +52,8 @@ else:
     (ok if "-profile:v" in video and video[video.index("-profile:v") + 1] == "baseline" else no)(
         "video leg asks VideoToolbox for -profile:v baseline")
     (ok if "-realtime" in video and video[video.index("-realtime") + 1] == "1" else no)("realtime encode kept")
-    for flag, want in (("-b:v", sa.STREAM_BITRATE), ("-r", "20"), ("-g", "20")):
+    (ok if sa.STREAM_BITRATE == "800k" else no)("bitrate is 800k (%s)" % sa.STREAM_BITRATE)
+    for flag, want in (("-b:v", "800k"), ("-r", "20"), ("-g", "20")):
         (ok if flag in video and video[video.index(flag) + 1] == want else no)("%s %s unchanged" % (flag, want))
     (ok if "scale=640:360,format=nv12" in " ".join(video) else no)("640x360 unchanged")
 
