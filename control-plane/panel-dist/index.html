@@ -1,170 +1,411 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NetBridge — Fleet</title>
+<title>NetBridge Fleet</title>
 <style>
   :root{
-    --paper:#F4F6F5; --card:#FFFFFF; --ink:#1A2422; --muted:#5F6E68; --faint:#8A968F;
-    --line:#DCE3DF; --chip:#EAF0ED; --tally:#C6392C; --tally-soft:#F7E9E7;
-    --ok:#177A4C; --ok-soft:#E4F1E9; --warn:#9A6B15; --warn-soft:#F6EEDC;
+    --bg:#F3F5F4; --surface:#FFFFFF; --surface-2:#F8FAF9; --ink:#17201E; --muted:#56645F; --faint:#85928C;
+    --line:#DCE3DF; --line-2:#EAEFEC;
+    --tally:#C6392C; --tally-soft:#F8E7E4;
+    --ok:#157347; --ok-soft:#E2F2E8; --warn:#8F5E0F; --warn-soft:#F7EDD8;
+    --bad:#B42318; --bad-soft:#FBE8E5; --info:#1F5FAD; --info-soft:#E5EDF9; --idle:#66726D; --idle-soft:#ECF0EE;
+    --shadow:0 1px 2px rgba(20,30,28,.05),0 10px 30px rgba(20,30,28,.07);
     --sans:"Avenir Next","Segoe UI",system-ui,-apple-system,sans-serif;
     --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    color-scheme:light;
   }
+  @media (prefers-color-scheme:dark){:root{
+    --bg:#0D1311; --surface:#141C19; --surface-2:#18221F; --ink:#E6EDE9; --muted:#A3B0AA; --faint:#77867F;
+    --line:#26312D; --line-2:#1E2825;
+    --tally:#F07563; --tally-soft:#3A1E1A;
+    --ok:#5DC98D; --ok-soft:#13291D; --warn:#E2B04E; --warn-soft:#2E2412;
+    --bad:#F2897B; --bad-soft:#3A1B17; --info:#86B6F2; --info-soft:#16263B; --idle:#9CA9A3; --idle-soft:#1D2724;
+    --shadow:0 1px 2px rgba(0,0,0,.45),0 12px 32px rgba(0,0,0,.4); color-scheme:dark;
+  }}
   *{box-sizing:border-box}
-  body{background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:15px;margin:0;line-height:1.5}
-  .wrap{max-width:1080px;margin:0 auto;padding:0 22px}
-  header{padding:26px 0 18px;display:flex;align-items:center;gap:10px}
+  html,body{margin:0}
+  body{background:var(--bg);color:var(--ink);font:14.5px/1.5 var(--sans);-webkit-font-smoothing:antialiased}
+  [hidden]{display:none !important}
+  button{font:inherit;color:inherit}
+  a{color:inherit}
+  .mono{font-family:var(--mono)}
+  .wrap{max-width:1240px;margin:0 auto;padding:0 20px}
+
+  /* ---- top bar ---- */
+  header.top{position:sticky;top:0;z-index:30;background:color-mix(in srgb,var(--bg) 88%,transparent);
+    backdrop-filter:saturate(1.4) blur(10px);-webkit-backdrop-filter:saturate(1.4) blur(10px);border-bottom:1px solid var(--line)}
+  header.top .wrap{display:flex;align-items:center;gap:18px;height:58px}
+  .brand{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12.5px;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--muted);white-space:nowrap}
   .tallydot{width:10px;height:10px;border-radius:50%;background:var(--tally);box-shadow:0 0 0 3px var(--tally-soft)}
-  @media (prefers-reduced-motion:no-preference){.tallydot{animation:tally 2.4s ease-in-out infinite}@keyframes tally{0%,100%{opacity:1}50%{opacity:.35}}}
-  .brand{font-family:var(--mono);font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
-  header .right{margin-left:auto;display:flex;align-items:center;gap:12px;font-size:12px;color:var(--faint)}
-  header .right button{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:4px 12px;font-size:12px;color:var(--muted);cursor:pointer}
-  h1{font-size:26px;letter-spacing:-.015em;margin:2px 0 4px;font-weight:700}
-  .sub{color:var(--muted);font-size:14px;margin:0 0 22px}
-  .sub .mono{font-family:var(--mono);font-size:12px;color:var(--faint)}
+  nav.tabs{display:flex;gap:2px;overflow-x:auto;scrollbar-width:none}
+  nav.tabs a{display:flex;align-items:center;gap:6px;padding:7px 12px;border-radius:8px;text-decoration:none;
+    color:var(--muted);font-weight:600;font-size:13.5px;white-space:nowrap}
+  nav.tabs a:hover{background:var(--surface);color:var(--ink)}
+  nav.tabs a[aria-current="page"]{background:var(--surface);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+  .badge{min-width:18px;height:18px;padding:0 6px;border-radius:9px;background:var(--bad);color:#fff;font-size:11px;
+    font-weight:700;display:inline-flex;align-items:center;justify-content:center}
+  .topright{margin-left:auto;display:flex;align-items:center;gap:14px;white-space:nowrap}
+  .conn{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted)}
+  .cdot{width:8px;height:8px;border-radius:50%;background:var(--faint)}
+  .conn.live .cdot{background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft)}
+  .conn.reconnecting .cdot{background:var(--warn)}
+  .conn.offline .cdot{background:var(--bad)}
+  @media (prefers-reduced-motion:no-preference){.conn.live .cdot{animation:pulse 2.4s ease-in-out infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}}
+  .who{font-size:12.5px;color:var(--muted)}
+  @media (max-width:900px){.who{display:none}}
 
-  .panelgrid{display:grid;grid-template-columns:1.7fr 1fr;gap:14px;padding-bottom:60px}
-  @media (max-width:860px){.panelgrid{grid-template-columns:1fr}}
-  .pcard{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 6px 18px rgba(26,36,34,.05)}
-  .pcard .ph3{font-size:12.5px;font-weight:700;padding:11px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:8px}
-  .pcard .ph3 .mono{font-family:var(--mono);font-size:10.5px;color:var(--faint);font-weight:400}
+  main{padding:22px 0 80px}
+  h1{font-size:25px;letter-spacing:-.015em;margin:0 0 3px;font-weight:700}
+  .lede{color:var(--muted);margin:0 0 18px;font-size:13.5px}
+  h2.sec{font-size:15px;margin:26px 0 10px;letter-spacing:-.005em}
+  .banner{margin:14px 0 0;padding:10px 14px;border-radius:10px;background:var(--warn-soft);color:var(--warn);font-size:13px}
 
-  table.fleet{width:100%;border-collapse:collapse;font-size:12.5px}
-  table.fleet th{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);text-align:left;padding:8px 14px;border-bottom:1px solid var(--line);font-weight:600}
-  table.fleet td{padding:9px 14px;border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:middle}
-  table.fleet tr:last-child td{border-bottom:0}
-  table.fleet .dev{font-weight:600}
-  table.fleet .dim{color:var(--faint);font-family:var(--mono);font-size:11px}
-  .pill{display:inline-block;font-size:11px;font-weight:700;border-radius:999px;padding:2px 10px;letter-spacing:.02em}
-  .pill.ok{background:var(--ok-soft);color:var(--ok)}
+  /* ---- buttons, inputs, pills ---- */
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border-radius:9px;padding:8px 14px;
+    font-weight:650;font-size:13.5px;cursor:pointer;border:1px solid transparent;line-height:1.2;white-space:nowrap}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn.primary{background:var(--ink);color:var(--bg)}
+  .btn.danger{background:var(--tally);color:#fff}
+  .btn.secondary{background:var(--surface);border-color:var(--line)}
+  .btn.ghost{background:transparent;border-color:var(--line);color:var(--muted)}
+  .btn.ghost:hover,.btn.secondary:hover{border-color:var(--faint);color:var(--ink)}
+  .btn.sm{padding:5px 10px;font-size:12.5px;border-radius:8px}
+  .linkbtn{background:none;border:0;padding:0;color:var(--tally);font-weight:650;cursor:pointer;font-size:12.5px}
+  input[type=text],input[type=email],input[type=password],input[type=number],input[type=search],select,textarea{
+    width:100%;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--ink);
+    padding:9px 11px;font:inherit;font-size:14px}
+  input:focus,select:focus,textarea:focus,.btn:focus-visible,tr:focus-visible{outline:2px solid var(--info);outline-offset:1px}
+  label.fl{display:block;font-size:12px;font-weight:650;color:var(--muted);margin:12px 0 5px}
+  label.check,label.radio{display:flex;align-items:center;gap:8px;margin:8px 0;font-size:13.5px;cursor:pointer}
+  .pill{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:700;border-radius:999px;
+    padding:2px 9px;white-space:nowrap;line-height:1.55}
   .pill.live{background:var(--tally-soft);color:var(--tally)}
+  .pill.ok{background:var(--ok-soft);color:var(--ok)}
   .pill.warn{background:var(--warn-soft);color:var(--warn)}
-  .pill.idle{background:var(--chip);color:var(--muted)}
-  .claimbtn{font-size:11px;font-weight:700;color:var(--tally);border:1px solid var(--tally);border-radius:7px;padding:2px 10px;background:var(--card);cursor:pointer}
-  select.act{border:1px solid var(--line);border-radius:7px;background:var(--card);font-size:11.5px;color:var(--muted);padding:3px 6px;cursor:pointer}
+  .pill.bad{background:var(--bad-soft);color:var(--bad)}
+  .pill.info{background:var(--info-soft);color:var(--info)}
+  .pill.idle{background:var(--idle-soft);color:var(--idle)}
+  .pill .d{width:7px;height:7px;border-radius:50%;background:currentColor}
+  .muted{color:var(--muted)} .faint{color:var(--faint)} .small{font-size:12.5px}
+  .hint{font-size:12.5px;color:var(--muted);margin:10px 0 0}
+  .warnline{padding:9px 12px;border-radius:9px;background:var(--warn-soft);color:var(--warn);font-size:13px;margin:0 0 10px}
+  .dangerline{padding:9px 12px;border-radius:9px;background:var(--tally-soft);color:var(--tally);font-size:13px;font-weight:600;margin:0 0 10px}
 
-  .side{display:flex;flex-direction:column;gap:14px;min-width:0}
-  .alert{padding:12px 14px;font-size:12.5px;display:flex;flex-direction:column;gap:4px}
-  .alert .atitle{font-weight:700;display:flex;align-items:center;gap:8px;font-size:12.5px}
-  .alert .adot{width:8px;height:8px;border-radius:50%;background:var(--warn);flex:0 0 auto}
-  .alert .adot.ok{background:var(--ok)}
-  .alert .abody{color:var(--muted);line-height:1.5;white-space:normal}
-  .alert .aact{font-size:11.5px;font-weight:700;color:var(--tally);cursor:pointer;background:none;border:0;text-align:left;padding:0}
-  .rollout{padding:12px 14px;font-size:12.5px;color:var(--faint)}
-  .rollout .rname{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--muted)}
-  .rollout .rmeta{color:var(--muted);font-size:12px}
-  .rollout .rfoot{font-size:11.5px;color:var(--faint)}
-  .rollout .progress{height:8px;border-radius:99px;background:var(--chip);overflow:hidden}
-  .rollout .progress i{display:block;height:100%;background:var(--ok);border-radius:99px;transition:width .4s}
-  .rollout .rbtn{font-size:11.5px;font-weight:700;color:var(--tally);cursor:pointer;background:none;border:0;padding:0;text-align:left}
+  /* ---- fleet page ---- */
+  .toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 12px}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--surface);
+    border-radius:999px;padding:5px 12px;font-size:12.5px;font-weight:600;color:var(--muted);cursor:pointer}
+  .chip b{color:var(--ink);font-weight:750}
+  .chip.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+  .chip.on b{color:var(--bg)}
+  .sd{width:8px;height:8px;border-radius:50%}
+  .sd.live{background:var(--tally)} .sd.active{background:var(--ok)} .sd.degraded{background:var(--warn)}
+  .sd.offline{background:var(--faint)} .sd.new{background:var(--info)}
+  .toolbar input[type=search]{max-width:320px;margin-left:auto;padding:7px 11px;font-size:13px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
+  .tablecard{overflow-x:auto}
+  table.grid{width:100%;border-collapse:collapse;font-size:13px}
+  table.grid th{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);
+    text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);font-weight:600;white-space:nowrap}
+  table.grid td{padding:11px 14px;border-bottom:1px solid var(--line-2);vertical-align:middle}
+  table.grid tbody tr:last-child td{border-bottom:0}
+  table.fleet tbody tr{cursor:pointer}
+  table.fleet tbody tr:hover td{background:var(--surface-2)}
+  table.fleet tbody tr.sel td{background:var(--surface-2)}
+  .bnum{font-family:var(--mono);font-size:11.5px;font-weight:700;color:var(--muted);letter-spacing:.04em}
+  .bname{font-weight:700;font-size:14px;white-space:nowrap}
+  .bsub{font-size:11px;color:var(--faint);white-space:nowrap}
+  .cell{display:flex;flex-direction:column;gap:3px}
+  .cell .l2{font-size:11.5px;color:var(--faint);white-space:nowrap}
+  .pills{display:flex;gap:5px;flex-wrap:wrap}
+  .chev{color:var(--faint);font-size:18px}
+  .empty{padding:44px 20px;text-align:center;color:var(--muted)}
+  .skeleton{padding:44px 20px;text-align:center;color:var(--faint)}
 
-  #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--ink);color:#fff;
-    font-size:12.5px;border-radius:9px;padding:9px 18px;opacity:0;transition:opacity .25s;pointer-events:none;max-width:80vw}
-  #toast.show{opacity:1}
+  /* ---- drawer ---- */
+  .scrim{position:fixed;inset:0;background:rgba(10,16,14,.35);z-index:40}
+  .drawer{position:fixed;top:0;right:0;bottom:0;width:min(640px,100vw);background:var(--bg);z-index:41;
+    box-shadow:-18px 0 50px rgba(0,0,0,.18);display:flex;flex-direction:column;border-left:1px solid var(--line)}
+  .dhd{padding:16px 20px 0;background:var(--surface);border-bottom:1px solid var(--line)}
+  .dhd .row1{display:flex;align-items:flex-start;gap:12px}
+  .dhd .title{flex:1;min-width:0}
+  .dhd .title .bnum{font-size:12px}
+  .dhd .title h2{margin:1px 0 2px;font-size:19px;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .xbtn{background:none;border:0;font-size:24px;line-height:1;color:var(--muted);cursor:pointer;padding:2px 6px;border-radius:8px}
+  .xbtn:hover{background:var(--surface-2);color:var(--ink)}
+  .dtabs{display:flex;gap:2px;margin-top:12px;overflow-x:auto;scrollbar-width:none}
+  .dtabs button{background:none;border:0;border-bottom:2px solid transparent;padding:9px 12px;font-weight:650;
+    color:var(--muted);cursor:pointer;font-size:13.5px;white-space:nowrap}
+  .dtabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--tally)}
+  .dbd{flex:1;overflow-y:auto;padding:18px 20px 40px}
+  .panel h3{font-size:12px;font-family:var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--faint);
+    margin:22px 0 8px;font-weight:600}
+  .panel h3:first-child{margin-top:0}
+  dl.kv{display:grid;grid-template-columns:150px 1fr;gap:7px 14px;margin:0;font-size:13.5px}
+  dl.kv dt{color:var(--muted)}
+  dl.kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
+  dl.kv dd.bad{color:var(--bad);font-weight:650}
+  .box{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .box + .box{margin-top:10px}
+  .actgroup{margin:0 0 16px}
+  .actgroup .gh{font-size:12.5px;font-weight:700;margin:0 0 7px}
+  .actlist{display:flex;flex-direction:column;gap:6px}
+  .act{display:flex;align-items:center;justify-content:space-between;gap:10px;text-align:left;width:100%;
+    background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:9px 12px;cursor:pointer;font-size:13.5px}
+  .act:hover{border-color:var(--faint)}
+  .act .go{color:var(--faint);font-size:16px}
+  .act.warnact{border-left:3px solid var(--tally)}
+  .alertrow{display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--line-2)}
+  .alertrow:last-child{border-bottom:0}
+  .alertrow .adot{width:9px;height:9px;border-radius:50%;background:var(--warn);margin-top:6px;flex:0 0 auto}
+  .alertrow .adot.bad{background:var(--bad)}
+  .alertrow .abody{flex:1;min-width:0}
+  .alertrow .at{font-weight:700;font-size:13.5px}
+  .alertrow .ad{color:var(--muted);font-size:13px}
+  pre.out{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font:12px/1.5 var(--mono);
+    white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;margin:8px 0 0}
+  .bars{display:flex;gap:4px;align-items:flex-end;height:36px;margin-top:8px}
+  .bars i{flex:1;border-radius:3px;display:block}
+  table.hist td{font-size:12.5px}
+  table.hist tr.exp td{background:var(--surface-2)}
+  .inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .inline > input,.inline > select{width:auto;flex:1;min-width:120px}
 
-  /* key gate */
-  #gate{max-width:420px;margin:80px auto;background:var(--card);border:1px solid var(--line);border-radius:14px;
-    padding:26px;box-shadow:0 12px 32px rgba(26,36,34,.10)}
-  #gate h2{margin:0 0 4px;font-size:18px}
-  #gate p{color:var(--muted);font-size:13px;margin:0 0 14px}
-  #gate input{width:100%;border:1px solid var(--line);border-radius:9px;padding:10px 12px;font-family:var(--mono);font-size:13px}
-  #gate button{width:100%;margin-top:10px;background:var(--tally);color:#fff;border:0;border-radius:9px;padding:11px 0;font-weight:700;font-size:13.5px;cursor:pointer}
-  #gate .err{color:var(--tally);font-size:12px;margin-top:8px;min-height:16px}
-  .hidden{display:none}
+  /* ---- dialogs ---- */
+  .modal{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;padding:16px;
+    background:rgba(10,16,14,.45)}
+  .dialog{background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:0 30px 80px rgba(0,0,0,.3);
+    width:100%;max-width:480px;max-height:calc(100vh - 32px);display:flex;flex-direction:column}
+  .dialog.wide{max-width:640px}
+  .dialog .dh{display:flex;align-items:center;gap:10px;padding:16px 18px 8px}
+  .dialog .dh h2{flex:1;margin:0;font-size:17px;letter-spacing:-.01em}
+  .dialog .db{padding:4px 18px 8px;overflow-y:auto;font-size:14px}
+  .dialog .db p{margin:0 0 10px}
+  .dialog .db ul{margin:0 0 10px;padding-left:20px}
+  .dialog .derr{padding:0 18px;color:var(--bad);font-size:13px;min-height:4px}
+  .dialog .df{display:flex;justify-content:flex-end;gap:8px;padding:12px 18px 16px;flex-wrap:wrap}
+  .pinbig{font:700 34px/1.2 var(--mono);letter-spacing:.3em;text-align:center;padding:14px;background:var(--surface-2);
+    border:1px dashed var(--line);border-radius:12px;margin:6px 0 12px}
+  .picklist{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:4px 10px}
+
+  /* ---- toasts ---- */
+  .toasts{position:fixed;right:16px;bottom:16px;z-index:70;display:flex;flex-direction:column;gap:8px;max-width:min(440px,calc(100vw - 32px))}
+  .toast{display:flex;align-items:flex-start;gap:10px;background:var(--ink);color:var(--bg);border-radius:12px;
+    padding:10px 12px 10px 14px;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+  .toast.ok{border-left:4px solid var(--ok)} .toast.bad{border-left:4px solid var(--tally)}
+  .toast.warn{border-left:4px solid var(--warn)} .toast.info{border-left:4px solid var(--info)}
+  .toast .tmsg{flex:1;overflow-wrap:anywhere}
+  .toast .tact{background:none;border:1px solid color-mix(in srgb,var(--bg) 40%,transparent);color:var(--bg);border-radius:7px;
+    padding:2px 9px;cursor:pointer;font-weight:700;font-size:12px;white-space:nowrap}
+  .toast .tx{background:none;border:0;color:var(--bg);opacity:.6;cursor:pointer;font-size:16px;line-height:1}
+
+  /* ---- sign-in ---- */
+  .gate{max-width:420px;margin:70px auto;padding:26px}
+  .gate h2{margin:0 0 4px;font-size:19px}
+  .gate p{color:var(--muted);font-size:13.5px;margin:0 0 14px}
+  .gate .or{text-align:center;color:var(--faint);font-size:11.5px;margin:12px 0 8px}
+  .gate .btn{width:100%;margin-top:8px}
+  .gate .err{font-size:12.5px;margin-top:10px;min-height:18px;color:var(--tally)}
+  .gate .err.good{color:var(--ok)}
+
+  @media (max-width:700px){
+    header.top .wrap{gap:10px} .brand span.t{display:none}
+    dl.kv{grid-template-columns:1fr} dl.kv dt{margin-top:6px}
+    .toolbar input[type=search]{max-width:none;margin-left:0}
+  }
 </style>
 </head>
 <body>
+
+<header class="top" id="topbar" hidden>
+  <div class="wrap">
+    <div class="brand"><span class="tallydot"></span><span class="t">NetBridge · Fleet</span></div>
+    <nav class="tabs" id="nav">
+      <a href="#/fleet" data-page="fleet">Bridges</a>
+      <a href="#/alerts" data-page="alerts">Alerts <span class="badge" id="navAlerts" hidden></span></a>
+      <a href="#/updates" data-page="updates">Updates</a>
+      <a href="#/team" data-page="team">Team</a>
+      <a href="#/audit" data-page="audit">Audit</a>
+    </nav>
+    <div class="topright">
+      <div class="conn" id="conn" title="Live connection to the fleet"><span class="cdot"></span><span id="connText">Connecting…</span></div>
+      <span class="who" id="whoami"></span>
+      <button class="btn ghost sm" id="signoutBtn" type="button">Sign out</button>
+    </div>
+  </div>
+</header>
+
 <div class="wrap">
-  <header>
-    <span class="tallydot"></span><span class="brand">NetBridge · Fleet</span>
-    <div class="right">
-      <span id="whoami" style="color:var(--muted)"></span>
-      <span id="tick"></span>
-      <button onclick="changeKey()">sign out</button>
-    </div>
-  </header>
+  <div id="banner" class="banner" hidden></div>
 
-  <div id="gate" class="hidden">
-    <h2>Sign in</h2>
-    <p>Paste your <b>invite</b> (first time) — it becomes your personal token. Already have one? Use the second box. Credentials stay in this browser.</p>
-    <input id="emailin" type="email" placeholder="you@work.com — email me a sign-in link" onkeydown="if(event.key==='Enter')magicLink()" style="margin-bottom:8px">
-    <button onclick="magicLink()">Email me a sign-in link</button>
-    <div style="text-align:center;color:var(--faint);font-size:11px;margin:10px 0 6px">— or —</div>
-    <input id="invitein" type="password" placeholder="invite from your admin" onkeydown="if(event.key==='Enter')redeem()" style="margin-bottom:8px">
-    <button onclick="redeem()" style="background:var(--ink)">Redeem invite &amp; sign in</button>
-    <div style="text-align:center;color:var(--faint);font-size:11px;margin:10px 0 6px">— or —</div>
-    <input id="keyin" type="password" placeholder="paste your sign-in code (or a personal token)" onkeydown="if(event.key==='Enter')saveKey()">
-    <button onclick="saveKey()" style="background:var(--ink)">Sign in with a token</button>
-    <div class="err" id="gateerr"></div>
-  </div>
+  <!-- sign in -->
+  <section id="gate" class="gate card" hidden>
+    <h2>Sign in to the fleet</h2>
+    <p>Admins only. Use the email link, a one-time invite from another admin, or a sign-in code.</p>
+    <input id="emailin" type="email" placeholder="you@work.com" autocomplete="email">
+    <button class="btn danger" id="magicBtn" type="button">Email me a sign-in link</button>
+    <div class="or">— or —</div>
+    <input id="invitein" type="password" placeholder="invite from your admin" autocomplete="off">
+    <button class="btn primary" id="redeemBtn" type="button">Redeem invite &amp; sign in</button>
+    <div class="or">— or —</div>
+    <input id="keyin" type="password" placeholder="sign-in code or personal token" autocomplete="off">
+    <button class="btn primary" id="keyBtn" type="button">Sign in with a code or token</button>
+    <div class="err" id="gateerr" role="alert"></div>
+  </section>
 
-  <div id="panel" class="hidden">
-    <h1>Every bridge on one screen.</h1>
-    <p class="sub">Live fleet state · <span class="mono">polled every 5&nbsp;s · redrawn only when something changes · alerts carry their known fix</span></p>
-    <div class="panelgrid">
-      <div class="pcard">
-        <div class="ph3">Fleet <span class="mono" id="fleetmeta">—</span></div>
-        <div style="overflow-x:auto">
-          <table class="fleet">
-            <thead><tr><th>Bridge</th><th>Status</th><th>PIN</th><th>Config</th><th>Version</th><th>Session</th><th></th></tr></thead>
-            <tbody id="rows"><tr><td colspan="5" class="dim">loading…</td></tr></tbody>
-          </table>
+  <!-- signed in, but not an admin -->
+  <section id="noadmin" class="gate card" hidden>
+    <h2>This console is for admins</h2>
+    <p id="noadminWho"></p>
+    <p>Presenters go live from the NetBridge app on their computer — it asks for the bridge PIN each time. Ask an admin if you need fleet access.</p>
+    <button class="btn secondary" id="noadminOut" type="button">Sign out</button>
+  </section>
+
+  <main id="app" hidden>
+    <!-- BRIDGES -->
+    <section id="page-fleet" class="page">
+      <h1>Every bridge on one screen.</h1>
+      <p class="lede">Live — changes arrive the moment they happen, and nothing on this page redraws under you. Click a bridge to see everything about it and act on it.</p>
+      <div class="toolbar">
+        <div class="chips" id="chips">
+          <button class="chip on" data-f="all" type="button">All <b id="n-all">0</b></button>
+          <button class="chip" data-f="live" type="button"><i class="sd live"></i>Live <b id="n-live">0</b></button>
+          <button class="chip" data-f="active" type="button"><i class="sd active"></i>Active <b id="n-active">0</b></button>
+          <button class="chip" data-f="degraded" type="button"><i class="sd degraded"></i>Needs attention <b id="n-degraded">0</b></button>
+          <button class="chip" data-f="offline" type="button"><i class="sd offline"></i>Offline <b id="n-offline">0</b></button>
+          <button class="chip" data-f="new" type="button"><i class="sd new"></i>New <b id="n-new">0</b></button>
         </div>
+        <input id="search" type="search" placeholder="Find a bridge — number, name, code or IP" autocomplete="off">
       </div>
-      <div class="side" id="side"></div>
-    </div>
-  </div>
+      <div class="card tablecard">
+        <table class="grid fleet">
+          <thead><tr><th>Bridge</th><th>State</th><th>Session</th><th>PIN</th><th>Health</th><th>Software</th><th>Last seen</th><th></th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div id="fleetSkeleton" class="skeleton">Connecting to the fleet…</div>
+        <div id="fleetEmpty" class="empty" hidden>No bridges yet. A new bridge appears here the moment it finishes Wi-Fi setup — then claim it.</div>
+        <div id="fleetNoMatch" class="empty" hidden>No bridge matches this filter.</div>
+      </div>
+    </section>
+
+    <!-- ALERTS -->
+    <section id="page-alerts" class="page" hidden>
+      <h1>Alerts</h1>
+      <p class="lede">What needs you right now, with its fix — and what happened while nobody was looking. Alerts are also emailed.</p>
+      <div class="card" style="padding:4px 16px" id="openAlerts"></div>
+      <div class="inline" style="margin:22px 0 10px;justify-content:space-between">
+        <h2 class="sec" style="margin:0">Recent episodes</h2>
+        <button class="btn ghost sm" id="testAlertBtn" type="button">Send a test alert</button>
+      </div>
+      <div class="card tablecard">
+        <table class="grid"><thead><tr><th>Bridge</th><th>Alert</th><th>Detail</th><th>Started</th><th>Resolved</th><th>Emailed</th></tr></thead>
+          <tbody id="alertHist"></tbody></table>
+        <div id="alertHistEmpty" class="empty" hidden>No alert episodes recorded yet.</div>
+      </div>
+    </section>
+
+    <!-- UPDATES -->
+    <section id="page-updates" class="page" hidden>
+      <h1>Updates</h1>
+      <p class="lede">Install a signed file or a whole new OS on one bridge, several, or the whole fleet in stages. Every update is verified on the bridge and rolls itself back if it misbehaves.</p>
+      <div class="inline" style="justify-content:space-between;margin:0 0 10px">
+        <h2 class="sec" style="margin:0">Signed files ready to install</h2>
+        <button class="btn ghost sm" id="refreshCatalog" type="button">Refresh</button>
+      </div>
+      <div class="card tablecard">
+        <table class="grid"><thead><tr><th>File</th><th>Size</th><th>Fingerprint</th><th>Signed</th><th>Published</th><th></th></tr></thead>
+          <tbody id="catalogRows"></tbody></table>
+        <div id="catalogEmpty" class="empty" hidden>Nothing published yet. On the Mac: <span class="mono">bash tools/publish-script.sh &lt;file&gt;</span></div>
+      </div>
+      <h2 class="sec">OS versions</h2>
+      <div class="card tablecard">
+        <table class="grid"><thead><tr><th>Version</th><th>Image</th><th>Size</th><th>Signed</th><th>Built</th><th></th></tr></thead>
+          <tbody id="otaRows"></tbody></table>
+        <div id="otaEmpty" class="empty" hidden>No OS versions published yet. On the Mac: <span class="mono">bash tools/publish-ota.sh &lt;image&gt;</span></div>
+      </div>
+      <div class="inline" style="justify-content:space-between;margin:26px 0 10px">
+        <h2 class="sec" style="margin:0">Staged rollouts</h2>
+        <button class="btn secondary sm" id="startRolloutBtn" type="button">Start a rollout…</button>
+      </div>
+      <div class="card" style="padding:4px 16px" id="rollouts"></div>
+    </section>
+
+    <!-- TEAM -->
+    <section id="page-team" class="page" hidden>
+      <h1>Team</h1>
+      <p class="lede">Admins control the fleet. Presenters only go live from the app — they never see this console.</p>
+      <div class="card tablecard">
+        <table class="grid"><thead><tr><th>Person</th><th>Role</th><th>Status</th><th>Last seen</th><th></th></tr></thead>
+          <tbody id="userRows"></tbody></table>
+      </div>
+      <h2 class="sec">Invite someone</h2>
+      <div class="card" style="padding:16px">
+        <div class="inline">
+          <input id="nuEmail" type="email" placeholder="their email" autocomplete="off">
+          <select id="nuRole" style="max-width:170px"><option value="presenter">presenter</option><option value="admin">admin</option></select>
+          <button class="btn primary" id="inviteBtn" type="button">Send invite</button>
+        </div>
+        <p class="hint" id="inviteOut"></p>
+      </div>
+    </section>
+
+    <!-- AUDIT -->
+    <section id="page-audit" class="page" hidden>
+      <div class="inline" style="justify-content:space-between">
+        <div><h1>Audit</h1><p class="lede">Who did what, and when. Secrets (PINs, keys) are never recorded — only that a change happened.</p></div>
+        <button class="btn ghost sm" id="refreshAudit" type="button">Refresh</button>
+      </div>
+      <div class="card tablecard">
+        <table class="grid"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Target</th></tr></thead>
+          <tbody id="auditRows"></tbody></table>
+      </div>
+    </section>
+  </main>
 </div>
-<div id="toast"></div>
+
+<div id="scrim" class="scrim" hidden></div>
+<aside id="drawer" class="drawer" hidden aria-label="Bridge details"></aside>
+<div id="modal" class="modal" hidden></div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
 
 <script>
+"use strict";
+// ======================================================================================
+// NetBridge Fleet console (2026-09-25 rewrite).
+//
+// WHY IT WAS REWRITTEN. The old page polled every 5 s and rebuilt whole sections - the side
+// column (alerts, diagnostics, uptime, team, audit, rollouts) was re-created on every tick,
+// which wiped whatever the admin was typing, slammed menus shut and made buttons jump. The
+// fleet now PUSHES what changed (GET /admin/stream, server-sent events over an authenticated
+// fetch) and this page updates values IN PLACE: table rows, the open bridge's fields and the
+// command history are keyed and patched; inputs, menus and dialogs are never rebuilt by an
+// update. Admins only - the server refuses every /admin read to anyone else.
+// ======================================================================================
 const $ = id => document.getElementById(id);
-let KEY = localStorage.getItem("nb_admin_key") || "";
-// Commands that interrupt media or reboot the device — always confirmed,
-// and double-confirmed if someone is live on that bridge (meeting-aware).
-// Anything here asks for confirmation, and warns hard if someone is streaming.
-// "profile" belongs in this set: `bridge profile <lan|wan>` rewrites /etc/default/bridge-net
-// and RESTARTS uvcd + feeder-net + feeder-audio. It was missing, and on 10 Aug the device
-// side did exactly that to a live meeting on its own — the two most dangerous entries in
-// this menu were the two that were unguarded.
-// Mirrors CONFIRM_REQUIRED in the backend. tests/test-fleet-contract.py fails if a command
-// the backend guards is not confirmed here, so the two cannot drift apart.
+let KEY = "", WHO = "", ROLE = "";
+try { KEY = localStorage.getItem("nb_admin_key") || ""; WHO = localStorage.getItem("nb_who") || ""; ROLE = localStorage.getItem("nb_role") || ""; } catch (e) {}
+function store(k, v){ try { if (v) localStorage.setItem(k, v); else localStorage.removeItem(k); } catch (e) {} }
+
+// Commands the BACKEND refuses without confirm:true (CONFIRM_REQUIRED in main.py).
+// tests/test-fleet-ui-contract.py fails if the two sets ever differ.
 const BACKEND_CONFIRM = new Set(["reboot","update","deploy-script","revert-script",
-                                 "unquarantine","golden-restore","reset-clock"]);
+                                 "unquarantine","golden-restore","reset-clock","lock"]);
+// Anything here interrupts media or ends a session: it always asks first, and says so plainly
+// when a presenter is live on that bridge. Every member carries ⚠ in its label and nothing else
+// does (tests/test-command-gates.py).
 const DISRUPTIVE = new Set(["restart","reset-clock","reboot","lock","stop","profile","update",
   "unquarantine","jitter-fix:3","deploy-script","revert-script","golden-restore"]);
-// Every entry here maps to a failure this fleet has ACTUALLY produced. Two candidates were
-// deliberately left out rather than padding the list:
-//   * "Install OS update" — the OTA path has never been proven end to end, and a failed
-//     image swap at a remote site is the highest-consequence action available. It stays out
-//     until an OTA has actually been done successfully once.
-//   * "Deploy a signed script" — the device accepts it, but it needs a URL the BRIDGE can
-//     reach, and no payload host exists yet (the one attempt hung: the bridge could not
-//     fetch from a laptop). A button that reliably fails is worse than no button.
-// Reverting IS offered, because it needs no URL and is how you undo a bad deploy.
+// Organised by what the admin can SEE, not by what the code does: an admin arrives with a
+// symptom, never a diagnosis. The single most important distinction: the audio YOU hear from
+// the room is buffered on YOUR machine; the audio THE ROOM hears is buffered on THE BRIDGE -
+// opposite fixes, so separate groups. (profile:lan is gone: bridges stay on WAN, and the
+// server refuses it anyway.)
 const ACTIONS = [
-  ["", "Actions…"],
-
-  // ORGANISED BY WHAT THE ADMIN CAN SEE, NOT BY WHAT THE CODE DOES.
-  //
-  // An admin arrives with a SYMPTOM ("it sounds choppy"), never with a diagnosis, so the
-  // headings are symptoms. Every entry that interrupts anything says so in its own label
-  // (⚠) and confirms before running — a cost discovered after clicking is paid twice.
-  //
-  // The single most important distinction here:
-  //
-  //   the audio YOU hear from the room is buffered on YOUR machine
-  //   the audio THE ROOM hears from you is buffered on THE BRIDGE
-  //
-  // Those need opposite actions, so they are separate groups and must stay separate.
-  //
-  // SHOWN BY DEFAULT: only the entries in COMMON below. The full list ran to 22 items over
-  // nine headings, which is a wall of text at the exact moment someone is under pressure —
-  // and most of it was redundant, because "Diagnose it for me" already names the cause and
-  // offers the matching button. What remains in the short menu is what you would reach for
-  // DELIBERATELY; everything else is one click away under "Show all actions".
   ["#Start here", null],
   ["jitter-diagnose", "Diagnose it for me — names the cause (changes nothing)"],
 
@@ -176,7 +417,6 @@ const ACTIONS = [
 
   ["#The ROOM cannot hear YOU properly", null],
   ["profile:wan",     "Choppy for them → deepen the bridge buffer ⚠ ~5 s video freeze"],
-  ["profile:lan",     "Their network is good → shallower, less delay ⚠ ~5 s video freeze"],
 
   ["#Robotic, crackling, or devices missing in the meeting", null],
   ["reset-clock",     "Reset the audio clock ⚠ their camera+mic+speakers re-enumerate"],
@@ -185,896 +425,1302 @@ const ACTIONS = [
   ["restart",         "Restart media ⚠ ~5 s video freeze"],
   ["reboot",          "Bridge wedged → reboot ⚠ ~30 s outage"],
 
-  ["#Audio experiments — take effect on the NEXT REBOOT", null],
-  ["gadget-tune-show",  "What audio settings are set?"],
-  ["gadget-tune:async", "Try ASYNC sync mode (then reboot)"],
-  ["gadget-tune:adaptive", "Back to ADAPTIVE sync mode (then reboot)"],
-  ["gadget-tune-clear", "Clear experiments — built-in defaults (then reboot)"],
+  ["#PIN — who may go live", null],
+  ["set-pin",         "Set / rotate the PIN…"],
+  ["clear-lockout",   "Presenter locked out → clear the lockout"],
+  ["lock",            "Lock it now ⚠ ends the live session"],
+
+  ["#Updates — code and OS on the bridge", null],
+  ["running",         "What code is this bridge running?"],
+  ["deploy-script",   "Install a signed file… ⚠ restarts that service"],
+  ["revert-script",   "Undo an installed file → built-in copy… ⚠ restarts that service"],
+  ["unquarantine",    "Rolled-back update → put it back… ⚠ restarts that service"],
+  ["update",          "Install an OS version… ⚠ reboots into it"],
 
   ["#Baseline — what 'working' looked like", null],
   ["golden-save",     "Sounds good right now → save as known-good…"],
   ["golden-restore",  "Config drifted → restore known-good ⚠ may briefly freeze video"],
 
   ["#Look at it — changes nothing", null],
-  ["running",         "What code is this bridge running?"],
-  ["logs",            "Recent logs"],
+  ["logs",            "Recent logs…"],
   ["diagnose",        "Full diagnostics bundle (~40 s)"],
   ["read-file",       "Read a file on the bridge…"],
 
-  ["#Code on the bridge", null],
-  ["unquarantine",    "Deployed code not running → restore override ⚠ restarts that service"],
-  ["revert-script",   "Undo a bad script → revert to factory… ⚠ restarts that service"],
-  ["deploy-script",   "Push a code fix → deploy signed script… ⚠ restarts that service"],
-
-  ["#Access — no effect on media", null],
-  ["set-pin",         "Set / rotate PIN…"],
-  ["unlock",          "Presenter locked out → clear lockout…"],
-  ["lock",            "Lock (require PIN) ⚠ next go-live needs the PIN"],
+  ["#Audio experiments — take effect on the NEXT REBOOT", null],
+  ["gadget-tune-show",  "What audio settings are set?"],
+  ["gadget-tune:async", "Try ASYNC sync mode (then reboot)"],
+  ["gadget-tune:adaptive", "Back to ADAPTIVE sync mode (then reboot)"],
+  ["gadget-tune-clear", "Clear experiments — built-in defaults (then reboot)"],
 
   ["#Last resort", null],
   ["jitter-fix:3",    "Nothing above worked → max buffer + WAN ⚠ ~5 s video freeze"],
 ];
-
-// The short menu. Chosen so the first thing you read covers the common case and the rest is
-// reachable, not so the list looks tidy: diagnose (which answers "which one do I click?"),
-// one action per audio direction, the two that fix "nothing is arriving", and the baseline
-// pair. Nine lines instead of twenty-two.
+// The short list shown first: what you would reach for DELIBERATELY. Everything else is one
+// click away ("Show all actions"). Diagnose answers "which one do I click?".
 const COMMON = new Set(["jitter-diagnose", "jitter-fix:1", "jitter-reset",
-                        "profile:wan", "reset-clock", "restart",
+                        "profile:wan", "reset-clock", "restart", "reboot",
+                        "set-pin", "clear-lockout", "running",
                         "golden-save", "golden-restore"]);
-let SHOW_ALL = false;
+const ACTION_LABEL = Object.fromEntries(ACTIONS.filter(([v]) => v && !v.startsWith("#")));
+const TERMINAL = new Set(["done", "succeeded", "failed", "rejected", "cancelled", "expired"]);
+const STATE_LABEL = {live: "Live", active: "Active", degraded: "Needs attention", offline: "Offline", new: "New"};
+const STATE_PILL = {live: "live", active: "ok", degraded: "warn", offline: "idle", new: "info"};
+const ALERT_LABEL = {offline: "Offline", throttled: "Power — under-voltage", service_down: "A service is down",
+  temp_high: "Running hot", clock_suspect: "Audio clock", return_mismatch: "Return audio at the wrong rate",
+  pin_lockout: "PIN lockout", pin_not_set: "No PIN set", pin_gate_unavailable: "PIN media gate off",
+  usb_misses: "USB camera missing frames", disk_low: "Low disk space", update_rolled_back: "Update rolled back",
+  safe_mode: "Safe mode", os_update_failed: "OS update failed", mesh_relayed: "Relayed connection",
+  restart_storm: "Restart storm"};
 
-function fillActions(sel){
-  // Build the <select>. In short mode only COMMON entries are listed, and a heading is
-  // emitted only if something under it survived the filter — an empty optgroup renders as a
-  // stray grey label with nothing beneath it, which reads like a bug.
-  sel.replaceChildren();
-  let grp = null, pendingHeading = null;
-  for (const [v, l] of ACTIONS){
-    if (v === ""){                                   // the placeholder
-      const o = document.createElement("option"); o.value = ""; o.textContent = l;
-      sel.appendChild(o); continue;
-    }
-    if (v.startsWith("#")){ pendingHeading = v.slice(1); grp = null; continue; }
-    if (!SHOW_ALL && !COMMON.has(v)) continue;
-    if (pendingHeading !== null){
-      grp = document.createElement("optgroup"); grp.label = pendingHeading;
-      sel.appendChild(grp); pendingHeading = null;
-    }
-    const o = document.createElement("option"); o.value = v; o.textContent = l;
-    (grp || sel).appendChild(o);
+// ---------------------------------------------------------------------------------- helpers
+function h(tag, attrs, ...kids){
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})){
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : String(v));
   }
-  const t = document.createElement("optgroup"); t.label = "\u00A0";
-  const o = document.createElement("option");
-  o.value = SHOW_ALL ? "__less" : "__more";
-  const hidden = ACTIONS.filter(([v]) => v && !v.startsWith("#") && !COMMON.has(v)).length;
-  o.textContent = SHOW_ALL ? "Show fewer" : `Show all actions (${hidden} more)…`;
-  t.appendChild(o); sel.appendChild(t);
-}
-
-function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("show");
-  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"), 3500); }
-
-async function api(path, opts={}){
-  const r = await fetch(path, {...opts, headers:{
-    "Authorization":"Bearer "+KEY, "Content-Type":"application/json", ...(opts.headers||{})}});
-  if (r.status === 401 || r.status === 403) { gate("that key was rejected"); throw new Error("auth"); }
-  if (!r.ok) throw new Error("HTTP "+r.status);
-  return r.json();
-}
-
-let WHO = localStorage.getItem("nb_who") || "";
-let ROLE = localStorage.getItem("nb_role") || "";
-const isAdmin = () => ROLE !== "presenter";
-
-function gate(err){ $("panel").classList.add("hidden"); $("gate").classList.remove("hidden");
-  $("gateerr").textContent = err || ""; $("invitein").focus(); }
-async function saveKey(){ const v = $("keyin").value.trim(); if(!v) return;
-  const prev = KEY; KEY = v; WHO=""; ROLE="";
-  // Validate BEFORE persisting: a key that never worked must not be left behind, or it
-  // silently poisons every later sign-in attempt (including emailed links).
-  try { await api("/auth/whoami"); localStorage.setItem("nb_admin_key", KEY);
-        $("gate").classList.add("hidden"); refresh(true); return; }
-  catch(e){ KEY = prev; localStorage.removeItem("nb_admin_key"); }
-  // Not a token — but the email sends a CODE, and this is the box people paste it into.
-  // Rejecting it outright sends you round a loop of fresh codes that can never work here.
-  // Try it as a sign-in code before giving up: one box, either credential.
-  if (await redeemCode(v)) return;
-  gate("that code or key was rejected — request a fresh sign-in code"); }
-async function redeem(){
-  const invite = $("invitein").value.trim();
-  if (!invite) return;
-  try {
-    const r = await fetch("/auth/redeem", {method:"POST",
-      headers:{"Content-Type":"application/json"}, body:JSON.stringify({invite})});
-    if (!r.ok) throw new Error((await r.json()).detail || "HTTP "+r.status);
-    const d = await r.json();
-    KEY = d.token; WHO = d.email; ROLE = d.role;
-    localStorage.setItem("nb_admin_key", KEY);
-    localStorage.setItem("nb_who", WHO); localStorage.setItem("nb_role", ROLE);
-    $("gate").classList.add("hidden"); refresh(true);
-    toast(`welcome, ${d.email} (${d.role})`);
-  } catch(e){ $("gateerr").textContent = "invite: " + e.message; }
-}
-function changeKey(){ ["nb_admin_key","nb_who","nb_role"].forEach(k=>localStorage.removeItem(k));
-  KEY=""; WHO=""; ROLE=""; gate(); }
-async function magicLink(){
-  const email = $("emailin").value.trim();
-  if (!email) return;
-  try {
-    const r = await fetch("/auth/magic-link", {method:"POST",
-      headers:{"Content-Type":"application/json"}, body:JSON.stringify({email, base_url: location.origin})});
-    // always 200 (no enumeration) — show the same reassuring message either way
-    $("gateerr").style.color = "var(--ok)";
-    $("gateerr").textContent = "Check your email for a sign-in link (expires in 15 min).";
-  } catch(e){ $("gateerr").style.color = ""; $("gateerr").textContent = "couldn't send: " + e.message; }
-}
-async function redeemCode(code){
-  // Called when the emailed link lands here as /signin?code=... — trade it for a token.
-  try {
-    const r = await fetch("/auth/magic-redeem", {method:"POST",
-      headers:{"Content-Type":"application/json"}, body:JSON.stringify({code})});
-    if (!r.ok) throw new Error((await r.json()).detail || "HTTP "+r.status);
-    const d = await r.json();
-    KEY = d.token; WHO = d.email; ROLE = d.role;
-    localStorage.setItem("nb_admin_key", KEY);
-    localStorage.setItem("nb_who", WHO); localStorage.setItem("nb_role", ROLE);
-    history.replaceState(null, "", location.pathname);   // scrub the code from the URL
-    $("gate").classList.add("hidden"); refresh(true);
-    toast(`welcome, ${d.email} (${d.role})`);
-    return true;
-  } catch(e){ return false; }   // the caller decides whether this was fatal
-}
-async function syncWho(){
-  try { const d = await api("/auth/whoami");
-    WHO = d.who; ROLE = d.role;
-    localStorage.setItem("nb_who", WHO); localStorage.setItem("nb_role", ROLE);
-  } catch(e){}
-}
-
-function agoDays(iso){ if(!iso) return "?";
-  const d = (Date.now() - new Date(iso + "Z").getTime()) / 86400000;
-  return d < 1 ? "today" : Math.round(d) + " d"; }
-
-// Escape text before it goes into an HTML attribute or body. Device telemetry is not
-// trusted input: it arrives over the wire from a Pi, and a stray quote in a status string
-// would break out of the attribute it is sitting in.
-function esc(s){
-  return String(s == null ? "" : s)
-    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
-    .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
-}
-
-// Power verdict from the device's STICKY throttle bits.
-//
-// This exists because the panel showed a clean green bridge for weeks while the board was
-// browning out. The device's live `throttled` field reads 0x0 on almost every poll even when
-// the sticky history says 0x50000, so nothing on this page could contradict it and the only
-// way to learn the truth was to download a diagnostics bundle and read power.txt by hand.
-//
-// A board that browned out 327 times is not "online". It renders as a fault, and it keeps
-// rendering as one after the episode passes — because that is exactly when you would
-// otherwise go looking for a network problem that does not exist.
-function powerPill(dev){
-  const p = (dev.latest || {}).power;
-  if (!p || p.ok !== false) return "";
-  const live = p.live === true;
-  return `<span class="pill warn" title="${esc(p.summary || "")}">`
-       + (live ? "⚡ browning out now" : "⚡ has browned out") + `</span>`;
-}
-
-function statusPill(dev){
-  const t = dev.latest || {}, s = t.streams || {};
-  if (!dev.online) return `<span class="pill idle">offline ${agoDays(dev.last_seen)}</span>`;
-  const pwr = powerPill(dev);
-  // A bridge nobody has claimed yet is NEW before it is anything else. Showing only its
-  // first alert here hid the one thing the operator was waiting for — and a brand-new
-  // bridge almost always has a transient alert while its services finish starting.
-  if (!dev.claimed)
-    return `<span class="pill live">🆕 claim me</span>` + pwr;
-  if (dev.alerts && dev.alerts.length)
-    return `<span class="pill warn">${dev.alerts[0].kind.replace("_"," ")}</span>` + pwr;
-  // Power is shown ALONGSIDE live/online, never instead of it: the stream really is up, and
-  // hiding that would trade one lie for another.
-  if (s.video) return `<span class="pill live">● live</span>` + pwr;
-  return `<span class="pill ok">online</span>` + pwr;
-}
-
-function cfgState(dev){ return ((dev.latest || {}).config || {}).state || null; }
-
-function configCell(dev){
-  // "What changed?" is the first question when audio goes wrong, and until this column it
-  // was unanswerable. Deliberately says nothing when the answer is not useful: a bridge with
-  // no baseline is not drifted, and one running an older image simply has no opinion.
-  const c = (dev.latest || {}).config || {};
-  const s = c.state;
-  if (!dev.online || !s || s === "unavailable") return `<span class="dim">—</span>`;
-  if (s === "no baseline")
-    return `<span class="pill idle" title="No known-good baseline saved yet. Save one from the Actions menu while the audio is verified good.">no baseline</span>`;
-  if (s === "known-good"){
-    const when = c.saved_at ? new Date(c.saved_at * 1000).toLocaleString() : "";
-    return `<span class="pill ok" title="${esc("Matches the baseline saved " + when + (c.note ? " — " + c.note : ""))}">known-good</span>`;
-  }
-  if (s === "unknown")
-    return `<span class="pill idle" title="${esc(c.error || "baseline could not be read")}">config ?</span>`;
-  // Drifted. The count that matters to an operator is how much of it a button can fix.
-  const tip = `${c.drift} field(s) differ from the baseline — ${c.restorable} restorable from here, `
-            + `${c.needs_deploy} need a code deploy or reflash.`;
-  return `<span class="pill warn" title="${esc(tip)}">drift ${c.drift}`
-       + (c.needs_deploy ? ` (${c.needs_deploy}⚑)` : "") + `</span>`;
-}
-
-function sessionCell(dev){
-  const s = (dev.latest||{}).streams || {};
-  if (dev.online && s.video) return "presenter streaming";
-  return "—";
-}
-
-// PIN-gate state straight from device telemetry (bridge-pin state).
-function pinCell(dev){
-  const p = (dev.latest||{}).pin || {};
-  if (p.lockout){
-    const m = Math.max(1, Math.round((p.lockout_remaining||0)/60));
-    return `<span class="pill live" title="3 wrong tries — brute-force cooldown">lockout ${m} min</span>`;
-  }
-  if (p.locked) return `<span class="pill warn" title="media stopped until a presenter unlocks with the PIN">locked</span>`;
-  if (p.pin_set) return `<span class="pill ok" title="PIN required before streaming">PIN armed</span>`;
-  return `<span class="dim" title="no PIN on this bridge — anyone who can see it can stream to it">no PIN</span>`;
-}
-
-async function doAction(devId, devName, value, isLive){
-  if (!value) return;
-  let [type, mode] = value.split(":");
-  // `profile:wan` carries a MODE; `jitter-fix:2` carries a RUNG. They share the colon syntax
-  // and nothing else — sending {mode:"2"} to jitter-fix is refused by the agent's validator,
-  // which would present as a button that queues successfully and then does nothing at all.
-  let args = mode ? (type === "jitter-fix" ? {rung: parseInt(mode, 10)} : {mode}) : {};
-  if (type === "mesh-key"){
-    // Not a device command — a control-plane action. Mints a fresh tailnet key the bridge
-    // picks up on its next check-in. Needed when its ephemeral node was garbage-collected
-    // while it was offline, which otherwise leaves it unable to rejoin the mesh at all.
-    try {
-      const r = await api(`/admin/devices/${devId}/mesh-key`, {method:"POST"});
-      toast(`mesh key re-issued for ${devName} — ${r.note}`);
-    } catch(e){ if(e.message!=="auth") toast("mesh key failed: "+e.message); }
-    return;
-  }
-  if (type === "set-pin"){
-    // Set here, deliver offline (call/text/sticky note) — the panel never shows it again.
-    const pin = prompt(`New 6-digit PIN for ${devName}?\n\nSetting a PIN does not interrupt anything — it just arms the gate. Hand it to your presenter offline.`);
-    if (pin === null) return;
-    if (!/^\d{6}$/.test(pin)) { toast("PIN must be exactly 6 digits"); return; }
-    args = {pin};
-  }
-  if (type === "read-file"){
-    const path = prompt(
-      `Read which file on ${devName}?\n\nRead-only. The device refuses anything outside its own\nallow-listed roots and redacts anything that looks like a credential.\n\ne.g. /proc/asound/UAC2Gadget/pcm0c/sub0/status`,
-      "/proc/asound/UAC2Gadget/pcm0c/sub0/status");
-    if (!path) return;
-    args = {path};
-  }
-  if (type === "gadget-tune"){
-    // These cannot be applied to a running gadget — configfs refuses, and forcing it took a
-    // live bridge down twice. The file is written now and read at the next boot, so the
-    // action itself is harmless and the reboot is a separate, deliberate click.
-    args = {key: "UAC2_C_SYNC", value: mode};
-    if (!confirm(`Set the audio sync mode on ${devName} to "${mode}"?\n\nThis writes a setting; it does NOT change anything yet. Reboot the bridge when you are ready for it to take effect.`)) return;
-  }
-    if (type === "golden-save"){
-      // A BASELINE IS A CLAIM THAT SOMEONE LISTENED.
-      //
-      // On 2026-08-24 a golden-save was queued by accident and the fleet then showed
-      // "known-good" for a state nobody had heard. Everything downstream is measured against
-      // that record — drift, golden-restore, "worse than yesterday" — so an unverified
-      // baseline is worse than none: it looks like knowledge. The device now refuses to
-      // overwrite a confirmed baseline with an unconfirmed one, and this asks for the one
-      // thing no device can check for itself.
-      const cur = cfgState(DEVS.find(x=>x.id===devId) || {});
-      if (cur && cur !== "no baseline" &&
-          !confirm(`${devName} already has a baseline (currently: ${cur}).\n\nSaving replaces it with the CURRENT config. Only do this when you have just confirmed the audio is good.\n\nReplace it?`)) return;
-      const heard = confirm(
-        `Confirm you have JUST verified this session on ${devName}:\n\n` +
-        `  • video is arriving\n` +
-        `  • the room can hear the presenter\n` +
-        `  • the presenter can hear the room\n` +
-        `  • no clicks, bursts or jitter you can hear\n\n` +
-        `OK  = yes, I verified it — save as a CONFIRMED baseline\n` +
-        `Cancel = save it unconfirmed (recorded as such)`);
-      const note = prompt(
-        `Label this known-good state for ${devName}:\n\nSomething you will recognise later — what you verified, and how.`,
-        `${heard ? "verified" : "UNCONFIRMED"} ${new Date().toISOString().slice(0,10)}`);
-      if (note === null) return;
-      args = {note: note || "", confirmed: heard, by: (typeof WHO !== "undefined" && WHO) || "operator",
-              verified: heard ? "video,audio-to-room,audio-from-room,no-artifacts" : ""};
-    }
-  if (type === "golden-restore"){
-    const cur = cfgState(DEVS.find(x=>x.id===devId) || {});
-    if (cur === "no baseline"){
-      toast(`${devName} has no baseline yet — save one first, while it is working`);
-      return;
-    }
-    if (!confirm(`Restore ${devName} to its known-good config?\n\nThis rewrites only the tunable settings (jitter profile, return-audio tuning) and restarts just the services that changed. Anything that needs a code deploy is reported, not silently "fixed".\n\nIf the jitter profile drifted, video will freeze for a few seconds.`)) return;
-  }
-  if (type === "unlock"){
-    const pin = prompt(`PIN for ${devName}?\n\nClears a lockout after three wrong tries.`);
-    if (pin === null) return;
-    if (!/^\d{4,8}$/.test(pin)) { toast("PIN must be 4-8 digits"); return; }
-    args = {pin};
-  }
-  if (type === "revert-script"){
-    const name = prompt(`Which script to revert on ${devName}?\n\ne.g. bridge-return-audio.sh\nThe device drops the override and runs its baked-in copy.`);
-    if (!name) return;
-    args = {name};
-  }
-  if (type === "deploy-script"){
-    const name = prompt(`Script name to deploy to ${devName}?\n\ne.g. bridge-return-audio.sh`);
-    if (!name) return;
-    // Default to the fleet's own payload store. It is the one host a bridge can reach from
-    // anywhere — a laptop cannot be reached from a venue network, which is why the first
-    // attempt at this hung and died with no visible error.
-    const source = prompt(
-      `URL base holding ${name} and ${name}.sig?\n\n` +
-      `Publish it first with:  bash tools/publish-script.sh <path/to/${name}>\n` +
-      `The device verifies the signature before installing, and again at every start.`,
-      location.origin + "/payloads");
-    if (!source) return;
-    args = {name, source};
-  }
-  // Match BOTH forms. The set is consulted with the bare command, but rung 3 is the only
-  // disruptive member of the jitter-fix family — rungs 1 and 2 must not nag — so it is listed
-  // by its full "jitter-fix:3" value and would otherwise never match, silently freezing video
-  // on a live call with no confirmation at all.
-  // Confirmed here becomes confirm:true on the wire. The backend independently refuses a
-    // destructive command without it, so the browser dialog is no longer the only thing between
-    // a mis-click and a room dropping - but the two must agree, or every destructive button
-    // would 400. Only a dialog the operator actually accepted sets it.
-    // Confirmed here becomes confirm:true on the wire. The backend independently refuses a
-    // destructive command without it, so the browser dialog is no longer the only thing
-    // between a mis-click and a room dropping - but the two must agree, or every destructive
-    // button would 400. Only a dialog the operator actually accepted sets this.
-    let confirmed = false;
-    if (DISRUPTIVE.has(type) || DISRUPTIVE.has(value)) {
-      if (isLive && !confirm(`⚠ ${devName} is LIVE — someone is streaming through it right now.\n\n"${type}" will interrupt them. Really proceed?`)) return;
-      if (!isLive && !confirm(`Run "${type}" on ${devName}?`)) return;
-      confirmed = true;
-    }
-    // Destructive at the BACKEND without being flagged disruptive here - `update` has no
-    // button and no warning triangle. Ask explicitly rather than letting the request fail
-    // with a message the operator cannot act on.
-    if (!confirmed && BACKEND_CONFIRM.has(type)) {
-      if (!confirm(`"${type}" on ${devName} changes what code runs or interrupts service.\n\nProceed?`)) return;
-      confirmed = true;
-    }
-    try {
-    const r = await api(`/admin/devices/${devId}/commands`, {method:"POST", body:JSON.stringify({type, args, confirm: confirmed})});
-    if (r.deduplicated) {
-      // The backend handed back an EXISTING command rather than queuing a second one. Say so:
-      // silently returning an older id would read as a fresh action having been taken.
-      toast(`${type} was already in flight on ${devName} — showing #${r.id}, not a second one`);
-    } else {
-      toast(`queued ${type} on ${devName} — command #${r.id}`);
-    }
-    // FOLLOW IT TO A TERMINAL STATE.
-    //
-    // Until 26 Aug 2026 the toast above was the last the operator ever heard. Every command
-    // ended at "queued … command #N", so one that EXPIRED, FAILED, or was refused by the
-    // device looked exactly like one that succeeded. awaitCommand() already existed and was
-    // wired to a single action (jitter-diagnose); everything else — including reboot and
-    // golden-restore — reported nothing at all.
-    //
-    // A fleet that cannot tell you whether the reboot you ordered actually happened is not an
-    // operations tool, it is a request form.
-    followCommand(devId, devName, type, r.id);
-    // A diagnosis nobody reads is not a diagnosis. Everything else here is an ACTION whose
-    // effect the operator can see in the fleet row, but jitter-diagnose exists purely to
-    // produce an answer, so it has to be fetched back and shown.
-    if (type === "jitter-diagnose") showDiagnosis(devId, devName, r.id);
-  } catch(e){ if(e.message!=="auth") toast("failed: "+e.message); }
-}
-
-async function followCommand(devId, devName, type, cmdId){
-  // Watch a command to its terminal state and tell the operator what actually happened — and,
-  // while it is still recallable, offer to cancel it.
-  //
-  // The DELETE endpoint has existed since an unrecallable reboot reached a live bridge during
-  // an audit. Nothing in the UI could reach it: the operator was shown a command id they had
-  // no way to act on.
-  const c = await awaitCommand(devId, cmdId, 24, (row) => {
-    // Fires once, the first time the command is seen still sitting in `pending`. `sent` is past
-    // the point of recall — the device already has it — and offering to "cancel" then would be
-    // a promise we cannot keep.
-    if (row.status !== "pending") return;
-    if (!DISRUPTIVE.has(type) && !BACKEND_CONFIRM.has(type)) return;   // don't nag on reads
-    if (!confirm(`"${type}" is still QUEUED on ${devName} (command #${cmdId}) — the bridge has not picked it up yet.\n\nCancel it?`)) return;
-    api(`/admin/devices/${devId}/commands/${cmdId}`, {method:"DELETE"})
-      .then(() => toast(`cancelled #${cmdId} — the bridge never received it`))
-      .catch(e => toast(e.message === "HTTP 409"
-        ? `too late to cancel #${cmdId} — the bridge already has it`
-        : `could not cancel #${cmdId}: ${e.message}`));
-  });
-
-  if (!c){
-    // No terminal state inside the polling window. That is NOT success and must never be
-    // reported as one — say plainly that we do not know.
-    toast(`${type} on ${devName}: still no result for #${cmdId} — state UNKNOWN, check the device`);
-    return;
-  }
-  const detail = (c.output || c.fail_reason || "").toString().slice(0, 90);
-  if (c.status === "done" || c.status === "succeeded"){
-    toast(`${type} on ${devName}: SUCCEEDED (#${cmdId})`);
-  } else if (c.status === "cancelled"){
-    toast(`${type} on ${devName}: cancelled (#${cmdId})`);
-  } else if (c.status === "expired"){
-    toast(`${type} on ${devName}: EXPIRED — the bridge never reported back (#${cmdId})`);
-  } else {
-    toast(`${type} on ${devName}: ${String(c.status).toUpperCase()} (#${cmdId})${detail ? " — " + detail : ""}`);
-  }
-}
-
-async function awaitCommand(devId, cmdId, tries = 24, onFirstPending){
-  // The agent runs on a timer, so a result is not instant. Poll rather than guess a delay.
-  for (let i = 0; i < tries; i++){
-    await new Promise(r => setTimeout(r, 2500));
-    let list;
-    try { list = await api(`/admin/devices/${devId}/commands`); } catch(e){ return null; }
-    const c = (list || []).find(x => x.id === cmdId);
-    if (c && onFirstPending){ onFirstPending(c); onFirstPending = null; }
-    // `pending` joins the non-terminal set: it is where a command sits before the agent
-    // collects it, and treating it as terminal would report UNKNOWN the instant one is queued.
-    if (c && c.status !== "queued" && c.status !== "sent" && c.status !== "pending") return c;
-  }
-  return null;
-}
-
-function diagPanel(){
-  let el = $("diagout");
-  if (!el){
-    el = document.createElement("div");
-    el.id = "diagout"; el.className = "pcard alert";
-    el.style.cssText = "position:fixed;right:18px;bottom:18px;max-width:min(560px,92vw);"
-                     + "max-height:70vh;overflow:auto;z-index:60;box-shadow:0 8px 32px rgba(0,0,0,.28)";
-    document.body.appendChild(el);
+  for (const c of kids.flat(Infinity)){
+    if (c === null || c === undefined || c === false) continue;
+    el.appendChild(typeof c === "string" || typeof c === "number" ? document.createTextNode(String(c)) : c);
   }
   return el;
 }
+function setText(el, t){ t = (t === null || t === undefined) ? "" : String(t); if (el.textContent !== t) el.textContent = t; }
+// Replace a cell's content only when what it shows actually changed - nothing flickers, and a
+// quiet fleet does no DOM work at all.
+function patch(el, sig, build){ if (el.dataset.sig === sig) return; el.dataset.sig = sig; el.replaceChildren(...[build()].flat(Infinity).filter(Boolean)); }
+function pill(cls, text, title){ return h("span", {class: "pill " + cls, title: title || null}, text); }
+function parseTs(iso){
+  if (!iso) return null;
+  if (typeof iso === "number") return iso < 1e12 ? iso * 1000 : iso;
+  const s = /[zZ]$|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + "Z";
+  const t = Date.parse(s); return isNaN(t) ? null : t;
+}
+function rel(ts){
+  if (!ts) return "—";
+  const s = Math.max(0, (Date.now() - ts) / 1000);
+  if (s < 10) return "just now";
+  if (s < 60) return Math.round(s) + " s ago";
+  if (s < 3600) return Math.round(s / 60) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  return Math.round(s / 86400) + " d ago";
+}
+function clock(ts){ return ts ? new Date(ts).toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) : "—"; }
+function dur(s){ s = Math.max(0, Math.round(s || 0)); if (s < 60) return s + " s"; if (s < 3600) return Math.round(s / 60) + " min";
+  const hh = Math.floor(s / 3600), mm = Math.round((s % 3600) / 60); return hh + " h" + (mm ? " " + mm + " min" : ""); }
+function kb(n){ return n == null ? "—" : n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB"; }
+function devName(d){ return (d && (d.name || d.pairing_code || d.id)) || "bridge"; }
+function devLabel(d){ return [d && d.label, devName(d)].filter(Boolean).join(" · "); }
+function T(d){ return (d && d.latest) || {}; }
+function cfgState(d){ return (T(d).config || {}).state || null; }
 
-async function showDiagnosis(devId, devName, cmdId){
-  const el = diagPanel();
-  el.innerHTML = `<span class="atitle"><span class="adot"></span> Diagnosing ${esc(devName)}…</span>
-    <span class="abody">Measuring power, path, rates and config on the bridge. ~20 s.</span>`;
-  const c = await awaitCommand(devId, cmdId);
-  if (!c){
-    el.innerHTML = `<span class="atitle"><span class="adot"></span> ${esc(devName)}</span>
-      <span class="abody">No result yet — the bridge may be busy. Try again shortly.</span>`;
-    return;
+// ------------------------------------------------------------------------------ server calls
+async function api(path, opts = {}){
+  const r = await fetch(path, {...opts, cache: "no-store", headers: {"Authorization": "Bearer " + KEY,
+    "Content-Type": "application/json", ...(opts.headers || {})}});
+  if (r.status === 401 || r.status === 403){
+    if (!opts.quiet) signedOut("Your sign-in is no longer valid — sign in again.");
+    const e = new Error("auth"); e.status = r.status; throw e;
   }
-  let d = null;
-  try { d = JSON.parse(c.output || "{}"); } catch(e){}
-  if (!d || !d.findings){
-    el.innerHTML = `<span class="atitle"><span class="adot"></span> ${esc(devName)} — diagnose</span>
-      <pre class="abody" style="white-space:pre-wrap">${esc((c.output||"no output").slice(0,1200))}</pre>`;
-    return;
+  let body = null;
+  try { body = await r.json(); } catch (e) {}
+  if (!r.ok){
+    const d = body && body.detail;
+    const msg = typeof d === "string" ? d : (d && (d.detail || d.error)) ? (d.detail || d.error) : "HTTP " + r.status;
+    const e = new Error(msg); e.status = r.status; e.body = body; throw e;
   }
-  const ev = d.evidence || {}, pw = ev.power || {}, path = ev.path || {};
-  const rate = pw.rate || {};
-  let html = `<span class="atitle"><span class="adot"></span> ${esc(devName)} — most likely cause</span>`;
-  d.findings.forEach((f, i) => {
-    // The action is the point. A finding with no action still gets stated plainly rather
-    // than quietly dropped — "no fleet button can fix this" is itself the useful answer,
-    // and pretending otherwise is how a USB gadget gets rebuilt to fix a Wi-Fi problem.
-    html += `<div style="margin:10px 0;padding-left:10px;border-left:3px solid ${i===0?"#c0392b":"#bbb"}">
-      <b>${esc(f.culprit)}</b> <span class="dim">(${esc(f.confidence)} confidence)</span>
-      <div class="abody">${esc(f.detail)}</div>`;
-    if (f.action){
-      const label = f.rung ? `${f.action} (rung ${f.rung})` : f.action;
-      html += `<button class="aact" data-act="${esc(f.action)}" data-rung="${f.rung||""}">Apply: ${esc(label)} →</button>`;
-    } else {
-      html += `<div class="abody"><i>No fleet action can fix this one.</i></div>`;
-    }
-    if (f.note) html += `<div class="abody dim">${esc(f.note)}</div>`;
-    html += `</div>`;
+  return body;
+}
+
+// ------------------------------------------------------------------------------------ toasts
+function toast(msg, kind = "info", opt = {}){
+  const t = h("div", {class: "toast " + kind, role: kind === "bad" ? "alert" : "status"}, h("span", {class: "tmsg"}, msg));
+  if (opt.action) t.appendChild(h("button", {class: "tact", type: "button", onclick: () => { t.remove(); opt.onAction(); }}, opt.action));
+  t.appendChild(h("button", {class: "tx", type: "button", "aria-label": "Dismiss", onclick: () => t.remove()}, "×"));
+  const box = $("toasts"); box.appendChild(t);
+  while (box.children.length > 5) box.firstChild.remove();
+  setTimeout(() => t.remove(), opt.ms || (kind === "bad" ? 14000 : kind === "warn" ? 10000 : 6500));
+  return t;
+}
+
+// ----------------------------------------------------------------------------------- dialogs
+// One dialog at a time. Live updates never touch its content - except its "is this bridge live
+// right now?" line, which is kept true while it is open (LIVE_NOTES).
+const LIVE_NOTES = new Map();     // device id -> [elements]
+function openDialog({title, body, ok, okClass = "primary", alt, altClass = "secondary", cancel = "Cancel", onOk, onAlt, wide}){
+  closeDialog();
+  const err = h("div", {class: "derr", role: "alert"});
+  const okBtn = ok ? h("button", {class: "btn " + okClass, type: "button"}, ok) : null;
+  const altBtn = alt ? h("button", {class: "btn " + altClass, type: "button"}, alt) : null;
+  const box = h("div", {class: "dialog" + (wide ? " wide" : ""), role: "dialog", "aria-modal": "true", "aria-labelledby": "dlgTitle"},
+    h("div", {class: "dh"}, h("h2", {id: "dlgTitle"}, title), h("button", {class: "xbtn", type: "button", "aria-label": "Close", onclick: closeDialog}, "×")),
+    h("div", {class: "db"}, body),
+    err,
+    h("div", {class: "df"}, cancel ? h("button", {class: "btn ghost", type: "button", onclick: closeDialog}, cancel) : null, altBtn, okBtn));
+  async function run(fn, btn){
+    if (!fn) return closeDialog();
+    btn.disabled = true; err.textContent = "";
+    try { const keep = await fn(); if (keep !== true && MODAL.box === box) closeDialog(); }
+    catch (e) { if (e.message !== "auth") err.textContent = e.message || String(e); }
+    finally { btn.disabled = false; }
+  }
+  if (okBtn) okBtn.onclick = () => run(onOk, okBtn);
+  if (altBtn) altBtn.onclick = () => run(onAlt, altBtn);
+  box.addEventListener("keydown", e => {
+    if (e.key === "Enter" && okBtn && e.target.tagName !== "TEXTAREA" && e.target.tagName !== "BUTTON"){ e.preventDefault(); okBtn.click(); }
   });
-  html += `<div class="abody dim" style="margin-top:8px">measured — `
-        + `power ${esc(pw.summary || "?")}`
-        + (rate.pct !== undefined && rate.pct !== null ? ` (${rate.pct}% of last ${rate.samples}s)` : "")
-        + (path.reachable ? ` · path spread ${path.mdev_ms}ms, loss ${path.loss_pct}%` : ` · path not measured`)
-        + ` · pipeline ${esc(String(ev.pipeline_rate))} · config ${esc((ev.config||{}).state || "?")}</div>`;
-  html += `<button class="aact" id="diagclose">Close</button>`;
-  el.innerHTML = html;
-  $("diagclose").onclick = ()=> el.remove();
-  el.querySelectorAll("button[data-act]").forEach(b => {
-    b.onclick = ()=>{
-      const act = b.getAttribute("data-act"), rung = b.getAttribute("data-rung");
-      doAction(devId, devName, rung ? `${act}:${rung}` : act, false);
-    };
-  });
+  const root = $("modal"); root.replaceChildren(box); root.hidden = false; MODAL.box = box;
+  setTimeout(() => { const f = box.querySelector("input:not([disabled]),select,textarea") || okBtn; if (f) f.focus(); }, 0);
+  return {box, err};
 }
-
-async function claim(devId, code){
-  const name = prompt(`Name for ${code}? (e.g. "Mumbai Studio")`);
-  if (!name) return;
-  try { await api(`/admin/devices/${devId}/claim`, {method:"POST", body:JSON.stringify({name})});
-        toast(`claimed ${code} as “${name}”`); refresh(); }
-  catch(e){ if(e.message!=="auth") toast("claim failed: "+e.message); }
-}
-
-async function fix(devId, devName, f, isLive){
-  if (isLive && DISRUPTIVE.has(f.command) &&
-      !confirm(`⚠ ${devName} is LIVE. “${f.label}” interrupts the stream. Proceed?`)) return;
-  try { const r = await api(`/admin/devices/${devId}/commands`,
-        {method:"POST", body:JSON.stringify({type:f.command, args:f.args||{}})});
-        toast(`${f.label} — queued command #${r.id} on ${devName}`); }
-  catch(e){ if(e.message!=="auth") toast("failed: "+e.message); }
-}
-
-let DEVS = [];
-// Never re-render while someone is READING the menu.
-//
-// Rebuilding a row destroys and recreates its <select>, so an open dropdown slammed shut
-// mid-read. With 14 entries in four groups that is not cosmetic: it makes the menu hard to
-// use, and the entries you most need to read carefully are the destructive ones at the
-// bottom. render() now only touches the DOM when the data actually changed, which removes
-// most of the churn — but a genuine change during a live session would still close the
-// menu, so the guard stays. A native <select> has no "is open" flag; clicking one focuses
-// it, so activeElement is a reliable proxy. The data underneath is only ever a few seconds
-// stale, and it redraws the moment focus leaves.
-function menuIsOpen(){
-  const a = document.activeElement;
-  return !!(a && a.tagName === "SELECT" && a.classList.contains("act"));
-}
-
-function render(){
-  // Returns true when the page actually changed, so the caller can avoid repainting a
-  // timestamp on an idle fleet.
-  if (menuIsOpen()) return false;
-  // Build OFF-SCREEN, then swap only if the markup actually changed.
-  //
-  // This used to write straight into the live table every 5 seconds, whether or not
-  // anything had moved. Rebuilding the DOM on a timer destroys whatever the operator was
-  // doing: a half-made text selection disappears, focus is lost, and an open <select>
-  // snaps shut. The page LOOKED busy and felt unstable while reporting identical data.
-  //
-  // The polling itself stays on the 5s tick - that is how the browser learns anything -
-  // but the page now only moves when the fleet does.
-  const rowsLive = $("rows");
-  const rows = document.createElement("tbody");
-  // A bridge that just finished the Wi-Fi portal shows up UNCLAIMED, and that is exactly the
-  // moment someone is watching for it. Sort it to the top rather than leaving it wherever the
-  // API returned it; on a fleet of any size that is the difference between "there it is" and
-  // scrolling. Offline devices come next because they are the ones needing attention.
-  DEVS.sort((a,b) =>
-    (a.claimed?1:0) - (b.claimed?1:0) ||
-    (a.online?1:0) - (b.online?1:0) ||
-    String(a.name||a.pairing_code||"").localeCompare(String(b.name||b.pairing_code||"")));
-  const online = DEVS.filter(d=>d.online).length;
-  const meta = `${DEVS.length} bridge${DEVS.length===1?"":"s"} · ${online} online`;
-  if ($("fleetmeta").textContent !== meta) $("fleetmeta").textContent = meta;
-  for (const d of DEVS){
-    const t = d.latest || {};
-    const isLive = !!(d.online && (t.streams||{}).video);
-    // Deployed code that is NOT running. Nothing else on this row would show it.
-    const quar = (t.quarantined||[]);
-    // How the presenter is actually reached. Lets you check a bridge on another continent
-    // without anyone touching it — relayed roughly doubles latency versus a direct path.
-    const mp = t.mesh_path || {};
-    const pathPill = mp.via === "relay"
-      ? ` <span class="pill warn" title="${mp.note||""}">relayed</span>`
-      : (mp.via === "direct" ? ` <span class="pill ok" title="${mp.note||""}">direct</span>` : "");
-    const code = (d.pairing_code||"").replace("BRIDGE-","");
-    const tr = document.createElement("tr");
-    if (!d.claimed) {
-      tr.innerHTML = `<td class="dev dim">🆕 Unclaimed · ${d.pairing_code||d.id}</td>
-        <td>${statusPill(d)}</td><td class="dim">—</td><td class="dim">—</td><td class="dim">${d.version||"?"}</td>
-        <td class="dim">just joined</td>
-        <td style="text-align:right"><button class="claimbtn">Claim</button> <select class="act"></select></td>`;
-      // Read-only only. Repairing or rebooting a device you have not adopted is somebody
-      // else's bridge until you claim it — but LOOKING at one is how you decide.
-      const usel = tr.querySelector(".act");
-      for (const [v,l] of [["","Check…"],["diagnose","Collect diagnostics"],
-                           ["running","What code is it running?"],["logs","Fetch recent logs"]]){
-        const o=document.createElement("option"); o.value=v; o.textContent=l; usel.appendChild(o);
-      }
-      usel.onchange = ()=>{ doAction(d.id, d.pairing_code||d.id, usel.value, false); usel.value=""; };
-      tr.querySelector(".claimbtn").onclick = ()=>claim(d.id, d.pairing_code||d.id);
-    } else {
-      tr.innerHTML = `<td class="dev">${d.name||d.hostname||d.id} <span class="dim">${code}</span></td>
-        <td>${statusPill(d)}${pathPill}${quar.length ? ` <span class="pill warn" title="Auto-rollback parked ${quar.join(", ")}. This bridge is running its FACTORY script, not the code you deployed. Actions → Restore quarantined override.">deployed code not running</span>` : ""}</td>
-        <td>${pinCell(d)}</td>
-        <td>${configCell(d)}</td>
-        <td class="dim">${d.version||"?"}</td>
-        <td class="dim">${sessionCell(d)}</td>
-        <td style="text-align:right"></td>`;
-      if (isAdmin()){   // presenters see the fleet; only admins can act on it
-        const sel = document.createElement("select"); sel.className = "act";
-          fillActions(sel);
-          sel.onchange = ()=>{
-            // The two toggles are menu state, not commands. Rebuild THIS select in place
-            // rather than re-rendering the table: a full render destroys and recreates the
-            // element, slamming the dropdown shut on the click that opened it.
-            if (sel.value === "__more" || sel.value === "__less"){
-              SHOW_ALL = (sel.value === "__more");
-              fillActions(sel);
-              sel.value = "";
-              return;
-            }
-            doAction(d.id, d.name||d.id, sel.value, isLive); sel.value="";
-          };
-        tr.lastElementChild.appendChild(sel);
-      }
-    }
-    rows.appendChild(tr);
-  }
-  // side: alerts (with their attached fix), then the phase-4 rollout placeholder
-  const sideLive = $("side");
-  const side = document.createElement("div");
-  let anyAlert = false;
-  for (const d of DEVS){
-    const isLive = !!(d.online && ((d.latest||{}).streams||{}).video);
-    for (const a of (d.alerts||[])){
-      anyAlert = true;
-      const card = document.createElement("div"); card.className = "pcard alert";
-      card.innerHTML = `<span class="atitle"><span class="adot"></span> ${d.name||d.id} — ${a.kind.replace("_"," ")}</span>
-        <span class="abody">${a.detail||""}</span>`;
-      if (a.fix && isAdmin()){
-        const b = document.createElement("button"); b.className = "aact";
-        b.textContent = a.fix.label + " →";
-        b.onclick = ()=>fix(d.id, d.name||d.id, a.fix, isLive);
-        card.appendChild(b);
-      }
-      side.appendChild(card);
-    }
-  }
-  if (!anyAlert){
-    const ok = document.createElement("div"); ok.className = "pcard alert";
-    ok.innerHTML = `<span class="atitle"><span class="adot ok"></span> No active alerts</span>
-      <span class="abody">Offline, thermal, service, clock and PIN-lockout signatures all quiet. Alerts appear here with their known fix attached.</span>`;
-    side.appendChild(ok);
-  }
-  // diagnostics card per online claimed bridge: newest bundle + download (admin-only endpoints)
-  for (const d of DEVS){
-    if (!d.claimed || !d.online || !isAdmin()) continue;
-    const card = document.createElement("div"); card.className = "pcard alert";
-    card.innerHTML = `<span class="atitle"><span class="adot ok"></span> Diagnostics — ${d.name||d.id}</span>
-      <span class="abody" id="diag-${d.id}">checking for bundles…</span>`;
-    const row = document.createElement("div"); row.style.display="flex"; row.style.gap="16px";
-    const dl = document.createElement("button"); dl.className="aact"; dl.textContent="Download bundle →"; dl.style.display="none";
-    const co = document.createElement("button"); co.className="aact"; co.textContent="Collect fresh bundle →";
-    co.onclick = async ()=>{ try{ const r = await api(`/admin/devices/${d.id}/commands`,
-        {method:"POST", body:JSON.stringify({type:"diagnose",args:{}})});
-        toast(`collecting on ${d.name||d.id} — ready in ~40 s (command #${r.id})`);}
-      catch(e){ if(e.message!=="auth") toast("failed: "+e.message); } };
-    row.appendChild(dl); row.appendChild(co); card.appendChild(row);
-    side.appendChild(card);
-    api(`/admin/devices/${d.id}/diagnostics`).then(list=>{
-      const el = $(`diag-${d.id}`);
-      if (!list.length){ el.textContent = "No bundle yet — collect one (service logs, USB state, network, power; ~40 s)."; return; }
-      const b = list[0];
-      const age = Math.max(0, Math.round((Date.now()-new Date(b.created_at+"Z").getTime())/60000));
-      el.textContent = `Bundle ready: ${b.filename} · ${(b.size/1024).toFixed(0)} KB · ${age===0?"just now":age+" min ago"}. Collected remotely on the bridge.`;
-      dl.style.display = "";
-      dl.onclick = async ()=>{
-        try{
-          const r = await fetch(`/admin/diagnostics/${b.id}`, {headers:{"Authorization":"Bearer "+KEY}});
-          if (!r.ok) throw new Error("HTTP "+r.status);
-          const blob = await r.blob();
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob); a.download = b.filename; a.click();
-          URL.revokeObjectURL(a.href);
-          toast(`downloaded ${b.filename}`);
-        }catch(e){ toast("download failed: "+e.message); }
-      };
-    }).catch(()=>{ const el=$(`diag-${d.id}`); if(el) el.textContent="diagnostics unavailable"; });
-  }
-  // uptime/SLA card per claimed bridge: 7 rolling-24h bars + streak + incidents
-  for (const d of DEVS){
-    if (!d.claimed) continue;
-    const card = document.createElement("div"); card.className = "pcard alert";
-    card.innerHTML = `<span class="atitle"><span class="adot ok"></span> Uptime — ${d.name||d.id}</span>
-      <span class="abody" id="up-${d.id}">measuring…</span>
-      <div id="upbars-${d.id}" style="display:flex;gap:4px;align-items:flex-end;height:34px;margin-top:4px"></div>`;
-    side.appendChild(card);
-    api(`/admin/devices/${d.id}/uptime`).then(u=>{
-      const bars = $(`upbars-${d.id}`); bars.innerHTML = "";
-      for (const w of [...u.windows].reverse()){   // oldest → newest, newest bar rightmost
-        const b = document.createElement("div");
-        const h = Math.max(3, Math.round(w.pct * 0.32));
-        b.style.cssText = `flex:1;height:${h}px;border-radius:3px;background:${w.pct>=99?"var(--ok)":w.pct>0?"var(--warn)":"var(--line)"}`;
-        b.title = (w.ago_days===0?"last 24h":`${w.ago_days+1} days ago`) + `: ${w.pct}%`;
-        bars.appendChild(b);
-      }
-      const el = $(`up-${d.id}`);
-      const today = u.windows[0].pct;
-      const streakH = Math.floor(u.streak_s/3600), streakM = Math.floor((u.streak_s%3600)/60);
-      let txt = `last 24 h: ${today}% · clean streak ${streakH? streakH+" h ":""}${streakM} min`;
-      const inc = u.incidents.filter(i=>!i.ongoing).slice(-1)[0];
-      if (inc){
-        const t = new Date(inc.start+"Z");
-        txt += ` · last incident ${t.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})} (${Math.round(inc.seconds/60)} min)`;
-      }
-      el.textContent = txt;
-    }).catch(()=>{ const el=$(`up-${d.id}`); if(el) el.textContent="uptime unavailable"; });
-  }
-  // team + audit cards (admins only)
-  if (isAdmin()){
-    const team = document.createElement("div"); team.className = "pcard alert";
-    team.innerHTML = `<span class="atitle"><span class="adot ok"></span> Team</span>
-      <span class="abody" id="teamlist">loading…</span>
-      <div style="display:flex;gap:6px;margin-top:4px">
-        <input id="nu-email" placeholder="email" style="flex:1;border:1px solid var(--line);border-radius:7px;padding:4px 8px;font-size:12px">
-        <select id="nu-role" class="act"><option value="presenter">presenter</option><option value="admin">admin</option></select>
-        <button class="aact" onclick="addUser()">Invite →</button>
-      </div>
-      <span class="abody" id="invite-out" style="font-family:var(--mono);font-size:11px;word-break:break-all"></span>`;
-    side.appendChild(team);
-    api("/admin/users").then(us=>{
-      const el = $("teamlist");
-      el.innerHTML = us.length ? "" : "No personal accounts yet — invites replace sharing the org key.";
-      for (const u of us){
-        const row = document.createElement("div");
-        row.innerHTML = `${u.email} · <b>${u.role}</b>${u.pending_invite ? " · <span title=\"They have not signed in yet. If they never got the email, they can request a sign-in link with this address from the front page.\">not signed in yet</span>" : ""} <button class="aact" style="margin-left:6px">revoke</button>`;
-        row.querySelector("button").onclick = async ()=>{
-          if (!confirm(`Revoke ${u.email}? Their token stops working immediately.`)) return;
-          try{ await api(`/admin/users/${u.id}`, {method:"DELETE"}); toast(`revoked ${u.email}`); refresh(); }
-          catch(e){ toast("failed: "+e.message); }
-        };
-        el.appendChild(row);
-      }
-    }).catch(()=>{});
-    const aud = document.createElement("div"); aud.className = "pcard alert";
-    aud.innerHTML = `<span class="atitle"><span class="adot ok"></span> Audit — who did what</span>
-      <span class="abody" id="auditlist">loading…</span>`;
-    side.appendChild(aud);
-    api("/admin/audit").then(rows=>{
-      const el = $("auditlist");
-      el.innerHTML = rows.length ? "" : "No actions recorded yet.";
-      for (const r of rows.slice(0,8)){
-        const t = new Date(r.ts+"Z");
-        const line = document.createElement("div");
-        line.textContent = `${t.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})} · ${r.who} · ${r.action}${r.target ? " · "+r.target : ""}`;
-        el.appendChild(line);
-      }
-    }).catch(()=>{});
-  }
-  // Rollouts · A/B image updates — wired live to /admin/rollouts: staged waves
-  // (10 → 25 → 50 → 100%), automatic per-device rollback, and the "0 rollbacks" halt.
-  const ro = document.createElement("div"); ro.className = "pcard rollout";
-  ro.innerHTML = `<div class="rname">Rollouts · A/B image updates</div>
-    <div class="rbody" id="rolloutbody" style="margin-top:6px;color:var(--muted)">loading…</div>`;
-  side.appendChild(ro);
-  api("/admin/rollouts").then(list=>{
-    const b = $("rolloutbody"); if(!b) return;
-    const latest = list.find(r=>r.status==="active"||r.status==="paused") || list[0];
-    if (!latest){
-      b.innerHTML = `<div>No rollouts yet. Ship a version fleet-wide in staged waves — 10 → 25 → 50 → 100% — with automatic per-device rollback.</div>`;
-      if (isAdmin()){ const btn=document.createElement("button"); btn.className="rbtn"; btn.style.marginTop="8px";
-        btn.textContent="Start a rollout →"; btn.onclick=startRollout; b.appendChild(btn); }
-      return;
-    }
-    const pct = latest.total ? Math.round(100*latest.updated/latest.total) : 0;
-    const cls = latest.status==="active" ? "live" : latest.status==="completed" ? "ok"
-              : latest.status==="aborted" ? "warn" : "idle";
-    b.innerHTML =
-      `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-         <span class="rname">netbridge-os ${latest.version}</span><span class="pill ${cls}">${latest.status}</span></div>
-       <div class="rmeta" style="margin-top:4px">Staged wave ${latest.stage_pct}%${latest.next_stage!=null?` · next ${latest.next_stage}%`:` · final wave`}</div>
-       <div class="progress" style="margin-top:8px"><i style="width:${pct}%"></i></div>
-       <div class="rfoot" style="margin-top:6px">${latest.summary}${latest.in_flight?` · ${latest.in_flight} updating`:""}</div>`;
-    if (latest.rollbacks){
-      const w=document.createElement("div"); w.className="rfoot"; w.style.color="var(--tally)"; w.style.marginTop="4px";
-      w.textContent = `⚠ ${latest.rollbacks} device(s) rolled back — widening halted (the “0 rollbacks” guard).`;
-      b.appendChild(w);
-    }
-    if (!isAdmin()) return;                       // presenters see status, no controls
-    const row=document.createElement("div"); row.style.cssText="display:flex;flex-wrap:wrap;gap:14px;margin-top:8px";
-    const mk=(label,action)=>{ const x=document.createElement("button"); x.className="rbtn"; x.textContent=label;
-      x.onclick=()=>rolloutAction(latest.id, action, latest.version); return x; };
-    if (latest.status==="active"){
-      if (latest.next_stage!=null) row.appendChild(mk(`Widen to ${latest.next_stage}% →`,"advance"));
-      else if (latest.queued || latest.in_flight) row.appendChild(mk("Finish →","advance"));
-      if (latest.queued_offline && latest.queued_offline.length) row.appendChild(mk("Catch up offline →","dispatch"));
-      row.appendChild(mk("Pause","pause")); row.appendChild(mk("Abort","abort"));
-    } else if (latest.status==="paused"){
-      row.appendChild(mk("Resume","resume")); row.appendChild(mk("Abort","abort"));
-    } else {
-      const btn=document.createElement("button"); btn.className="rbtn"; btn.textContent="Start a new rollout →";
-      btn.onclick=startRollout; row.appendChild(btn);
-    }
-    b.appendChild(row);
-  }).catch(()=>{ const b=$("rolloutbody"); if(b) b.textContent="rollouts unavailable"; });
-
-  // ---- swap in ONLY what changed -------------------------------------------------
-  // Moving the nodes (not re-parsing HTML) keeps every event handler already bound to
-  // them, so the Actions menus and Claim buttons keep working.
-  //
-  // #rolloutbody is filled by an async fetch AFTER this function returns, so the freshly
-  // built copy always lacks it. Blank it on both sides before comparing, or the side panel
-  // would look "changed" on every single tick and we would clobber the fetched content.
-  const sig = el => {
-    const c = el.cloneNode(true);
-    const rb = c.querySelector("#rolloutbody"); if (rb) rb.innerHTML = "";
-    return c.innerHTML;
+const MODAL = {box: null};
+function closeDialog(){ const root = $("modal"); root.hidden = true; root.replaceChildren(); MODAL.box = null; LIVE_NOTES.clear(); }
+$("modal").addEventListener("mousedown", e => { if (e.target === $("modal")) closeDialog(); });
+// A line that says whether the bridge is live RIGHT NOW, kept current while the dialog is open.
+function liveNote(d, what){
+  const el = h("div");
+  const paint = dv => {
+    const live = dv && dv.state === "live";
+    el.className = live ? "dangerline" : "hint";
+    el.textContent = live ? "⚠ " + devLabel(dv) + " is LIVE — a presenter is streaming through it right now. " + (what || "This will interrupt them.")
+                          : (dv && dv.state === "offline" ? devLabel(dv) + " is offline — this waits in its queue until it is back." : "Nobody is live on " + devLabel(dv) + " right now.");
   };
-  let moved = false;
-  if (rows.innerHTML !== rowsLive.innerHTML) { rowsLive.replaceChildren(...rows.childNodes); moved = true; }
-  if (sig(side) !== sig(sideLive))          { sideLive.replaceChildren(...side.childNodes); moved = true; }
-  return moved;
+  paint(d);
+  const list = LIVE_NOTES.get(d.id) || []; list.push(paint); LIVE_NOTES.set(d.id, list);
+  return el;
 }
 
-// Launch a staged rollout. Uses prompt() (like set-pin/claim) so a 5s panel refresh
-// can't wipe a half-typed form.
-async function startRollout(){
-  const version = (prompt("Target image version to roll out fleet-wide? (e.g. 1.4.2)")||"").trim();
-  if (!version) return;
-  const source = (prompt("Image source — base URL/dir holding manifest.txt + the image:",
-                         "https://releases.netbridge.app/"+version)||"").trim();
-  if (!source) return;
-  try {
-    const r = await api("/admin/rollouts", {method:"POST",
-      body:JSON.stringify({version, source, stage_pct:10})});
-    toast(`rollout ${r.version} started — wave ${r.stage_pct}% · ${r.dispatched_now} dispatched`);
-    refresh();
-  } catch(e){ if(e.message!=="auth") toast("rollout failed: "+e.message); }
+// ------------------------------------------------------------------------------ fleet state
+const S = {devices: new Map(), commands: new Map(), alerts: new Map(), conn: "idle", ready: false,
+           ctl: null, backoff: 1000, last: 0, fails: 0, seenThisConn: null};
+const WAITERS = new Map();    // command id -> [resolve]
+
+function setConn(state){
+  S.conn = state;
+  const el = $("conn"); el.className = "conn " + state;
+  setText($("connText"), {connecting: "Connecting…", live: "Live", reconnecting: "Reconnecting…", offline: "Connection lost — retrying"}[state] || state);
 }
 
-// advance widens to the next wave; the backend returns 409 if a device rolled back or is
-// still updating — we surface that and offer the deliberate force override.
-async function rolloutAction(id, action, ver){
-  if (action==="abort" && !confirm(`Abort rollout of ${ver}?\n\nFurther waves stop. Devices already updated stay updated (a new rollout is how you'd change them).`)) return;
+// ---- the live stream: SSE over fetch, because EventSource cannot send the Authorization header
+async function openStream(){
+  if (S.ctl) S.ctl.abort();
+  const ctl = new AbortController(); S.ctl = ctl;
+  setConn(S.ready ? "reconnecting" : "connecting");
   try {
-    const r = await api(`/admin/rollouts/${id}/${action}`, {method:"POST"});
-    toast(`${action}: ${r.summary || "done"}`);
-    refresh();
-  } catch(e){
-    if (e.message==="auth") return;
-    if (action==="advance" && /\b409\b/.test(e.message)){
-      if (confirm("Widening is blocked — a device rolled back or is still updating. Force the next wave anyway?")){
-        try { const r = await api(`/admin/rollouts/${id}/advance?force=true`, {method:"POST"});
-          toast(`forced advance: ${r.summary}`); refresh(); }
-        catch(e2){ if(e2.message!=="auth") toast("force failed: "+e2.message); }
-      }
-      return;
+    const r = await fetch("/admin/stream", {headers: {"Authorization": "Bearer " + KEY}, signal: ctl.signal, cache: "no-store"});
+    if (r.status === 401 || r.status === 403){ signedOut("Your sign-in is no longer valid — sign in again."); return; }
+    if (!r.ok || !r.body) throw new Error("HTTP " + r.status);
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    S.last = Date.now();
+    for (;;){
+      const {value, done} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true}).replace(/\r/g, "");
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0){ const block = buf.slice(0, i); buf = buf.slice(i + 2); onBlock(block); }
     }
-    toast(`${action} failed: `+e.message);
+  } catch (e) { if (ctl.signal.aborted) return; }
+  if (ctl.signal.aborted || S.ctl !== ctl) return;
+  S.fails++;
+  setConn(S.fails > 3 ? "offline" : "reconnecting");
+  setTimeout(() => { if (KEY && S.ctl === ctl) openStream(); }, S.backoff);
+  S.backoff = Math.min(S.backoff * 2, 15000);
+}
+function onBlock(block){
+  S.last = Date.now();
+  let ev = "message", data = "";
+  for (const line of block.split("\n")){
+    if (!line || line.startsWith(":")) continue;               // keep-alive
+    if (line.startsWith("event:")) ev = line.slice(6).trim();
+    else if (line.startsWith("data:")) data += line.slice(5).trim();
+  }
+  if (!data) return;
+  let o; try { o = JSON.parse(data); } catch (e) { return; }
+  if (ev === "hello"){ S.seenThisConn = new Set(); S.fails = 0; S.backoff = 1000;
+    if (o.who && !WHO){ WHO = o.who; paintWho(); } return; }
+  if (ev === "device"){ if (S.seenThisConn) S.seenThisConn.add(o.id); upsertDevice(o); return; }
+  if (ev === "device_removed"){ removeDevice(o.id); return; }
+  if (ev === "command"){ upsertCommand(o); return; }
+  if (ev === "alert"){ S.alerts.set(o.id, o); schedule("alerts"); return; }
+  if (ev === "ready"){
+    // A device deleted while we were disconnected never gets a device_removed: drop what this
+    // connection's snapshot did not include.
+    if (S.seenThisConn) for (const id of [...S.devices.keys()]) if (!S.seenThisConn.has(id)) removeDevice(id);
+    S.seenThisConn = null; S.ready = true; setConn("live");
+    $("fleetSkeleton").hidden = true; schedule("fleet");
+    if (DR.pending){ DR.pending = null; route(); }          // a link to a bridge opened before the data arrived
+    return;
+  }
+  if (ev === "revoked"){ signedOut("Your admin access was removed."); }
+}
+// A stream that has gone silent (no keep-alive for 45 s) is dead even if the socket says not.
+setInterval(() => { if (KEY && S.ctl && S.last && Date.now() - S.last > 45000){ S.last = Date.now(); openStream(); } }, 10000);
+
+function upsertDevice(d){ S.devices.set(d.id, d); schedule("fleet", d.id); for (const f of (LIVE_NOTES.get(d.id) || [])) f(d); }
+function removeDevice(id){
+  S.devices.delete(id);
+  const r = ROWS.get(id); if (r){ r.tr.remove(); ROWS.delete(id); }
+  if (DR.id === id){ closeDrawer(); toast("That bridge was removed from the fleet.", "warn"); }
+  schedule("fleet");
+}
+function upsertCommand(c){
+  const prev = S.commands.get(c.id) || {};
+  const merged = Object.assign({}, prev, c);
+  if (prev.output && !c.output) merged.output = prev.output;
+  S.commands.set(c.id, merged);
+  const w = WAITERS.get(c.id); if (w){ WAITERS.delete(c.id); w.forEach(fn => fn()); }
+  if (DR.id && merged.device_id === DR.id) schedule("history");
+}
+
+// ---- batched painting: many events in one frame cost one paint
+const DIRTY = {fleet: false, ids: new Set(), alerts: false, history: false};
+let rafPending = false;
+function schedule(what, id){
+  DIRTY[what] = true; if (id) DIRTY.ids.add(id);
+  if (!rafPending){ rafPending = true; requestAnimationFrame(paint); }
+}
+function paint(){
+  rafPending = false;
+  if (DIRTY.fleet){ DIRTY.fleet = false; paintFleet(DIRTY.ids); DIRTY.ids = new Set(); paintOpenAlerts(); }
+  if (DIRTY.alerts){ DIRTY.alerts = false; paintAlertHistory(); }
+  if (DIRTY.history){ DIRTY.history = false; paintHistory(); }
+}
+
+// ------------------------------------------------------------------------------ the table
+const ROWS = new Map();
+let FILTER = "all", QUERY = "";
+function rowFor(d){
+  let r = ROWS.get(d.id);
+  if (r) return r;
+  const c = {num: h("div", {class: "bnum"}), name: h("div", {class: "bname"}), sub: h("div", {class: "bsub mono"}),
+             state: h("td"), session: h("td"), pin: h("td"), health: h("td"), sw: h("td"), seen: h("td", {class: "small muted"})};
+  const tr = h("tr", {tabindex: "0", "data-id": d.id},
+    h("td", {}, h("div", {class: "cell"}, c.num, c.name, c.sub)), c.state, c.session, c.pin, c.health, c.sw, c.seen,
+    h("td", {style: "text-align:right"}, h("span", {class: "chev", "aria-hidden": "true"}, "›")));
+  const open = () => go("#/bridge/" + encodeURIComponent(d.id));
+  tr.addEventListener("click", open);
+  tr.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " "){ e.preventDefault(); open(); } });
+  r = {tr, c}; ROWS.set(d.id, r);
+  return r;
+}
+function statePill(d){
+  const st = d.state || (d.online ? "active" : "offline");
+  const label = st === "offline" ? "Offline " + rel(parseTs(d.last_seen)).replace(" ago", "") : STATE_LABEL[st] || st;
+  return h("span", {class: "pill " + (STATE_PILL[st] || "idle")}, h("i", {class: "d"}), label);
+}
+function sessionCell(d){
+  const t = T(d), ses = (t.pin || {}).session || {}, sm = t.streams || {};
+  if (d.state === "offline" || d.state === "new") return [h("span", {class: "faint"}, "—")];
+  if (sm.video) return [h("div", {class: "cell"}, h("span", {}, "Presenter streaming"),
+    h("span", {class: "l2"}, [ses.peer ? ses.peer : null, ses.age_s != null ? "for " + dur(ses.age_s) : null].filter(Boolean).join(" · ") || "video arriving"))];
+  if (ses.active) return [h("div", {class: "cell"}, h("span", {}, "Unlocked, no video yet"),
+    h("span", {class: "l2"}, "relocks after " + dur(Math.max(0, (t.pin.idle_limit_s || 600) - (ses.idle_s || 0))) + " without video"))];
+  return [h("span", {class: "faint"}, "Idle")];
+}
+function pinCell(d){
+  const p = T(d).pin || {};
+  if (d.state === "offline" && !p.protocol && p.pin_set === undefined) return [h("span", {class: "faint"}, "—")];
+  if (p.lockout) return [pill("bad", "Locked out " + Math.max(1, Math.round((p.lockout_remaining || 0) / 60)) + " min", "3 wrong PINs — clear it from Actions")];
+  if (p.pin_set === false) return [pill("bad", "No PIN", p.required ? "Go-live is blocked until you set a PIN" : "Anyone on the mesh can go live — set a PIN")];
+  const out = [];
+  if (p.pin_set) out.push(pill("ok", "PIN set", p.protocol >= 2 ? "Required on every go-live" : "Older bridge software: the PIN is not enforced on every go-live"));
+  if (p.protocol && p.protocol < 2) out.push(pill("warn", "old gate", "Update this bridge: its PIN can be skipped"));
+  if (p.gate === "unavailable") out.push(pill("warn", "gate off", "The media gate could not be armed"));
+  return [h("div", {class: "pills"}, out.length ? out : [h("span", {class: "faint"}, "—")])];
+}
+function healthCell(d){
+  const t = T(d), pw = t.power || {}, out = [];
+  if (d.state === "offline" || d.state === "new") return [h("span", {class: "faint"}, d.state === "new" ? "joined, not claimed" : "—")];
+  if (pw.live) out.push(pill("bad", "⚡ browning out", pw.summary));
+  else if (pw.ok === false) out.push(pill("warn", "⚡ has browned out", pw.summary));
+  const um = t.usb_misses_per_s;
+  if (typeof um === "number") out.push(pill(um >= 15 ? "warn" : "idle", "USB " + um + "/s", "Missed USB video transfers per second (smooth video measured at 1–10/s)"));
+  const temp = String(t.temp || "").replace("'C", "").replace("C", "");
+  if (temp) out.push(pill(parseFloat(temp) >= 75 ? "warn" : "idle", Math.round(parseFloat(temp)) + "°C"));
+  if (t.wifi) out.push(pill(parseInt(t.wifi, 10) < -75 ? "warn" : "idle", t.wifi + " dBm", "Wi-Fi signal"));
+  const n = (d.alerts || []).length;
+  if (n) out.push(pill("warn", n + " alert" + (n === 1 ? "" : "s")));
+  return [h("div", {class: "pills"}, out.length ? out : [pill("ok", "healthy")])];
+}
+function swCell(d){
+  const t = T(d), ov = t.overrides || {}, q = t.quarantined || [], ota = t.ota || {}, out = [];
+  if (ov.safe_mode) out.push(pill("bad", "SAFE MODE", "3 unhealthy boots in a row — every update is off this boot"));
+  if (q.length) out.push(pill("warn", q.length + " rolled back", "Parked: " + q.join(", ")));
+  if ((ov.active || []).length) out.push(pill("info", (ov.active || []).length + " update" + (ov.active.length === 1 ? "" : "s"), (ov.active || []).join(", ")));
+  if ((ov.pending || []).length) out.push(pill("idle", (ov.pending || []).length + " waiting", "Applies at a safe moment: " + (ov.pending || []).join(", ")));
+  if (ota.state && !["committed", "done", "idle", ""].includes(ota.state) && Date.now() - (parseTs(ota.ts) || 0) < 86400000)
+    out.push(pill(/fail|rolled/.test(ota.state) ? "bad" : "info", "OS " + ota.state, (ota.version || "") + " " + (ota.detail || "")));
+  return [h("div", {class: "cell"}, h("span", {class: "mono small", style: "white-space:nowrap"}, d.version || "?"), out.length ? h("div", {class: "pills"}, out) : null)];
+}
+function paintRow(d){
+  const {tr, c} = rowFor(d);
+  setText(c.num, d.label || (d.claimed ? "no number" : "NEW"));
+  setText(c.name, d.claimed ? devName(d) : "Unclaimed bridge");
+  setText(c.sub, [d.pairing_code, T(d).ip].filter(Boolean).join(" · "));
+  const t = T(d), pin = t.pin || {}, sm = t.streams || {};
+  patch(c.state, JSON.stringify([d.state, d.laptop, d.state === "offline" ? rel(parseTs(d.last_seen)) : ""]), () => [
+    statePill(d), d.laptop ? h("div", {class: "small muted", style: "margin-top:3px"}, "laptop connected") : null]);
+  patch(c.session, JSON.stringify([d.state, sm.video, pin.session, pin.idle_limit_s]), () => sessionCell(d));
+  patch(c.pin, JSON.stringify([d.state, pin.lockout, Math.round((pin.lockout_remaining || 0) / 60), pin.pin_set, pin.required, pin.protocol, pin.gate]), () => pinCell(d));
+  patch(c.health, JSON.stringify([d.state, t.power && [t.power.live, t.power.ok], t.usb_misses_per_s, t.temp, t.wifi, (d.alerts || []).length]), () => healthCell(d));
+  patch(c.sw, JSON.stringify([d.version, t.overrides, t.quarantined, t.ota]), () => swCell(d));
+  setText(c.seen, d.online ? "now" : rel(parseTs(d.last_seen)));
+  tr.classList.toggle("sel", DR.id === d.id);
+}
+function matches(d){
+  if (FILTER !== "all" && d.state !== FILTER) return false;
+  if (!QUERY) return true;
+  const t = T(d);
+  return [d.label, d.name, d.pairing_code, d.id, d.tailscale_ip, t.ip, d.hostname].filter(Boolean).join(" ").toLowerCase().includes(QUERY);
+}
+function paintFleet(ids){
+  const devs = [...S.devices.values()];
+  const counts = {all: devs.length, live: 0, active: 0, degraded: 0, offline: 0, new: 0};
+  for (const d of devs) if (counts[d.state] !== undefined) counts[d.state]++;
+  for (const k of Object.keys(counts)) setText($("n-" + k), counts[k]);
+  const nAlerts = devs.reduce((n, d) => n + (d.alerts || []).length, 0);
+  setText($("navAlerts"), nAlerts); $("navAlerts").hidden = !nAlerts;
+  // Stable order: new bridges first (someone is waiting for them), then by fleet number. It is
+  // recomputed only from identity, so a state change never makes a row jump.
+  devs.sort((a, b) => (a.claimed ? 1 : 0) - (b.claimed ? 1 : 0) || (a.number || 1e9) - (b.number || 1e9)
+                      || devName(a).localeCompare(devName(b)));
+  const body = $("rows");
+  const want = devs.map(d => d.id).join("|"), have = [...body.children].map(tr => tr.dataset.id).join("|");
+  for (const d of devs) if (!ids || !ids.size || ids.has(d.id) || !ROWS.has(d.id)) paintRow(d);
+  if (want !== have) for (const d of devs) body.appendChild(rowFor(d).tr);
+  let shown = 0;
+  for (const d of devs){ const m = matches(d); ROWS.get(d.id).tr.hidden = !m; if (m) shown++; }
+  $("fleetEmpty").hidden = !S.ready || devs.length > 0;
+  $("fleetNoMatch").hidden = !devs.length || shown > 0;
+  if (DR.id && S.devices.has(DR.id)) paintDrawer();
+}
+$("chips").addEventListener("click", e => {
+  const b = e.target.closest(".chip"); if (!b) return;
+  FILTER = b.dataset.f;
+  for (const x of $("chips").children) x.classList.toggle("on", x === b);
+  schedule("fleet");
+});
+$("search").addEventListener("input", e => { QUERY = e.target.value.trim().toLowerCase(); schedule("fleet"); });
+// Relative times ("3 min ago") age without any data changing.
+setInterval(() => { for (const d of S.devices.values()){ const r = ROWS.get(d.id); if (r) setText(r.c.seen, d.online ? "now" : rel(parseTs(d.last_seen))); } }, 15000);
+
+// ------------------------------------------------------------------------------ the drawer
+const DR = {id: null, tab: "overview", el: null, f: {}, histRows: new Map(), fetched: {}};
+const TABS = [["overview", "Overview"], ["actions", "Actions"], ["updates", "Updates"], ["diagnostics", "Diagnostics"], ["history", "History"]];
+function openDrawer(id, tab){
+  const d = S.devices.get(id);
+  if (!d){ if (S.ready){ toast("No such bridge in this fleet.", "warn"); go("#/fleet"); } else { DR.pending = true; } return; }
+  if (DR.id !== id) buildDrawer(d);
+  selectTab(tab || DR.tab || "overview");
+  $("drawer").hidden = false; $("scrim").hidden = false;
+  for (const r of ROWS.values()) r.tr.classList.toggle("sel", r.tr.dataset.id === id);
+}
+function closeDrawer(){
+  $("drawer").hidden = true; $("scrim").hidden = true;
+  DR.id = null; DR.f = {}; DR.histRows = new Map(); DR.fetched = {};
+  for (const r of ROWS.values()) r.tr.classList.remove("sel");
+  if (location.hash.startsWith("#/bridge/")) history.replaceState(null, "", "#/fleet");
+}
+$("scrim").addEventListener("click", () => go("#/fleet"));
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  if (MODAL.box){ closeDialog(); return; }
+  if (!$("drawer").hidden) go("#/fleet");
+});
+function field(key, label){ const dd = h("dd"); DR.f[key] = dd; return [h("dt", {}, label), dd]; }
+function buildDrawer(d){
+  DR.id = d.id; DR.f = {}; DR.histRows = new Map(); DR.fetched = {}; DR.tab = "overview";
+  const tabs = h("div", {class: "dtabs", role: "tablist"}, TABS.map(([k, l]) =>
+    h("button", {type: "button", role: "tab", "data-tab": k, "aria-selected": "false", onclick: () => go("#/bridge/" + encodeURIComponent(d.id) + "/" + k)}, l)));
+  DR.f.hnum = h("div", {class: "bnum"}); DR.f.hname = h("h2"); DR.f.hstate = h("div", {class: "pills"});
+  const head = h("div", {class: "dhd"},
+    h("div", {class: "row1"}, h("div", {class: "title"}, DR.f.hnum, DR.f.hname, DR.f.hstate),
+      h("button", {class: "xbtn", type: "button", "aria-label": "Close", onclick: () => go("#/fleet")}, "×")), tabs);
+  const panels = {};
+  for (const [k] of TABS) panels[k] = h("div", {class: "panel", role: "tabpanel", "data-panel": k, hidden: true});
+  buildOverview(panels.overview, d); buildActions(panels.actions, d); buildUpdates(panels.updates, d);
+  buildDiagnostics(panels.diagnostics, d); buildHistory(panels.history, d);
+  DR.panels = panels;
+  $("drawer").replaceChildren(head, h("div", {class: "dbd"}, Object.values(panels)));
+  paintDrawer();
+}
+function selectTab(tab){
+  if (!TABS.some(([k]) => k === tab)) tab = "overview";
+  DR.tab = tab;
+  for (const b of $("drawer").querySelectorAll(".dtabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
+  for (const [k, p] of Object.entries(DR.panels || {})) p.hidden = k !== tab;
+  const d = S.devices.get(DR.id);
+  if (!d) return;
+  if (tab === "overview" && !DR.fetched.uptime) loadUptime(d);
+  if (tab === "diagnostics" && !DR.fetched.bundles) loadBundles(d);
+  if (tab === "history" && !DR.fetched.history) loadHistory(d);
+  if (tab === "updates") paintUpdatesTab(d);
+}
+
+// ---- Overview
+function buildOverview(p, d){
+  DR.f.claimbox = h("div", {class: "box", hidden: true},
+    h("b", {}, "This bridge just joined the fleet."),
+    h("p", {class: "hint", style: "margin:4px 0 10px"}, "Claim it to name it, give it a fleet number and its mesh key. Until then it is read-only."),
+    h("button", {class: "btn danger", type: "button", onclick: () => claimDialog(S.devices.get(d.id))}, "Claim this bridge…"));
+  DR.f.alerts = h("div");
+  p.append(DR.f.claimbox,
+    h("h3", {}, "Needs attention"), DR.f.alerts,
+    h("h3", {}, "Right now"), h("dl", {class: "kv"}, field("state", "State"), field("session", "Session"), field("laptop", "Meeting laptop"),
+      field("pin", "PIN"), field("path", "Connection"), field("seen", "Last heard from")),
+    h("h3", {}, "Health"), h("dl", {class: "kv"}, field("power", "Power"), field("usb", "USB camera"), field("temp", "Temperature"),
+      field("wifi", "Wi-Fi"), field("disk", "Free space (/data)"), field("upfor", "Up for"), field("services", "Services")),
+    h("h3", {}, "Software"), h("dl", {class: "kv"}, field("version", "Version"), field("updates", "Installed updates"),
+      field("ota", "OS update"), field("config", "Baseline")),
+    h("h3", {}, "Identity"), h("dl", {class: "kv"}, field("number", "Fleet number"), field("name", "Name"), field("code", "Pairing code"),
+      field("mesh", "Mesh address"), field("lan", "Local address"), field("devid", "Device ID")),
+    h("div", {class: "inline", style: "margin-top:12px"},
+      h("button", {class: "btn secondary sm", type: "button", onclick: () => renameDialog(S.devices.get(d.id))}, "Rename / renumber…"),
+      h("button", {class: "btn secondary sm", type: "button", onclick: () => labelDialog(S.devices.get(d.id))}, "Setup label (Wi-Fi name + password)…")),
+    h("h3", {}, "Uptime, last 7 days"), DR.f.uptimeTxt = h("div", {class: "small muted"}, "…"), DR.f.bars = h("div", {class: "bars"}));
+}
+function kvSet(key, text, cls){ const dd = DR.f[key]; if (!dd) return; setText(dd, text); dd.className = cls || ""; }
+function paintDrawer(){
+  const d = S.devices.get(DR.id); if (!d) return;
+  const t = T(d), pin = t.pin || {}, ses = pin.session || {}, sm = t.streams || {}, pw = t.power || {}, ov = t.overrides || {};
+  setText(DR.f.hnum, d.label || (d.claimed ? "no fleet number" : "NEW"));
+  setText(DR.f.hname, d.claimed ? devName(d) : "Unclaimed · " + (d.pairing_code || d.id));
+  patch(DR.f.hstate, JSON.stringify([d.state, d.laptop, d.last_seen]), () => [statePill(d), d.laptop ? pill("idle", "laptop connected") : null]);
+  DR.f.claimbox.hidden = !!d.claimed;
+  patch(DR.f.alerts, JSON.stringify(d.alerts || []), () => (d.alerts || []).length ? (d.alerts || []).map(a => alertRow(d, a))
+    : [h("div", {class: "small muted"}, d.state === "offline" ? "Offline — nothing else can be measured until it is back." : "Nothing — all quiet.")]);
+  kvSet("state", STATE_LABEL[d.state] || d.state);
+  kvSet("session", sm.video ? "Presenter streaming" + (ses.peer ? " from " + ses.peer : "") + (ses.age_s != null ? " · " + dur(ses.age_s) : "")
+    : ses.active ? "Unlocked by a presenter, no video yet — relocks after " + dur(Math.max(0, (pin.idle_limit_s || 600) - (ses.idle_s || 0))) + " without video"
+    : "No session — the bridge is locked" + (pin.last_end && pin.last_end.reason ? " (last session ended: " + pin.last_end.reason + ")" : ""));
+  kvSet("laptop", d.laptop === true ? "Plugged in and using the camera" : d.laptop === false ? "Not connected (" + (t.udc || "no USB host") + ")" : "—");
+  kvSet("pin", pin.lockout ? "LOCKED OUT after 3 wrong PINs — " + dur(pin.lockout_remaining) + " left"
+    : pin.pin_set === false ? (pin.required ? "No PIN set — nobody can go live until you set one" : "No PIN set — anyone on the mesh can go live")
+    : pin.pin_set ? "Set — required on every go-live" + (pin.protocol >= 2 ? "" : " (older software: not enforced)") + (pin.gate === "unavailable" ? " · media gate OFF" : "")
+    : "—", pin.lockout || pin.pin_set === false ? "bad" : "");
+  const mp = t.mesh_path || {};
+  kvSet("path", mp.via ? (mp.via === "direct" ? "Direct over the secure mesh" : mp.via === "relay" ? "Relayed (slower) over the secure mesh" : mp.via) + (mp.detail || mp.note ? " · " + (mp.detail || mp.note) : "") : (d.tailscale_ip ? "Mesh address " + d.tailscale_ip : "—"));
+  kvSet("seen", d.online ? "Now (heartbeat every ~15 s)" : rel(parseTs(d.last_seen)) + (d.last_seen ? " · " + clock(parseTs(d.last_seen)) : ""));
+  kvSet("power", pw.live ? "Browning out NOW — " + (pw.summary || "") : pw.ok === false ? "Has browned out — " + (pw.summary || "") : pw.ok ? "OK" : (t.throttled || "—"), pw.live ? "bad" : "");
+  kvSet("usb", typeof t.usb_misses_per_s === "number" ? t.usb_misses_per_s + " missed transfers/s " + (t.usb_misses_per_s >= 15 ? "— video freezes likely" : "(smooth is 1–10/s)") : "—");
+  kvSet("temp", t.temp ? String(t.temp).replace("'C", " °C") : "—");
+  kvSet("wifi", t.wifi ? t.wifi + " dBm" : "—");
+  kvSet("disk", typeof t.data_free_mb === "number" ? t.data_free_mb + " MB" : "—", typeof t.data_free_mb === "number" && t.data_free_mb < 500 ? "bad" : "");
+  kvSet("upfor", t.uptime || "—");
+  kvSet("services", (t.services || []).map(([n, s]) => n.replace("bridge-", "") + " " + s).join(" · ") || "—");
+  kvSet("version", d.version || "?");
+  kvSet("updates", [ov.safe_mode ? "SAFE MODE (all updates off this boot)" : null, (ov.active || []).length ? "active: " + ov.active.join(", ") : null,
+    (ov.pending || []).length ? "waiting for a safe moment: " + ov.pending.join(", ") : null,
+    (t.quarantined || []).length ? "rolled back: " + t.quarantined.join(", ") : null].filter(Boolean).join(" · ") || "None — built-in files only");
+  const ota = t.ota || {};
+  kvSet("ota", ota.state ? ota.state + (ota.version ? " " + ota.version : "") + (ota.detail ? " — " + ota.detail : "") + (ota.ts ? " · " + rel(parseTs(ota.ts)) : "") : "—");
+  const cf = t.config || {};
+  kvSet("config", !cf.state ? "—" : cf.state === "known-good" ? "Matches the saved known-good baseline" : cf.state === "no baseline" ? "No baseline saved yet"
+    : cf.drift ? "Drifted: " + cf.drift + " setting(s) differ (" + (cf.restorable || 0) + " restorable here)" : cf.state);
+  kvSet("number", d.label || "—"); kvSet("name", d.name || "—"); kvSet("code", d.pairing_code || "—");
+  kvSet("mesh", d.tailscale_ip || "—"); kvSet("lan", t.ip || "—"); kvSet("devid", d.id);
+  if (DR.tab === "updates") paintUpdatesTab(d);
+  if (DR.f.actOffline) DR.f.actOffline.hidden = d.online;
+}
+function alertRow(d, a){
+  const fix = a.fix && d.claimed ? h("button", {class: "btn secondary sm", type: "button",
+    onclick: (e) => { e.stopPropagation(); doAction(d.id, a.fix.command); }}, a.fix.label) : null;
+  return h("div", {class: "alertrow"}, h("span", {class: "adot" + (["offline", "pin_not_set", "pin_lockout", "safe_mode", "os_update_failed"].includes(a.kind) ? " bad" : "")}),
+    h("div", {class: "abody"}, h("div", {class: "at"}, ALERT_LABEL[a.kind] || a.kind.replace(/_/g, " ")), h("div", {class: "ad"}, a.detail || "")), fix);
+}
+async function loadUptime(d){
+  DR.fetched.uptime = true;
+  const devId = d.id;
+  try {
+    const u = await api(`/admin/devices/${devId}/uptime`);
+    if (DR.id !== d.id) return;
+    const today = u.windows && u.windows[0] ? u.windows[0].pct : 0;
+    let txt = "Last 24 h: " + today + "% · clean streak " + dur(u.streak_s);
+    const inc = (u.incidents || []).filter(i => !i.ongoing).slice(-1)[0];
+    if (inc) txt += " · last outage " + clock(parseTs(inc.start)) + " (" + dur(inc.seconds) + ")";
+    setText(DR.f.uptimeTxt, txt);
+    DR.f.bars.replaceChildren(...[...(u.windows || [])].reverse().map(w => h("i", {title: (w.ago_days === 0 ? "last 24 h" : (w.ago_days + 1) + " days ago") + ": " + w.pct + "%",
+      style: "height:" + Math.max(3, Math.round(w.pct * 0.34)) + "px;background:" + (w.pct >= 99 ? "var(--ok)" : w.pct > 0 ? "var(--warn)" : "var(--line)")})));
+  } catch (e) { if (e.message !== "auth") setText(DR.f.uptimeTxt, "Uptime unavailable: " + e.message); }
+}
+
+// ---- Actions
+function buildActions(p, d){
+  DR.f.actOffline = h("div", {class: "warnline", hidden: true}, "This bridge is offline. Actions wait in its queue and run when it is back; a read that is not collected within a few minutes expires.");
+  const groups = h("div");
+  let showAll = false;
+  const toggle = h("button", {class: "linkbtn", type: "button"});
+  const render = () => {
+    groups.replaceChildren();
+    let head = null, list = null;
+    for (const [v, l] of ACTIONS){
+      if (v.startsWith("#")){ head = v.slice(1); list = null; continue; }
+      if (!showAll && !COMMON.has(v)) continue;
+      if (!list){ list = h("div", {class: "actlist"}); groups.appendChild(h("div", {class: "actgroup"}, h("div", {class: "gh"}, head), list)); }
+      const disruptive = DISRUPTIVE.has(v) || DISRUPTIVE.has(v.split(":")[0]);
+      list.appendChild(h("button", {class: "act" + (disruptive ? " warnact" : ""), type: "button", onclick: () => doAction(d.id, v)},
+        h("span", {}, l), h("span", {class: "go"}, "›")));
+    }
+    const hidden = ACTIONS.filter(([v]) => v && !v.startsWith("#") && !COMMON.has(v)).length;
+    toggle.textContent = showAll ? "Show fewer" : "Show all actions (" + hidden + " more)";
+  };
+  toggle.onclick = () => { showAll = !showAll; render(); };
+  render();
+  const claimNote = h("p", {class: "hint", hidden: !!d.claimed}, "Only reads work until this bridge is claimed.");
+  const unclaimed = h("div", {class: "actlist", hidden: !!d.claimed},
+    ["diagnose", "running", "logs"].map(v => h("button", {class: "act", type: "button", onclick: () => doAction(d.id, v)}, h("span", {}, ACTION_LABEL[v]), h("span", {class: "go"}, "›"))));
+  const main = h("div", {hidden: !d.claimed}, groups, toggle,
+    h("h3", {}, "This bridge in the fleet"),
+    h("div", {class: "actlist"},
+      h("button", {class: "act", type: "button", onclick: () => renameDialog(S.devices.get(d.id))}, h("span", {}, "Rename or renumber…"), h("span", {class: "go"}, "›")),
+      h("button", {class: "act", type: "button", onclick: () => labelDialog(S.devices.get(d.id))}, h("span", {}, "Setup label — Wi-Fi name and password…"), h("span", {class: "go"}, "›")),
+      h("button", {class: "act warnact", type: "button", onclick: () => forgetDialog(S.devices.get(d.id))}, h("span", {}, "Remove from the fleet… ⚠ deletes its history"), h("span", {class: "go"}, "›"))));
+  p.append(DR.f.actOffline, claimNote, unclaimed, main);
+}
+
+// ---- Updates tab
+function buildUpdates(p, d){
+  DR.f.upState = h("dl", {class: "kv"});
+  p.append(h("h3", {}, "What is installed"), DR.f.upState,
+    h("h3", {}, "Change it"),
+    h("div", {class: "actlist"},
+      h("button", {class: "act warnact", type: "button", onclick: () => doAction(d.id, "deploy-script")}, h("span", {}, "Install a signed file from the catalog…"), h("span", {class: "go"}, "›")),
+      h("button", {class: "act warnact", type: "button", onclick: () => doAction(d.id, "revert-script")}, h("span", {}, "Undo an installed file (back to the built-in copy)…"), h("span", {class: "go"}, "›")),
+      h("button", {class: "act warnact", type: "button", onclick: () => doAction(d.id, "unquarantine")}, h("span", {}, "Put back an update that rolled itself back…"), h("span", {class: "go"}, "›")),
+      h("button", {class: "act warnact", type: "button", onclick: () => doAction(d.id, "update")}, h("span", {}, "Install an OS version… (reboots; switches back by itself if unhealthy)"), h("span", {class: "go"}, "›")),
+      h("button", {class: "act", type: "button", onclick: () => doAction(d.id, "running")}, h("span", {}, "What code is it running? (exact file fingerprints)"), h("span", {class: "go"}, "›"))),
+    h("p", {class: "hint"}, "Files install at a safe moment — the camera only once the meeting laptop is unplugged. A crash-looping update is parked automatically, and after 3 unhealthy boots the bridge runs only its built-in files (safe mode)."));
+}
+function paintUpdatesTab(d){
+  const t = T(d), ov = t.overrides || {}, ota = t.ota || {};
+  patch(DR.f.upState, JSON.stringify([d.version, ov, t.quarantined, ota]), () => [
+    h("dt", {}, "OS version"), h("dd", {class: "mono"}, d.version || "?"),
+    h("dt", {}, "Installed files"), h("dd", {}, (ov.active || []).length ? ov.active.join(", ") : "none — built-in files only"),
+    h("dt", {}, "Waiting to apply"), h("dd", {}, (ov.pending || []).length ? ov.pending.join(", ") : "nothing"),
+    h("dt", {}, "Rolled back"), h("dd", {class: (t.quarantined || []).length ? "bad" : ""}, (t.quarantined || []).length ? t.quarantined.join(", ") : "nothing"),
+    h("dt", {}, "Safe mode"), h("dd", {class: ov.safe_mode ? "bad" : ""}, ov.safe_mode ? "ON — every update is off this boot (" + (ov.boot_attempts || 0) + " unhealthy boots)" : "off"),
+    h("dt", {}, "Last OS update"), h("dd", {}, ota.state ? ota.state + " " + (ota.version || "") + (ota.detail ? " — " + ota.detail : "") + (ota.ts ? " · " + rel(parseTs(ota.ts)) : "") : "none recorded")]);
+}
+
+// ---- Diagnostics tab
+function buildDiagnostics(p, d){
+  DR.f.diagOut = h("div");
+  DR.f.bundles = h("div", {class: "small muted"}, "…");
+  const unit = h("select", {"aria-label": "Service"}, [["", "all services"], ["bridge-uvcd", "camera (uvcd)"], ["bridge-feeder-net", "video feeder"],
+    ["bridge-web", "status page"], ["bridge-agent", "fleet agent"], ["bridge-pin-sessions", "PIN sessions"], ["bridge-overrides", "updates"],
+    ["bridge-supervisor", "supervisor"], ["bridge-gadget", "USB gadget"]].map(([v, l]) => h("option", {value: v}, l)));
+  const lines = h("select", {"aria-label": "Lines"}, ["100", "200", "500", "1000"].map(v => h("option", {value: v, selected: v === "200"}, v + " lines")));
+  const path = h("input", {type: "text", value: "/run/netbridge-usb-video.txt", "aria-label": "Path on the bridge"});
+  DR.f.logsOut = h("div"); DR.f.readOut = h("div");
+  p.append(
+    h("h3", {}, "Diagnose it for me"),
+    h("div", {class: "inline"}, h("button", {class: "btn primary sm", type: "button", onclick: () => doAction(d.id, "jitter-diagnose")}, "Run the diagnosis"),
+      h("span", {class: "small muted"}, "Measures power, path, rates and config, names the most likely cause and offers its fix. Changes nothing.")),
+    DR.f.diagOut,
+    h("h3", {}, "Diagnostics bundles"),
+    DR.f.bundles,
+    h("div", {class: "inline", style: "margin-top:8px"}, h("button", {class: "btn secondary sm", type: "button", onclick: () => doAction(d.id, "diagnose")}, "Collect a fresh bundle (~40 s)")),
+    h("h3", {}, "Recent logs"),
+    h("div", {class: "inline"}, unit, lines, h("button", {class: "btn secondary sm", type: "button",
+      onclick: () => runRead(d.id, "logs", Object.assign({lines: parseInt(lines.value, 10)}, unit.value ? {unit: unit.value} : {}), DR.f.logsOut)}, "Fetch")),
+    DR.f.logsOut,
+    h("h3", {}, "Read a file"),
+    h("div", {class: "inline"}, path, h("button", {class: "btn secondary sm", type: "button",
+      onclick: () => runRead(d.id, "read-file", {path: path.value.trim(), lines: 200, tail: true}, DR.f.readOut)}, "Read")),
+    h("p", {class: "hint"}, "Read-only. The bridge refuses anything outside its allowed folders and redacts anything that looks like a credential."),
+    DR.f.readOut);
+}
+async function loadBundles(d){
+  DR.fetched.bundles = true;
+  const devId = d.id;
+  try {
+    const list = await api(`/admin/devices/${devId}/diagnostics`);
+    if (DR.id !== d.id) return;
+    if (!list.length){ DR.f.bundles.replaceChildren("No bundle yet — collect one: service logs, USB state, network and power, gathered on the bridge."); return; }
+    DR.f.bundles.replaceChildren(h("div", {class: "actlist"}, list.slice(0, 5).map(b => h("div", {class: "inline"},
+      h("span", {class: "mono small", style: "flex:1"}, b.filename + " · " + kb(b.size) + " · " + rel(parseTs(b.created_at))),
+      h("button", {class: "btn ghost sm", type: "button", onclick: () => downloadBundle(b)}, "Download")))));
+  } catch (e) { if (e.message !== "auth") DR.f.bundles.replaceChildren("Bundles unavailable: " + e.message); }
+}
+async function downloadBundle(b){
+  try {
+    const r = await fetch(`/admin/diagnostics/${b.id}`, {headers: {"Authorization": "Bearer " + KEY}});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const url = URL.createObjectURL(await r.blob());
+    const a = h("a", {href: url, download: b.filename}); document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    toast("Downloaded " + b.filename, "ok");
+  } catch (e) { toast("Download failed: " + e.message, "bad"); }
+}
+// A read command whose answer is shown right where it was asked for.
+async function runRead(devId, type, args, outEl){
+  const d = S.devices.get(devId); if (!d) return;
+  outEl.replaceChildren(h("div", {class: "small muted", style: "margin-top:8px"}, "Asked the bridge… (it answers on its next check-in, ~15 s)"));
+  try {
+    const r = await queueCommand(d, type, args, false, {quietResult: true});
+    const c = await followCommand(d.id, devLabel(d), type, r.id, r.timeout_s, {quiet: true});
+    if (outEl.isConnected) outEl.replaceChildren(resultBlock(d.id, c));
+  } catch (e) { if (e.message !== "auth" && outEl.isConnected) outEl.replaceChildren(h("div", {class: "dangerline", style: "margin-top:8px"}, e.message)); }
+}
+function resultBlock(devId, c){
+  if (!c) return h("div", {class: "warnline", style: "margin-top:8px"}, "No answer yet — state UNKNOWN. It will appear in History when the bridge reports.");
+  const pre = h("pre", {class: "out"}, c.output || c.fail_reason || "(no output)");
+  if (c.output_truncated) fullOutput(devId, c.id).then(o => { if (o) pre.textContent = o; });
+  return h("div", {}, h("div", {class: "small muted", style: "margin-top:8px"}, "#" + c.id + " · " + String(c.status).toUpperCase() + " · " + clock(parseTs(c.completed_at))), pre);
+}
+async function fullOutput(devId, cmdId){
+  try { const list = await api(`/admin/devices/${devId}/commands?limit=60`); const c = list.find(x => x.id === cmdId); return c ? c.output : null; }
+  catch (e) { return null; }
+}
+
+// ---- History tab
+function buildHistory(p, d){
+  DR.f.hist = h("tbody");
+  DR.f.histEmpty = h("div", {class: "empty"}, "No commands yet.");
+  p.append(h("p", {class: "small muted", style: "margin:0 0 10px"}, "Every command sent to this bridge, live — queued, delivered, then done or failed, with what the bridge answered."),
+    h("div", {class: "card tablecard"}, h("table", {class: "grid hist"}, h("thead", {}, h("tr", {}, ["#", "Command", "Status", "Asked", "Took", ""].map(x => h("th", {}, x)))), DR.f.hist), DR.f.histEmpty));
+}
+async function loadHistory(d){
+  DR.fetched.history = true;
+  try { const list = await api(`/admin/devices/${d.id}/commands?limit=50`); for (const c of list) upsertCommand(Object.assign({device_id: d.id}, c)); }
+  catch (e) {}
+  schedule("history");
+}
+const STATUS_PILL = {pending: "idle", sent: "info", done: "ok", succeeded: "ok", failed: "bad", rejected: "bad", expired: "warn", cancelled: "idle"};
+function paintHistory(){
+  if (!DR.id || !DR.f.hist) return;
+  const cmds = [...S.commands.values()].filter(c => c.device_id === DR.id).sort((a, b) => b.id - a.id).slice(0, 60);
+  DR.f.histEmpty.hidden = cmds.length > 0;
+  for (const c of cmds){
+    let r = DR.histRows.get(c.id);
+    if (!r){
+      const out = h("tr", {class: "exp", hidden: true}, h("td", {colspan: "6"}, h("pre", {class: "out"})));
+      const tog = h("button", {class: "linkbtn", type: "button"}, "output");
+      const cancel = h("button", {class: "linkbtn", type: "button", hidden: true}, "cancel");
+      const tr = h("tr", {}, h("td", {class: "mono"}, "#" + c.id), h("td"), h("td"), h("td", {class: "small muted"}), h("td", {class: "small muted"}),
+        h("td", {style: "text-align:right;white-space:nowrap"}, cancel, " ", tog));
+      tog.onclick = () => { out.hidden = !out.hidden; if (!out.hidden){ const cc = S.commands.get(c.id) || c;
+        out.querySelector("pre").textContent = cc.output || cc.fail_reason || "(no output yet)";
+        if (cc.output_truncated) fullOutput(DR.id, c.id).then(o => { if (o) out.querySelector("pre").textContent = o; }); } };
+      cancel.onclick = () => cancelCommand(c.device_id, c.id, devLabel(S.devices.get(c.device_id)));
+      r = {tr, out, cancel}; DR.histRows.set(c.id, r);
+    }
+    const [, tdType, tdStatus, tdAsked, tdTook] = r.tr.children;
+    setText(tdType, ACTION_LABEL[c.type] ? c.type : c.type);
+    patch(tdStatus, c.status, () => pill(STATUS_PILL[c.status] || "idle", c.status === "done" ? "succeeded" : c.status));
+    setText(tdAsked, clock(parseTs(c.created_at)));
+    const t0 = parseTs(c.created_at), t1 = parseTs(c.completed_at);
+    setText(tdTook, t0 && t1 ? dur((t1 - t0) / 1000) : c.status === "pending" ? "queued" : c.status === "sent" ? "running…" : "—");
+    r.cancel.hidden = c.status !== "pending";
+    if (!r.out.hidden) setText(r.out.querySelector("pre"), c.output || c.fail_reason || "(no output yet)");
+  }
+  const want = cmds.map(c => c.id).join("|"), have = [...DR.f.hist.children].filter(tr => !tr.classList.contains("exp")).map(tr => tr.firstChild.textContent.slice(1)).join("|");
+  if (want !== have) for (const c of cmds){ const r = DR.histRows.get(c.id); DR.f.hist.append(r.tr, r.out); }
+}
+
+// ------------------------------------------------------------------------------- commands
+async function queueCommand(d, type, args, confirmed, opt = {}){
+  const r = await api(`/admin/devices/${d.id}/commands`, {method: "POST", body: JSON.stringify({type, args, confirm: confirmed})});
+  if (r.deduplicated){
+    // The fleet handed back an EXISTING command instead of queuing a second one. Say so:
+    // silently returning an older id would read as a fresh action having been taken.
+    toast(type + " was already in flight on " + devLabel(d) + " — following #" + r.id + ", not a second one", "info");
+  } else if (!opt.quietResult){
+    toast("Queued " + type + " on " + devLabel(d) + " — #" + r.id + (d.online ? "" : " (runs when it is back online)"), "info");
+  }
+  upsertCommand(Object.assign({device_id: d.id, type, status: r.status || "pending", created_at: new Date().toISOString()}, r));
+  if (!opt.quietResult) followCommand(d.id, devLabel(d), type, r.id, r.timeout_s).then(c => {
+    // a fresh bundle appears in the open Diagnostics tab without a reload
+    if (c && (c.status === "done" || c.status === "succeeded") && type === "diagnose" && DR.id === d.id) loadBundles(d);
+  });
+  return r;
+}
+async function waitForCommand(devId, cmdId, maxMs, onUpdate){
+  const t0 = Date.now();
+  for (;;){
+    const c = S.commands.get(cmdId);
+    if (c && onUpdate) onUpdate(c);
+    if (c && TERMINAL.has(c.status)) return c;
+    if (Date.now() - t0 > maxMs) return null;
+    await new Promise(res => { const w = WAITERS.get(cmdId) || []; w.push(res); WAITERS.set(cmdId, w); setTimeout(res, 5000); });
+    if (S.conn !== "live"){               // the stream is down: ask directly
+      try { const list = await api(`/admin/devices/${devId}/commands?limit=40`, {quiet: true});
+            const x = list.find(y => y.id === cmdId); if (x) upsertCommand(Object.assign({device_id: devId}, x)); }
+      catch (e) { if (e.message === "auth") return null; }
+    }
+  }
+}
+async function followCommand(devId, devName, type, cmdId, timeoutS, opt = {}){
+  // FOLLOW IT TO A TERMINAL STATE and say what actually happened. A command that EXPIRED,
+  // FAILED or was refused must never look like one that succeeded - a fleet that cannot tell
+  // you whether the reboot you ordered happened is a request form, not an operations tool.
+  // While a disruptive command is still pending (the bridge has not collected it) it can be
+  // recalled; once `sent`, the bridge already has it and "cancel" would be a promise we
+  // cannot keep.
+  let offered = false, offer = null;
+  const c = await waitForCommand(devId, cmdId, ((timeoutS || 240) + 120) * 1000, row => {
+    if (row.status !== "pending"){ if (offer){ offer.remove(); offer = null; } return; }   // collected: no longer recallable
+    if (offered) return;
+    if (!DISRUPTIVE.has(type) && !BACKEND_CONFIRM.has(type)) return;      // don't nag on reads
+    offered = true;
+    offer = toast("“" + type + "” is still queued on " + devName + " (#" + cmdId + ") — the bridge has not picked it up yet.", "info",
+          {action: "Cancel it", onAction: () => cancelCommand(devId, cmdId, devName), ms: 60000});
+  });
+  if (offer) offer.remove();
+  if (!c){
+    // No terminal state inside the window. That is NOT success and is never reported as one.
+    toast(type + " on " + devName + ": still no result for #" + cmdId + " — state UNKNOWN, check its History", "warn");
+    return null;
+  }
+  const detail = String(c.output || c.fail_reason || "").trim().split("\n").slice(-1)[0].slice(0, 140);
+  const view = {action: "View", onAction: () => go("#/bridge/" + encodeURIComponent(devId) + "/history")};
+  if (c.status === "done" || c.status === "succeeded"){
+    if (!opt.quiet) toast(type + " on " + devName + ": SUCCEEDED (#" + cmdId + ")", "ok", view);
+  } else if (c.status === "cancelled"){
+    toast(type + " on " + devName + ": cancelled (#" + cmdId + ") — the bridge never received it", "info");
+  } else if (c.status === "expired"){
+    toast(type + " on " + devName + ": EXPIRED — the bridge never reported back (#" + cmdId + ")", "bad", view);
+  } else {
+    toast(type + " on " + devName + ": " + String(c.status).toUpperCase() + " (#" + cmdId + ")" + (detail ? " — " + detail : ""), "bad", view);
+  }
+  return c;
+}
+async function cancelCommand(devId, cmdId, devName){
+  const c = S.commands.get(cmdId);
+  if (c && c.status !== "pending"){ toast("Too late to cancel #" + cmdId + " — the bridge already has it.", "warn"); return; }
+  try {
+    await api(`/admin/devices/${devId}/commands/${cmdId}`, {method:"DELETE"});
+    toast("Cancelled #" + cmdId + " — " + (devName || "the bridge") + " never received it.", "ok");
+  } catch (e) {
+    if (e.message === "auth") return;
+    toast(e.status === 409 ? "Too late to cancel #" + cmdId + " — the bridge already has it (409)." : "Could not cancel #" + cmdId + ": " + e.message, e.status === 409 ? "warn" : "bad");
   }
 }
 
-async function addUser(){
-  const email = $("nu-email").value.trim(), role = $("nu-role").value;
-  if (!email) return;
+// --------------------------------------------------------------------------------- actions
+// Every button, menu entry and alert fix comes through here, so each asks the same way.
+async function doAction(devId, value){
+  const d = S.devices.get(devId); if (!d || !value) return;
+  let [type, mode] = value.split(":");
+  // `profile:wan` carries a MODE, `jitter-fix:2` a RUNG: the same colon syntax and nothing else
+  // - sending {mode:"2"} to jitter-fix is refused by the agent's validator.
+  let args = mode ? (type === "jitter-fix" ? {rung: parseInt(mode, 10)} : {mode}) : {};
+  if (type === "mesh-key") return meshKeyDialog(d);
+  if (type === "set-pin") return setPinDialog(d);
+  if (type === "read-file"){ go("#/bridge/" + encodeURIComponent(d.id) + "/diagnostics"); return; }
+  if (type === "logs"){ go("#/bridge/" + encodeURIComponent(d.id) + "/diagnostics"); return; }
+  if (type === "deploy-script") return deployDialog([d]);
+  if (type === "revert-script") return revertDialog(d);
+  if (type === "unquarantine") return unquarantineDialog(d);
+  if (type === "update") return osUpdateDialog([d]);
+  if (type === "golden-save") return goldenSaveDialog(d);
+  if (type === "golden-restore" && cfgState(d) === "no baseline"){
+    toast(devLabel(d) + " has no baseline yet — save one first, while it is working.", "warn"); return;
+  }
+  if (type === "gadget-tune"){
+    // Cannot be applied to a running gadget (configfs refuses; forcing it took a live bridge down
+    // twice). The file is written now and read at the next boot; the reboot is a separate click.
+    args = {key: "UAC2_C_SYNC", value: mode};
+    openDialog({title: "Set the audio sync mode to “" + mode + "”?",
+      body: [h("p", {}, "This writes a setting on " + devLabel(d) + "; it changes nothing yet. Reboot the bridge when you are ready for it to take effect.")],
+      ok: "Write the setting", onOk: () => queueCommand(d, type, args, false)});
+    return;
+  }
+  if (type === "jitter-diagnose") return runDiagnosis(d);
+  return confirmAndRun(d, type, value, args);
+}
+function confirmAndRun(d, type, value, args){
+  // Confirmed here becomes confirm:true on the wire. The backend independently refuses a
+  // destructive command without it, so the two must agree - and ONLY a dialog the operator
+  // actually accepted sets it.
+  let confirmed = false;
+  const disruptive = DISRUPTIVE.has(type) || DISRUPTIVE.has(value);
+  if (!disruptive && !BACKEND_CONFIRM.has(type)) return queueCommand(d, type, args, confirmed);
+  const label = ACTION_LABEL[value] || type;
+  const why = {restart: "Restarts the video and audio services. The meeting sees a ~5 s freeze.",
+    reboot: "Reboots the whole bridge. The meeting loses the camera, mic and speaker for ~30 s; the laptop re-detects them.",
+    "reset-clock": "Rebuilds the USB audio device. The meeting laptop's camera, mic and speaker drop and re-enumerate — re-select them there.",
+    profile: "Sets the bridge's receive buffer to the WAN profile and restarts media. ~5 s video freeze.",
+    lock: "Ends the live PIN session at once: the presenter's video and voice stop being accepted until someone enters the PIN again. Media services keep running.",
+    "golden-restore": "Rewrites only the tunable settings back to the known-good baseline and restarts just what changed. Anything that needs a code deploy is reported, not silently \"fixed\".",
+    "jitter-fix": "Deepest buffers everywhere. ~5 s video freeze."}[type] || label;
+  const hot = d.state === "live";
+  openDialog({
+    title: label.replace(/ ⚠.*$/, "").replace(/…$/, "") + " — " + devLabel(d) + "?",
+    body: [h("p", {}, why), liveNote(d)],
+    ok: hot ? "Interrupt and " + type : type === "lock" ? "Lock it now" : "Yes, " + type, okClass: disruptive ? "danger" : "primary",
+    onOk: async () => {
+      if (disruptive){ confirmed = true; } else if (BACKEND_CONFIRM.has(type)){ confirmed = true; }
+      await queueCommand(d, type, args, confirmed);
+    }});
+}
+function meshKeyDialog(d){
+  const devId = d.id;
+  // Not a device command: a control-plane action (type === "mesh-key"). Mints a fresh tailnet
+  // key the bridge collects on its next check-in - needed when its ephemeral mesh node was
+  // garbage-collected while it was offline and it cannot rejoin by itself.
+  openDialog({title: "Re-issue the mesh key for " + devLabel(d) + "?",
+    body: [h("p", {}, "The bridge picks up a fresh key on its next check-in (~15 s) and rejoins the secure mesh. Safe to repeat; nothing is restarted.")],
+    ok: "Re-issue key", onOk: async () => { const r = await api(`/admin/devices/${devId}/mesh-key`, {method: "POST"}); toast("Mesh key re-issued for " + devLabel(d) + " — " + (r.note || ""), "ok"); }});
+}
+function setPinDialog(d){
+  const gen = h("input", {type: "radio", name: "pinmode", checked: true});
+  const own = h("input", {type: "radio", name: "pinmode"});
+  const pinIn = h("input", {type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "8", placeholder: "4–8 digits", disabled: true, "aria-label": "PIN"});
+  gen.onchange = own.onchange = () => { pinIn.disabled = !own.checked; if (own.checked) pinIn.focus(); };
+  const p = T(d).pin || {};
+  openDialog({title: "Set the PIN for " + devLabel(d),
+    body: [h("p", {}, "Presenters type this PIN in the NetBridge app every time they go live on this bridge. Changing it does not end a session that is already live."),
+      p.protocol && p.protocol < 2 ? h("div", {class: "warnline"}, "This bridge runs older software that does not require the PIN on every go-live. Update it (Updates tab) to enforce it.") : null,
+      h("label", {class: "radio"}, gen, "Generate a random 6-digit PIN"),
+      h("label", {class: "radio"}, own, "Choose it myself"), pinIn,
+      h("p", {class: "hint"}, "You see the PIN once, on the next screen. The fleet keeps no copy — hand it to your presenter yourself.")],
+    ok: "Set PIN",
+    onOk: async () => {
+      const body = {};
+      if (own.checked){ const v = pinIn.value.trim(); if (!/^\d{4,8}$/.test(v)) throw new Error("The PIN is 4 to 8 digits."); body.pin = v; }
+      const devId = d.id;
+      const r = await api(`/admin/devices/${devId}/pin`, {method: "POST", body: JSON.stringify(body)});
+      upsertCommand({id: r.command_id, device_id: d.id, type: "set-pin", status: "pending", created_at: new Date().toISOString()});
+      followCommand(d.id, devLabel(d), "set-pin", r.command_id, 120);
+      openDialog({title: "The new PIN for " + devLabel(d),
+        body: [h("div", {class: "pinbig", "aria-label": "PIN"}, r.pin),
+          h("p", {}, d.online ? "The bridge applies it on its next check-in (~15 s)." : "The bridge is offline — it applies the PIN when it is back."),
+          h("p", {class: "hint"}, "This is the only time the PIN is shown. Deliver it yourself — a call, a message, in person.")],
+        ok: "Copy PIN", cancel: "Done",
+        onOk: async () => { try { await navigator.clipboard.writeText(r.pin); toast("PIN copied.", "ok"); } catch (e) { throw new Error("Copy was blocked by the browser — write it down instead."); } return true; }});
+      return true;
+    }});
+}
+async function catalog(kind){
+  const key = "_cat_" + kind, now = Date.now();
+  if (S[key] && now - S[key].t < 20000) return S[key].v;
+  const v = await api(kind === "ota" ? "/admin/payloads/ota" : "/admin/payloads");
+  S[key] = {t: now, v}; return v;
+}
+function bridgePicker(preselected, filterFn){
+  const box = h("div", {class: "picklist"});
+  const checks = [];
+  const devs = [...S.devices.values()].filter(x => x.claimed && (!filterFn || filterFn(x))).sort((a, b) => (a.number || 1e9) - (b.number || 1e9));
+  for (const x of devs){
+    const cb = h("input", {type: "checkbox", checked: preselected.some(p => p.id === x.id)});
+    checks.push([cb, x]);
+    box.appendChild(h("label", {class: "check"}, cb, devLabel(x), " ", statePill(x)));
+  }
+  if (!devs.length) box.appendChild(h("p", {class: "small muted"}, "No claimed bridges."));
+  return {el: box, picked: () => checks.filter(([cb]) => cb.checked).map(([, x]) => S.devices.get(x.id) || x)};
+}
+async function deployDialog(preselected, presetName){
+  let files = [];
+  try { files = (await catalog("files")).filter(f => f.signed); } catch (e) { if (e.message !== "auth") toast("Could not read the catalog: " + e.message, "bad"); return; }
+  if (!files.length){ openDialog({title: "Nothing to install yet", body: [h("p", {}, "No signed file has been published to the fleet."),
+    h("p", {class: "hint"}, "On the Mac: bash tools/publish-script.sh <file> — it signs the file and uploads it here.")], ok: null, cancel: "Close"}); return; }
+  const sel = h("select", {}, files.map(f => h("option", {value: f.name, selected: f.name === presetName}, f.name + " · " + f.sha256 + " · " + clock(f.mtime * 1000))));
+  const now = h("input", {type: "checkbox"});
+  const pick = bridgePicker(preselected);
+  let confirmed = false;
+  openDialog({title: "Install a signed file", wide: true,
+    body: [h("label", {class: "fl"}, "File"), sel,
+      h("label", {class: "fl"}, "On which bridges"), pick.el,
+      h("label", {class: "check"}, now, "Apply immediately instead of at the next safe moment"),
+      h("p", {class: "hint"}, "Each bridge checks the signature before installing and at every start, restarts only that service, and parks the file automatically if it crash-loops. Camera files wait until the meeting laptop is unplugged.")],
+    ok: "Install", okClass: "danger",
+    onOk: async () => {
+      const devs = pick.picked(); if (!devs.length) throw new Error("Pick at least one bridge.");
+      const live = devs.filter(x => x.state === "live");
+      if (live.length && !window.confirm(live.map(devLabel).join(", ") + (live.length === 1 ? " is" : " are") + " LIVE right now. Install anyway?")) return true;
+      confirmed = true;
+      for (const x of devs) await queueCommand(x, "deploy-script", Object.assign({name: sel.value, source: location.origin + "/payloads"}, now.checked ? {now: true} : {}), confirmed);
+    }});
+}
+async function osUpdateDialog(preselected, presetVersion){
+  let vers = [];
+  try { vers = (await catalog("ota")).filter(v => v.signed); } catch (e) { if (e.message !== "auth") toast("Could not read the OS versions: " + e.message, "bad"); return; }
+  if (!vers.length){ openDialog({title: "No OS version published", body: [h("p", {}, "Publish a built image first."),
+    h("p", {class: "hint"}, "On the Mac: bash tools/publish-ota.sh <image> — it signs the manifest and uploads it here.")], ok: null, cancel: "Close"}); return; }
+  const sel = h("select", {}, vers.map(v => h("option", {value: v.version, selected: v.version === presetVersion}, v.version + (v.bytes ? " · " + kb(v.bytes) : "") + (v.built ? " · built " + v.built : ""))));
+  const force = h("input", {type: "checkbox"});
+  const pick = bridgePicker(preselected);
+  let confirmed = false;
+  openDialog({title: "Install an OS version", wide: true,
+    body: [h("label", {class: "fl"}, "Version"), sel, h("label", {class: "fl"}, "On which bridges"), pick.el,
+      h("p", {}, "The bridge downloads the OS into its spare slot, reboots into it (~1 min offline) and keeps it only if it comes back healthy and reaches the fleet — otherwise it switches back to the current OS by itself."),
+      h("label", {class: "check"}, force, "Install even if a presenter is live (normally refused)")],
+    ok: "Install and reboot", okClass: "danger",
+    onOk: async () => {
+      const devs = pick.picked(); if (!devs.length) throw new Error("Pick at least one bridge.");
+      confirmed = true;
+      for (const x of devs) await queueCommand(x, "update", Object.assign({version: sel.value}, force.checked ? {force: true} : {}), confirmed);
+    }});
+}
+function revertDialog(d){
+  const active = (T(d).overrides || {}).active || [];
+  const inp = active.length ? h("select", {}, active.map(n => h("option", {value: n}, n))) : h("input", {type: "text", placeholder: "e.g. bridge-web.py"});
+  let confirmed = false;
+  openDialog({title: "Undo an installed file on " + devLabel(d),
+    body: [h("p", {}, active.length ? "Installed updates on this bridge:" : "This bridge reports no installed updates. Type a file name if you know better:"), inp,
+      h("p", {class: "hint"}, "The bridge drops the update and runs its built-in copy again, restarting only that service."), liveNote(d)],
+    ok: "Undo it", okClass: "danger",
+    onOk: async () => { const name = inp.value.trim(); if (!name) throw new Error("Which file?"); confirmed = true; await queueCommand(d, "revert-script", {name}, confirmed); }});
+}
+function unquarantineDialog(d){
+  const q = T(d).quarantined || [];
+  const sel = h("select", {}, [q.length > 1 ? h("option", {value: ""}, "all of them") : null, ...q.map(n => h("option", {value: n}, n))]);
+  let confirmed = false;
+  openDialog({title: "Put back a rolled-back update on " + devLabel(d),
+    body: [q.length ? h("p", {}, "Parked by the automatic rollback:") : h("p", {}, "Nothing is parked on this bridge right now."), q.length ? sel : null,
+      h("p", {class: "hint"}, "It was parked because it crash-looped. Put it back only after you know why — it restarts that service."), liveNote(d)],
+    ok: q.length ? "Put it back" : null, okClass: "danger",
+    onOk: async () => { confirmed = true; await queueCommand(d, "unquarantine", sel.value ? {name: sel.value} : {}, confirmed); }});
+}
+function goldenSaveDialog(d){
+  // A BASELINE IS A CLAIM THAT SOMEONE LISTENED. On 2026-08-24 a golden-save was queued by
+  // accident and the fleet then showed "known-good" for a state nobody had heard; everything
+  // downstream (drift, golden-restore) is measured against that record. The device refuses to
+  // overwrite a confirmed baseline with an unconfirmed one; this asks the one thing no device
+  // can check for itself. Declining is not blocked: it saves, recorded as UNCONFIRMED.
+  const cur = cfgState(d);
+  const note = h("input", {type: "text", maxlength: "120", value: new Date().toISOString().slice(0, 10) + " "});
+  const save = heard => {
+    const args = {note: (heard ? "verified " : "UNCONFIRMED ") + note.value.trim(), confirmed: heard, by: WHO || "operator",
+                  verified: heard ? "video,audio-to-room,audio-from-room,no-artifacts" : ""};
+    return queueCommand(d, "golden-save", args, false);
+  };
+  openDialog({title: "Save the known-good baseline for " + devLabel(d),
+    body: [cur && cur !== "no baseline" ? h("div", {class: "warnline"}, "It already has a baseline (now: " + cur + "). Saving replaces it with the CURRENT configuration.") : null,
+      h("p", {}, "Confirm you have JUST verified this session:"),
+      h("ul", {}, h("li", {}, "video is arriving"), h("li", {}, "the room can hear the presenter"), h("li", {}, "the presenter can hear the room"), h("li", {}, "no clicks, bursts or jitter you can hear")),
+      h("label", {class: "fl"}, "Label — what you verified, and how"), note,
+      h("p", {class: "hint"}, "OK = yes, I verified it — save as a CONFIRMED baseline. Cancel = save it unconfirmed (recorded as such). × = don't save.")],
+    ok: "OK — verified", alt: "Cancel — save unconfirmed", cancel: null,
+    onOk: () => save(true), onAlt: () => save(false)});
+}
+async function runDiagnosis(d){
+  go("#/bridge/" + encodeURIComponent(d.id) + "/diagnostics");
+  const el = DR.f.diagOut;
+  if (!el) return;
+  el.replaceChildren(h("div", {class: "box", style: "margin-top:10px"}, h("b", {}, "Diagnosing " + devLabel(d) + "…"),
+    h("div", {class: "small muted"}, "Measuring power, path, rates and config on the bridge. ~20 s.")));
   try {
-    const d = await api("/admin/users", {method:"POST", body:JSON.stringify({email, role})});
-    $("invite-out").textContent = (d.emailed
-        ? `Invite EMAILED to ${d.email}. Code (in case it does not arrive, shown only now): ${d.invite}`
-        : `NOT EMAILED${d.mail_error ? " (" + d.mail_error + ")" : ""} — you must send this to ${d.email} yourself. ONE-TIME code, shown only now: ${d.invite}`);
-    $("nu-email").value = "";
-    toast(`invited ${d.email} as ${d.role}`);
-  } catch(e){ toast("invite failed: "+e.message); }
+    const r = await queueCommand(d, "jitter-diagnose", {}, false, {quietResult: true});
+    const c = await followCommand(d.id, devLabel(d), "jitter-diagnose", r.id, r.timeout_s, {quiet: true});
+    if (!el.isConnected) return;
+    if (!c){ el.replaceChildren(h("div", {class: "warnline", style: "margin-top:10px"}, "No result yet — the bridge may be busy. Try again shortly.")); return; }
+    let dd = null; try { dd = JSON.parse(c.output || "{}"); } catch (e) {}
+    if (!dd || !dd.findings){ el.replaceChildren(resultBlock(d.id, c)); return; }
+    const ev = dd.evidence || {}, pw = ev.power || {}, path = ev.path || {}, rate = pw.rate || {};
+    el.replaceChildren(h("div", {class: "box", style: "margin-top:10px"}, h("b", {}, "Most likely cause"),
+      dd.findings.map((f, i) => h("div", {style: "margin:10px 0;padding-left:10px;border-left:3px solid " + (i === 0 ? "var(--tally)" : "var(--line)")},
+        h("div", {}, h("b", {}, f.culprit), " ", h("span", {class: "small muted"}, "(" + f.confidence + " confidence)")),
+        h("div", {class: "small"}, f.detail),
+        // The action is the point - but "no fleet button can fix this" is itself a useful answer.
+        f.action ? h("button", {class: "btn secondary sm", style: "margin-top:6px", type: "button", onclick: () => doAction(d.id, f.rung ? f.action + ":" + f.rung : f.action)},
+          "Apply: " + f.action + (f.rung ? " (rung " + f.rung + ")" : "")) : h("div", {class: "small muted"}, h("i", {}, "No fleet action can fix this one.")),
+        f.note ? h("div", {class: "small muted"}, f.note) : null)),
+      h("div", {class: "small muted"}, "Measured — power " + (pw.summary || "?") + (rate.pct !== undefined && rate.pct !== null ? " (" + rate.pct + "% of last " + rate.samples + " s)" : "")
+        + (path.reachable ? " · path spread " + path.mdev_ms + " ms, loss " + path.loss_pct + "%" : " · path not measured")
+        + " · config " + ((ev.config || {}).state || "?"))));
+  } catch (e) { if (e.message !== "auth" && el.isConnected) el.replaceChildren(h("div", {class: "dangerline", style: "margin-top:10px"}, e.message)); }
+}
+function claimDialog(d){
+  const name = h("input", {type: "text", maxlength: "64", placeholder: "e.g. Mumbai Studio"});
+  openDialog({title: "Claim " + (d.pairing_code || "this bridge"),
+    body: [h("p", {}, "Claiming names it, gives it the next fleet number and issues its secure-mesh key."), h("label", {class: "fl"}, "Name"), name,
+      h("p", {class: "hint"}, "Then set its PIN — nobody can go live on it until you do.")],
+    ok: "Claim", okClass: "danger",
+    onOk: async () => { const n = name.value.trim(); if (!n) throw new Error("Give it a name."); const devId = d.id;
+      const r = await api(`/admin/devices/${devId}/claim`, {method: "POST", body: JSON.stringify({name: n})});
+      upsertDevice(r); toast("Claimed " + (d.pairing_code || "") + " as " + devLabel(r) + ". Next: set its PIN.", "ok", {action: "Set PIN", onAction: () => setPinDialog(S.devices.get(d.id))}); }});
+}
+function renameDialog(d){
+  const name = h("input", {type: "text", maxlength: "64", value: d.name || ""});
+  const num = h("input", {type: "number", min: "1", max: "9999", value: d.number || ""});
+  openDialog({title: "Rename or renumber " + devLabel(d),
+    body: [h("label", {class: "fl"}, "Name"), name, h("label", {class: "fl"}, "Fleet number (shown as NB-001)"), num,
+      h("p", {class: "hint"}, "Numbers are unique in the fleet and never change on their own. `nb` and Claude use them to name the same bridge you do.")],
+    ok: "Save",
+    onOk: async () => {
+      const body = {};
+      if (name.value.trim() !== (d.name || "")) body.name = name.value.trim();
+      if (num.value && parseInt(num.value, 10) !== d.number) body.number = parseInt(num.value, 10);
+      if (!Object.keys(body).length) return;
+      const r = await api(`/admin/devices/${d.id}`, {method: "PATCH", body: JSON.stringify(body)});
+      upsertDevice(r); toast("Saved: " + devLabel(r), "ok");
+    }});
+}
+async function labelDialog(d){
+  try {
+    const devId = d.id;
+    const l = await api(`/admin/devices/${devId}/label`);
+    openDialog({title: "Setup label — " + devLabel(d),
+      body: [h("p", {}, "What someone on site needs to put this bridge on a new Wi-Fi: it opens a setup hotspot when it cannot find a known network."),
+        h("dl", {class: "kv"}, h("dt", {}, "Setup Wi-Fi"), h("dd", {class: "mono"}, l.ssid), h("dt", {}, "Password"), h("dd", {class: "mono"}, l.password || "not reported yet"),
+          h("dt", {}, "Pairing code"), h("dd", {class: "mono"}, l.pairing_code || "—")),
+        h("p", {class: "hint"}, l.note || "")], ok: null, cancel: "Close"});
+  } catch (e) { if (e.message !== "auth") toast("Label unavailable: " + e.message, "bad"); }
+}
+function forgetDialog(d){
+  const want = (d.label || devName(d));
+  const typed = h("input", {type: "text", placeholder: want, autocomplete: "off"});
+  openDialog({title: "Remove " + devLabel(d) + " from the fleet?",
+    body: [h("div", {class: "dangerline"}, "This deletes its history — telemetry, alerts, commands and diagnostics — and it re-joins as an unclaimed bridge within a minute."),
+      h("p", {}, "Use it to hand the hardware to someone else, or to redo first-time setup. Type " + want + " to confirm."), typed],
+    ok: "Remove it", okClass: "danger",
+    onOk: async () => { if (typed.value.trim() !== want) throw new Error("Type " + want + " exactly."); await api(`/admin/devices/${d.id}`, {method: "DELETE"});
+      toast(devLabel(d) + " removed — it re-joins as unclaimed.", "ok"); go("#/fleet"); }});
 }
 
-async function refresh(first){
-  if (!KEY) { gate(); return; }
-  try {
-    if (first || !ROLE) await syncWho();
-    DEVS = await api("/admin/devices");
-    $("panel").classList.remove("hidden"); $("gate").classList.add("hidden");
-    const changed = render();
-    const who = WHO === "bootstrap-key"
-      ? "bootstrap key · add an admin account to retire it"
-      : `${WHO} · ${ROLE}`;
-    if ($("whoami").textContent !== who) $("whoami").textContent = who;
-    // Timestamp the last CHANGE, not the last poll. A clock ticking every 5 seconds reads as
-    // "something just happened" when nothing did, and it would be the one element still
-    // repainting on a completely idle fleet.
-    if (changed || first) $("tick").textContent = "changed " + new Date().toLocaleTimeString();
-  } catch(e){ if (e.message!=="auth" && first) toast("control plane unreachable"); }
+// ---------------------------------------------------------------------------------- alerts
+function paintOpenAlerts(){
+  const box = $("openAlerts");
+  const items = [];
+  for (const d of [...S.devices.values()].sort((a, b) => (a.number || 1e9) - (b.number || 1e9)))
+    for (const a of (d.alerts || [])) items.push([d, a]);
+  patch(box, JSON.stringify(items.map(([d, a]) => [d.id, d.label, d.name, a])), () => items.length
+    ? items.map(([d, a]) => { const row = alertRow(d, a); row.querySelector(".at").textContent = devLabel(d) + " — " + (ALERT_LABEL[a.kind] || a.kind);
+        row.style.cursor = "pointer"; row.addEventListener("click", () => go("#/bridge/" + encodeURIComponent(d.id))); return row; })
+    : [h("div", {class: "empty", style: "padding:26px"}, "Nothing needs you right now.")]);
 }
-// If we arrived from an emailed sign-in link (/signin?code=…), redeem it first.
+function paintAlertHistory(){
+  const rows = [...S.alerts.values()].sort((a, b) => (parseTs(b.opened_at) || 0) - (parseTs(a.opened_at) || 0)).slice(0, 60);
+  $("alertHistEmpty").hidden = rows.length > 0;
+  patch($("alertHist"), JSON.stringify(rows), () => rows.map(e => h("tr", {},
+    h("td", {}, e.device || (S.devices.get(e.device_id) ? devLabel(S.devices.get(e.device_id)) : e.device_id)),
+    h("td", {}, ALERT_LABEL[e.kind] || e.kind), h("td", {class: "small"}, e.detail || ""), h("td", {class: "small muted"}, clock(parseTs(e.opened_at))),
+    h("td", {}, e.resolved_at ? h("span", {class: "small muted"}, clock(parseTs(e.resolved_at))) : pill("warn", "open")),
+    h("td", {}, e.notified ? "yes" : "—"))));
+}
+$("testAlertBtn").addEventListener("click", async () => {
+  try { const r = await api("/admin/alerts/test", {method: "POST"});
+    const sent = Object.entries(r.sent || {}).map(([k, v]) => k + (v ? " ✓" : " ✗")).join(", ");
+    toast(r.ok ? "Test alert sent: " + sent : "No channel delivered it: " + (sent || "none configured"), r.ok ? "ok" : "bad");
+  } catch (e) { if (e.message !== "auth") toast("Test failed: " + e.message, "bad"); }
+});
+
+// --------------------------------------------------------------------------------- updates
+async function loadUpdatesPage(){
+  try {
+    const [files, vers] = await Promise.all([catalog("files"), catalog("ota")]);
+    $("catalogEmpty").hidden = files.length > 0;
+    $("catalogRows").replaceChildren(...files.map(f => h("tr", {}, h("td", {class: "mono"}, f.name), h("td", {}, kb(f.bytes)), h("td", {class: "mono small"}, f.sha256),
+      h("td", {}, f.signed ? pill("ok", "signed") : pill("bad", "no signature")), h("td", {class: "small muted"}, clock(f.mtime * 1000)),
+      h("td", {style: "text-align:right"}, f.signed ? h("button", {class: "btn secondary sm", type: "button", onclick: () => deployDialog([], f.name)}, "Install on…") : null))));
+    $("otaEmpty").hidden = vers.length > 0;
+    $("otaRows").replaceChildren(...vers.map(v => h("tr", {}, h("td", {class: "mono"}, v.version), h("td", {class: "mono small"}, v.image || "—"), h("td", {}, kb(v.bytes)),
+      h("td", {}, v.signed ? pill("ok", "signed") : pill("bad", "no signature")), h("td", {class: "small muted"}, v.built || "—"),
+      h("td", {style: "text-align:right"}, v.signed ? h("button", {class: "btn secondary sm", type: "button", onclick: () => osUpdateDialog([], v.version)}, "Install on…") : null))));
+  } catch (e) { if (e.message !== "auth") toast("Could not load the catalog: " + e.message, "bad"); }
+  loadRollouts();
+}
+$("refreshCatalog").addEventListener("click", () => { S._cat_files = S._cat_ota = null; loadUpdatesPage(); });
+async function loadRollouts(){
+  const box = $("rollouts");
+  try {
+    const list = await api("/admin/rollouts");
+    if (!list.length){ box.replaceChildren(h("div", {class: "empty", style: "padding:24px"}, "No rollouts yet. Ship an OS version to the whole fleet in waves — 10 → 25 → 50 → 100% — with automatic per-bridge rollback.")); return; }
+    box.replaceChildren(...list.slice(0, 6).map(ro => {
+      const pct = ro.total ? Math.round(100 * ro.updated / ro.total) : 0;
+      const cls = ro.status === "active" ? "live" : ro.status === "completed" ? "ok" : ro.status === "aborted" ? "warn" : "idle";
+      const btns = [];
+      const mk = (label, action, danger) => h("button", {class: "btn " + (danger ? "ghost" : "secondary") + " sm", type: "button", onclick: () => rolloutAction(ro, action)}, label);
+      if (ro.status === "active"){
+        if (ro.next_stage != null) btns.push(mk("Widen to " + ro.next_stage + "%", "advance"));
+        else if (ro.queued || ro.in_flight) btns.push(mk("Finish", "advance"));
+        if ((ro.queued_offline || []).length) btns.push(mk("Catch up offline bridges", "dispatch"));
+        btns.push(mk("Pause", "pause"), mk("Abort", "abort", true));
+      } else if (ro.status === "paused") btns.push(mk("Resume", "resume"), mk("Abort", "abort", true));
+      return h("div", {class: "alertrow"}, h("div", {class: "abody"},
+        h("div", {class: "inline"}, h("b", {class: "mono"}, "netbridge-os " + ro.version), pill(cls, ro.status), h("span", {class: "small muted"}, "wave " + ro.stage_pct + "%" + (ro.next_stage != null ? " · next " + ro.next_stage + "%" : " · final wave"))),
+        h("div", {class: "bars", style: "height:8px;margin:8px 0"}, h("i", {style: "height:8px;flex:" + Math.max(pct, 0.5) + ";background:var(--ok)"}), h("i", {style: "height:8px;flex:" + Math.max(100 - pct, 0.5) + ";background:var(--line)"})),
+        h("div", {class: "small muted"}, ro.summary + (ro.in_flight ? " · " + ro.in_flight + " updating" : "")),
+        ro.rollbacks ? h("div", {class: "small", style: "color:var(--tally)"}, "⚠ " + ro.rollbacks + " bridge(s) rolled back — widening is halted (the “0 rollbacks” guard).") : null,
+        btns.length ? h("div", {class: "inline", style: "margin-top:8px"}, btns) : null));
+    }));
+  } catch (e) { if (e.message !== "auth") box.replaceChildren(h("div", {class: "empty"}, "Rollouts unavailable: " + e.message)); }
+}
+async function rolloutAction(ro, action){
+  const go2 = async (force) => {
+    const r = await api(`/admin/rollouts/${ro.id}/${action}` + (force ? "?force=true" : ""), {method: "POST"});
+    toast(action + ": " + (r.summary || "done"), "ok"); loadRollouts();
+  };
+  if (action === "abort"){
+    openDialog({title: "Abort the rollout of " + ro.version + "?", body: [h("p", {}, "No further waves. Bridges already updated stay updated — a new rollout is how you would change them.")],
+      ok: "Abort rollout", okClass: "danger", onOk: () => go2(false)}); return;
+  }
+  try { await go2(false); }
+  catch (e) {
+    if (e.message === "auth") return;
+    if (action === "advance" && e.status === 409){
+      openDialog({title: "Widening is blocked", body: [h("p", {}, e.message), h("p", {}, "A bridge rolled back or is still updating. Force the next wave anyway?")],
+        ok: "Force the next wave", okClass: "danger", onOk: () => go2(true)});
+      return;
+    }
+    toast(action + " failed: " + e.message, "bad");
+  }
+}
+$("startRolloutBtn").addEventListener("click", async () => {
+  let vers = [];
+  try { vers = (await catalog("ota")).filter(v => v.signed); } catch (e) { if (e.message !== "auth") toast("Could not read the OS versions: " + e.message, "bad"); return; }
+  if (!vers.length){ toast("Publish an OS version first (tools/publish-ota.sh).", "warn"); return; }
+  const sel = h("select", {}, vers.map(v => h("option", {value: v.version}, v.version)));
+  const wave = h("select", {}, [10, 25, 50, 100].map(p => h("option", {value: p}, p + "%")));
+  openDialog({title: "Start a staged rollout",
+    body: [h("label", {class: "fl"}, "OS version"), sel, h("label", {class: "fl"}, "First wave"), wave,
+      h("p", {class: "hint"}, "Online bridges in the wave update now; offline ones wait until they are back. Widening stops by itself if any bridge rolls back.")],
+    ok: "Start rollout", okClass: "danger",
+    onOk: async () => { const r = await api("/admin/rollouts", {method: "POST", body: JSON.stringify({version: sel.value,
+        source: location.origin + "/payloads/ota/" + sel.value, stage_pct: parseInt(wave.value, 10)})});
+      toast("Rollout " + r.version + " started — " + (r.dispatched_now || 0) + " bridge(s) updating now.", "ok"); loadRollouts(); }});
+});
+
+// ------------------------------------------------------------------------------------ team
+async function loadTeam(){
+  try {
+    const us = await api("/admin/users");
+    $("userRows").replaceChildren(...us.map(u => h("tr", {},
+      h("td", {}, u.email), h("td", {}, pill(u.role === "admin" ? "info" : "idle", u.role)),
+      h("td", {class: "small"}, u.pending_invite ? "invited — not signed in yet" : "active"),
+      h("td", {class: "small muted"}, u.last_seen ? rel(parseTs(u.last_seen)) : "—"),
+      h("td", {style: "text-align:right"}, h("button", {class: "btn ghost sm", type: "button", onclick: () => openDialog({title: "Revoke " + u.email + "?",
+        body: [h("p", {}, "Their sign-in stops working immediately. " + (u.role === "presenter" ? "They can no longer go live." : ""))], ok: "Revoke", okClass: "danger",
+        onOk: async () => { await api(`/admin/users/${u.id}`, {method: "DELETE"}); toast("Revoked " + u.email, "ok"); loadTeam(); }})}, "Revoke")))));
+  } catch (e) { if (e.message !== "auth") toast("Could not load the team: " + e.message, "bad"); }
+}
+$("inviteBtn").addEventListener("click", async () => {
+  const email = $("nuEmail").value.trim(), role = $("nuRole").value;
+  if (!email){ $("nuEmail").focus(); return; }
+  try {
+    const d = await api("/admin/users", {method: "POST", body: JSON.stringify({email, role})});
+    $("inviteOut").textContent = d.emailed ? "Invite emailed to " + d.email + ". If it does not arrive, give them this one-time code (shown only now): " + d.invite
+      : "NOT emailed" + (d.mail_error ? " (" + d.mail_error + ")" : "") + " — send " + d.email + " this one-time code yourself (shown only now): " + d.invite;
+    $("nuEmail").value = ""; toast("Invited " + d.email + " as " + d.role, "ok"); loadTeam();
+  } catch (e) { if (e.message !== "auth") toast("Invite failed: " + e.message, "bad"); }
+});
+
+// ----------------------------------------------------------------------------------- audit
+async function loadAudit(){
+  try {
+    const rows = await api("/admin/audit");
+    $("auditRows").replaceChildren(...(rows.length ? rows.map(r => h("tr", {}, h("td", {class: "small muted"}, clock(parseTs(r.ts))),
+      h("td", {}, r.who), h("td", {class: "mono small"}, r.action), h("td", {class: "small"}, r.target || ""))) : [h("tr", {}, h("td", {colspan: "4", class: "muted"}, "Nothing recorded yet."))]));
+  } catch (e) { if (e.message !== "auth") toast("Could not load the audit log: " + e.message, "bad"); }
+}
+$("refreshAudit").addEventListener("click", loadAudit);
+setInterval(() => { if (PAGE === "audit" && !document.hidden) loadAudit(); }, 30000);
+
+// ---------------------------------------------------------------------------------- routing
+let PAGE = "fleet";
+function go(hash){ if (location.hash === hash) route(); else location.hash = hash; }
+function route(){
+  if (!ADMIN) return;
+  const parts = (location.hash || "#/fleet").slice(2).split("/");
+  let page = parts[0] || "fleet";
+  if (page === "bridge"){
+    showPage("fleet");
+    openDrawer(decodeURIComponent(parts[1] || ""), parts[2]);
+    return;
+  }
+  if (!$("drawer").hidden) closeDrawer();
+  if (!["fleet", "alerts", "updates", "team", "audit"].includes(page)) page = "fleet";
+  showPage(page);
+}
+function showPage(page){
+  const changed = PAGE !== page; PAGE = page;
+  for (const s of document.querySelectorAll("section.page")) s.hidden = s.id !== "page-" + page;
+  for (const a of $("nav").querySelectorAll("a")) { if (a.dataset.page === page) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); }
+  if (!changed && page !== "fleet") return;
+  if (page === "updates") loadUpdatesPage();
+  if (page === "team") loadTeam();
+  if (page === "audit") loadAudit();
+  if (page === "alerts"){ paintOpenAlerts(); loadAlertHistory(); }
+}
+async function loadAlertHistory(){
+  try { const rows = await api("/admin/alerts/history");
+    rows.forEach((e, i) => { const id = "h" + i + "-" + e.device_id + "-" + e.opened_at; if (![...S.alerts.values()].some(x => x.device_id === e.device_id && x.opened_at === e.opened_at && x.kind === e.kind)) S.alerts.set(id, e); });
+    schedule("alerts");
+  } catch (e) {}
+}
+window.addEventListener("hashchange", route);
+
+// --------------------------------------------------------------------------------- sign in
+let ADMIN = false;
+function paintWho(){ setText($("whoami"), WHO === "bootstrap-key" ? "bootstrap key" : WHO); }
+function gate(msg, good){
+  ADMIN = false; if (S.ctl) S.ctl.abort(); S.ctl = null;
+  $("app").hidden = true; $("topbar").hidden = true; $("noadmin").hidden = true; $("drawer").hidden = true; $("scrim").hidden = true;
+  $("gate").hidden = false; const e = $("gateerr"); e.textContent = msg || ""; e.className = "err" + (good ? " good" : "");
+}
+function signedOut(msg){ KEY = ""; WHO = ""; ROLE = ""; ["nb_admin_key", "nb_who", "nb_role"].forEach(k => store(k, "")); closeDialog(); gate(msg); }
+async function start(){
+  if (!KEY){ gate(); return; }
+  let who;
+  try { who = await api("/auth/whoami", {quiet: true}); }
+  catch (e) { if (e.message === "auth"){ signedOut("That sign-in was not accepted — sign in again."); return; }
+    gate("The fleet is not answering (" + e.message + "). Retrying…"); setTimeout(start, 5000); return; }
+  WHO = who.who || ""; ROLE = who.role || ""; store("nb_who", WHO); store("nb_role", ROLE);
+  if (ROLE !== "admin"){
+    // Presenters are refused by the server on every /admin read; say so plainly instead of a broken page.
+    ADMIN = false; $("gate").hidden = true; $("app").hidden = true; $("topbar").hidden = true;
+    setText($("noadminWho"), "You are signed in as " + WHO + " (" + ROLE + ")."); $("noadmin").hidden = false; return;
+  }
+  ADMIN = true;
+  $("gate").hidden = true; $("noadmin").hidden = true; $("topbar").hidden = false; $("app").hidden = false;
+  paintWho();
+  if (WHO === "bootstrap-key"){ $("banner").textContent = "Signed in with the bootstrap key. Invite an admin account (Team) — once one exists, this key stops working."; $("banner").hidden = false; }
+  openStream();
+  route();
+}
+async function trySignIn(token){
+  const prev = KEY; KEY = token;
+  try { await api("/auth/whoami", {quiet: true}); store("nb_admin_key", KEY); start(); return true; }
+  catch (e) { KEY = prev; return false; }
+}
+async function redeemCode(code){
+  // An emailed link lands here as ?code=... - trade it for a personal token.
+  try {
+    const r = await fetch("/auth/magic-redeem", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({code})});
+    if (!r.ok) return false;
+    const d = await r.json();
+    KEY = d.token; WHO = d.email; ROLE = d.role; store("nb_admin_key", KEY); store("nb_who", WHO); store("nb_role", ROLE);
+    history.replaceState(null, "", location.pathname + location.hash);        // scrub the code
+    return true;
+  } catch (e) { return false; }
+}
+$("magicBtn").addEventListener("click", async () => {
+  const email = $("emailin").value.trim(); if (!email) return $("emailin").focus();
+  try { await fetch("/auth/magic-link", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({email, base_url: location.origin})});
+    gate("If that address has an admin account, a sign-in link is on its way (valid 15 min).", true); }
+  catch (e) { gate("Could not send: " + e.message); }
+});
+$("redeemBtn").addEventListener("click", async () => {
+  const invite = $("invitein").value.trim(); if (!invite) return $("invitein").focus();
+  try { const r = await fetch("/auth/redeem", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({invite})});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || "HTTP " + r.status);
+    KEY = d.token; store("nb_admin_key", KEY); $("invitein").value = ""; start(); toast("Welcome, " + d.email + " (" + d.role + ")", "ok");
+  } catch (e) { gate("Invite: " + e.message); }
+});
+$("keyBtn").addEventListener("click", async () => {
+  const v = $("keyin").value.trim(); if (!v) return $("keyin").focus();
+  // One box, either credential: a personal token, or the code from a sign-in email.
+  if (await trySignIn(v)){ $("keyin").value = ""; return; }
+  if (await redeemCode(v)){ $("keyin").value = ""; start(); return; }
+  gate("That code or token was not accepted — request a fresh sign-in link.");
+});
+for (const [inp, btn] of [["emailin", "magicBtn"], ["invitein", "redeemBtn"], ["keyin", "keyBtn"]])
+  $(inp).addEventListener("keydown", e => { if (e.key === "Enter") $(btn).click(); });
+$("signoutBtn").addEventListener("click", () => signedOut(""));
+$("noadminOut").addEventListener("click", () => signedOut(""));
+
 (async () => {
   const code = new URLSearchParams(location.search).get("code");
-  if (code) { if(!(await redeemCode(code))) gate("that sign-in link is expired or already used — request a fresh one"); }
-  refresh(true);
+  if (code && !(await redeemCode(code))){ gate("That sign-in link has expired or was already used — request a fresh one."); return; }
+  start();
 })();
-setInterval(refresh, 5000);
 </script>
 </body>
 </html>
