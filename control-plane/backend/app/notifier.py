@@ -22,7 +22,11 @@ log = logging.getLogger("notifier")
 
 def _severity(kind: str) -> str:
     # offline / thermal / lockout / a rebooting bridge are the wake-you-up ones.
-    return "critical" if kind in ("offline", "temp_high", "pin_lockout", "restart_storm") else "warning"
+    # critical = someone must act now. The PIN ones block or expose go-live; safe mode means every
+    # update is off. The rest (USB misses, low disk, a parked update, a failed OS update that
+    # already rolled itself back, a relayed session) are warnings.
+    return "critical" if kind in ("offline", "temp_high", "pin_lockout", "restart_storm",
+                                  "pin_not_set", "pin_gate_unavailable", "safe_mode") else "warning"
 
 
 def build_message(dev_name: str, dev_id: str, kind: str, detail: str,
