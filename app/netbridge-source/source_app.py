@@ -64,7 +64,7 @@ RTP_VIDEO, RTP_VOICE = 5000, 5002
 # Build stamp. build.py rewrites this line, and it is what the updater compares against
 # the signed manifest — so a build that forgets to bump it simply never updates, rather
 # than update-looping.
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.2"
 
 
 # --------------------------------------------------------------------------- state
@@ -301,7 +301,12 @@ STREAM_W, STREAM_H = 640, 360
 # rounding error next to the 74 Mbps the USB leg carries. Deliberately a fixed value: this
 # encoder has no congestion feedback, so a "smart" bitrate here would be a guess wearing a
 # suit. Adaptive rate control is a real feature and belongs behind real RTCP feedback.
-STREAM_BITRATE = "1500k"
+# 800 kbps (2026-09-24). Measured through the bridge's own pipeline, H.264 Baseline at 640x360/20fps:
+# 1500k -> 0.30 s Pi CPU per 30 s, SSIM 0.967/0.974, 33 KB keyframes; 800k -> 0.22 s, SSIM 0.957/0.972,
+# 20 KB keyframes. The bridge runs throttled (under-voltage), so less decode work and smaller
+# once-a-second keyframe bursts over Wi-Fi matter more than the last 1% of sharpness. (320x180 was
+# worse on both counts: the bridge must upscale it to its 640x360 USB camera format.)
+STREAM_BITRATE = "800k"
 
 
 def _is_exe(path):
@@ -610,7 +615,12 @@ class Session:
             vin = ["-f", "avfoundation", "-framerate", "30",
                    "-video_size", "1280x720", "-pixel_format", "uyvy422",
                    "-i", "%s:none" % video_idx]
-            venc = ["-c:v", "h264_videotoolbox", "-realtime", "1"]
+            # Baseline profile: CAVLC instead of the default High profile's CABAC. CABAC is the most
+            # expensive, strictly serial part of H.264 decoding, and the bridge decodes this stream
+            # in software on a 900 MHz Pi. Measured 2026-09-22 through the bridge's own pipeline at
+            # 640x360/20fps/1500k: 41% less decode+convert CPU, SSIM 0.966 vs 0.967 (not visible).
+            # (The Windows path is already CAVLC: libx264 ultrafast turns CABAC off.)
+            venc = ["-c:v", "h264_videotoolbox", "-realtime", "1", "-profile:v", "baseline"]
             ain = ["-f", "avfoundation", "-i", ":%s" % audio_idx]
 
         v = common + vin + [
@@ -1316,14 +1326,17 @@ class MeshManager:
             return {"via": "none",
                     "error": "the control plane would not issue a mesh key for this bridge"}
 
-        argv = [mesh_bin, "--authkey", key, "--bridge", tsip,
+        # The key goes in the environment, not argv: argv is readable by every process on
+        # the machine (ps), and this key admits a node to the tailnet.
+        argv = [mesh_bin, "--bridge", tsip,
                 "--hostname", _mesh_hostname(rec, st),
                 "--forward", "%d,%d" % (RTP_VIDEO, RTP_VOICE), "--return", "5004",
                 "--control", "%d:8080" % self.CTRL_LOCAL]
         if login:
             argv += ["--login-server", login]
         lf = open(os.path.join(str(_logdir()), "netbridge-source-mesh.log"), "w")
-        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=lf, text=True)
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=lf, text=True,
+                             env=dict(os.environ, NB_MESH_AUTHKEY=key))
         # read the one-line handshake (helper prints it only once the proxies are wired)
         line = ""
         try:
