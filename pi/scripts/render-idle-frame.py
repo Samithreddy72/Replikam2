@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Write a plain black 480x270 YUYV idle frame for the USB camera."""
+"""Write a plain black 424x240 YUYV idle frame for the USB camera."""
 import os
 from pathlib import Path
 
-W, H = 480, 270      # must match the UVC frame in uvc-raw-setup.sh
+W, H = 424, 240      # must match the UVC frame in uvc-raw-setup.sh
 OUT = "/etc/bridge/idle-frame.raw"
 
 

@@ -235,14 +235,25 @@ UMP=$(grep -oE 'echo [0-9]+ > functions/\$FUNCTION/streaming_maxpacket' "$CAT/uv
 LCAP=$(grep -oE 'YUYV:[0-9]+x[0-9]+@' "$CAT/bridge-gadget-setup.sh" 2>/dev/null | head -1 | sed 's/YUYV://; s/@//')
 FCAP=$(grep -oE 'format=YUY2,width=[0-9]+,height=[0-9]+' "$CAT/bridge-feeder-net.sh" 2>/dev/null | sed -E 's/.*width=([0-9]+),height=([0-9]+)/\1x\2/')
 ICAP=$(grep -oE '^W, H = [0-9]+, [0-9]+' "$CAT/render-idle-frame.py" 2>/dev/null | sed -E 's/W, H = ([0-9]+), ([0-9]+)/\1x\2/')
-[ "$UW" = 480x270 ] && ok "USB camera advertises 480x270 (fits one packet per microframe)" \
-  || no "USB camera advertises ${UW:-?} — expected 480x270"
+[ "$UW" = 424x240 ] && ok "USB camera advertises 424x240 (fits one packet per microframe at 30 fps)" \
+  || no "USB camera advertises ${UW:-?} — expected 424x240"
 [ -n "$UMP" ] && [ "$UMP" -le 1024 ] && ok "streaming_maxpacket $UMP (no high-bandwidth isochronous)" \
   || no "streaming_maxpacket ${UMP:-?} — high-bandwidth mode is where the USB controller missed slots"
 if [ -n "$UW" ] && [ "$UW" = "$LCAP" ] && [ "$UW" = "$FCAP" ] && [ "$UW" = "$ICAP" ]; then
   ok "frame size agrees everywhere: descriptor, loopback, feeder, idle frame ($UW)"
 else
   no "frame size disagrees: descriptor=${UW:-?} loopback=${LCAP:-?} feeder=${FCAP:-?} idle=${ICAP:-?}"
+fi
+# Frame RATE must agree too: a sender/gadget mismatch is judder by construction (the Mac camera
+# captures 30; sending 20 kept 2 frames of every 3, 33/67 ms apart). 30 fps since 2026-09-24.
+UI=$(awk '/dwFrameInterval$/{getline; print; exit}' "$CAT/uvc-raw-setup.sh" 2>/dev/null | tr -d ' ')
+UFPS=$([ -n "$UI" ] && [ "$UI" -gt 0 ] 2>/dev/null && echo $(( (10000000 + UI/2) / UI )))
+LFPS=$(grep -oE 'YUYV:[0-9]+x[0-9]+@[0-9]+/1' "$CAT/bridge-gadget-setup.sh" 2>/dev/null | head -1 | sed -E 's/.*@([0-9]+)\/1/\1/')
+FFPS=$(grep -oE 'format=YUY2,width=[0-9]+,height=[0-9]+,framerate=[0-9]+/1' "$CAT/bridge-feeder-net.sh" 2>/dev/null | sed -E 's/.*framerate=([0-9]+)\/1/\1/')
+if [ "${UFPS:-x}" = 30 ] && [ "$UFPS" = "$LFPS" ] && [ "$UFPS" = "$FFPS" ]; then
+  ok "frame rate agrees everywhere: descriptor, loopback, feeder (30 fps)"
+else
+  no "frame rate: descriptor=${UFPS:-?} loopback=${LFPS:-?} feeder=${FFPS:-?} — expected 30 in all three"
 fi
 # 2026-09-22 CPU sweep: each of these was measured costing CPU on a live bridge.
 has flight-recorder.py && grepf flight-recorder.sh 'exec /usr/bin/python3 /usr/local/bin/flight-recorder.py' \

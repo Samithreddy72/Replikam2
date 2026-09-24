@@ -74,13 +74,15 @@ create_frame() {
 	echo $WIDTH > $wdir/wWidth
 	echo $HEIGHT > $wdir/wHeight
 	echo $(( $WIDTH * $HEIGHT * 2 )) > $wdir/dwMaxVideoFrameBufferSize
-	# Advertise ONLY the real rate: 500000 (100ns units) = 20fps. The old list also had
+	# Advertise ONLY the real rate: 333333 (100ns units) = 30fps. The old list also had
 	# 100000 (=100fps) and 5000000 (=2fps); the kernel sorts ascending so 100000 became the
 	# DEFAULT, and webcam apps negotiated ~100fps against a ~20fps source -> the gadget had a
 	# fresh frame only every ~5th poll -> severe judder. One matching rate = smooth motion.
-	# (Sender must run at 20fps to match — mac-stream.sh default; FPS=20.)
+	# 30fps since 2026-09-24 (was 20): the presenter's Mac camera captures at 30, and 20 does not
+	# divide 30 - keeping 2 frames of every 3 spaced them 33/67 ms apart = visible motion judder.
+	# The sender must run at the same rate (source_app.py Session.start fps=30).
 	cat <<EOF > $wdir/dwFrameInterval
-500000
+333333
 EOF
 }
 
@@ -94,7 +96,7 @@ create_uvc() {
 	echo "	Creating UVC gadget functionality : $FUNCTION"
 	mkdir functions/$FUNCTION
 
-	create_frame $FUNCTION 480 270 uncompressed u
+	create_frame $FUNCTION 424 240 uncompressed u
 
 	mkdir functions/$FUNCTION/streaming/header/h
 	cd functions/$FUNCTION/streaming/header/h
@@ -132,8 +134,8 @@ create_uvc() {
 		popd
 	fi
 
-	# ONE 1024-byte packet per 125 us microframe (8.2 MB/s ceiling). 480x270 YUY2 @20 fps needs
-	# 5.2 MB/s, so it fits with ~35% headroom. 640x360 needed 9.2 MB/s, which forced 2048 =
+	# ONE 1024-byte packet per 125 us microframe (8.2 MB/s ceiling). 424x240 YUY2 @30 fps needs
+	# 6.1 MB/s (75%); 480x270 @30 would need 7.8 MB/s (95%, too tight). 640x360 @20 needed 9.2 MB/s, which forced 2048 =
 	# "high-bandwidth" isochronous (two packets per microframe) - the mode where the Pi 4's dwc2
 	# controller missed slots ("uvc: VS request completed with status -61", 14-16/s live) and the
 	# meeting laptop saw choppy video in every app while everything upstream was clean

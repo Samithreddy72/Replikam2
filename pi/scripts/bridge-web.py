@@ -449,7 +449,7 @@ def _video_frame_bytes():
     m = re.search(r"(\d+)x(\d+)", caps)
     if m:
         return int(m.group(1)) * int(m.group(2)) * 2      # YUY2 = 2 bytes/pixel
-    return 480 * 270 * 2                                   # the configured default
+    return 424 * 240 * 2                                   # the configured default
 
 
 _VIDEO_SEEN = {}
@@ -461,14 +461,20 @@ def _expected_fps():
     Read from the setup script rather than hard-coded, so changing the pipeline does not
     silently leave a health check comparing against a number nobody updated.
     """
+    # The descriptor's dwFrameInterval (100 ns units) is the authority; the loopback caps
+    # ("@N/1") agree with it. Until 2026-09-24 this read the descriptor script, found neither
+    # pattern in it, and silently returned the fallback whatever the gadget was set up for.
     try:
-        txt = read("/home/pi/uvc-raw-setup.sh") or read("/usr/local/bin/bridge-gadget-setup.sh") or ""
-        m = re.search(r"framerate=(\d+)/1", txt) or re.search(r"@(\d+)/1", txt)
+        uvc = read("/home/pi/uvc-raw-setup.sh") or ""
+        m = re.search(r"dwFrameInterval\s*\n(\d+)\s*\nEOF", uvc)
+        if m and int(m.group(1)) > 0:
+            return int(round(1e7 / int(m.group(1))))
+        m = re.search(r"@(\d+)/1", read("/usr/local/bin/bridge-gadget-setup.sh") or "")
         if m:
             return int(m.group(1))
     except Exception:
         pass
-    return 20
+    return 30
 
 
 def video_throughput(pid, now):

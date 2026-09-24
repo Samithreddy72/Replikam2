@@ -123,12 +123,28 @@ else:
         no("STREAM_BITRATE not declared")
     else:
         kb = int(mb.group(1))
-        bpp = kb * 1000.0 / (ew * eh * 20)
+        mfi = re.search(r"dwFrameInterval\s*\n(\d+)\s*\nEOF", UVC)
+        gfps = round(1e7 / int(mfi.group(1))) if mfi else 20
+        bpp = kb * 1000.0 / (ew * eh * gfps)
         if bpp >= 0.15:
-            ok("bitrate %dk = %.3f bit/px at %dx%d@20, at or above the measured floor (0.15)" % (kb, bpp, ew, eh))
+            ok("bitrate %dk = %.3f bit/px at %dx%d@%d, at or above the measured floor (0.15)" % (kb, bpp, ew, eh, gfps))
         else:
-            no("bitrate %dk = %.3f bit/px at %dx%d@20 is below the measured floor (0.15)" % (kb, bpp, ew, eh),
+            no("bitrate %dk = %.3f bit/px at %dx%d@%d is below the measured floor (0.15)" % (kb, bpp, ew, eh, gfps),
                "the picture will be starved at this frame size")
+
+    # The sender's frame rate must equal the gadget's. A mismatch is judder by construction: the
+    # bridge's videorate duplicates or drops frames to reach the advertised rate (2026-09-24: the Mac
+    # camera captures 30, the app sent 20 - two kept of every three, 33/67 ms apart).
+    mf = re.search(r"^STREAM_FPS\s*=\s*(\d+)", APP, re.M)
+    ms = re.search(r"def start\(self, pi_host, video_idx, audio_idx, fps=(\w+)", APP)
+    if not (mf and mfi):
+        no("could not read STREAM_FPS from the app or dwFrameInterval from uvc-raw-setup.sh")
+    else:
+        afps = int(mf.group(1))
+        (ok if afps == gfps else no)("sender fps %d %s the gadget's advertised %d fps"
+                                     % (afps, "MATCHES" if afps == gfps else "does not match", gfps))
+        (ok if ms and ms.group(1) == "STREAM_FPS" else no)(
+            "Session.start defaults to STREAM_FPS, not a literal (%s)" % (ms.group(1) if ms else "?"))
 
 print("\n  ---- USB bandwidth must stay inside what the bus can carry ----")
 # Pi 4 OTG is USB 2.0. The gadget streams UNCOMPRESSED YUY2 (2 bytes/pixel).

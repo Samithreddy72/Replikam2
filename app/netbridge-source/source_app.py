@@ -282,9 +282,9 @@ AV_FMT = "dshow" if IS_WIN else "avfoundation"
 
 # WHAT THE MEETING ROOM ACTUALLY SEES.
 #
-# The USB gadget advertises ONE frame size -- 480x270 uncompressed at 20 fps since 2026-09-24
-# (see pi/scripts/uvc-raw-setup.sh, create_frame ... 480 270 uncompressed; it was 640x360 from
-# 17 Jul, and before that 320x180). Until 26 Aug 2026 this encoder produced 320x180 into the
+# The USB gadget advertises ONE frame size -- 424x240 uncompressed at 30 fps since 2026-09-24
+# (see pi/scripts/uvc-raw-setup.sh, create_frame ... 424 240 uncompressed; it was 640x360 @20
+# from 17 Jul, and before that 320x180). Until 26 Aug 2026 this encoder produced 320x180 into the
 # 640x360 gadget, so the bridge upscaled it - the two numbers had never been compared.
 #
 # Encode at the gadget's own size: no scaling on the host or the bridge, and the picture stops
@@ -295,9 +295,12 @@ AV_FMT = "dshow" if IS_WIN else "avfoundation"
 # 640x360 YUY2 @20fps (9.2 MB/s) did not fit in one 1024-byte packet per slot and needed
 # "high-bandwidth" mode (two packets per slot), where the Pi's dwc2 controller missed slots and
 # the meeting laptop saw choppy video in every app (2026-09-24: everything upstream measured
-# clean). 480x270 (5.2 MB/s) fits in ONE packet per slot with ~35% headroom. Must equal the UVC
-# frame in pi/scripts/uvc-raw-setup.sh (tests/test-artifact-identity.py checks it).
-STREAM_W, STREAM_H = 480, 270
+# clean). 424x240 @30 (6.1 MB/s, 75%) fits in ONE packet per slot; 480x270 @30 would need 95%.
+# 30 fps because the Mac camera captures at 30: 20 does not divide 30, so keeping 2 frames of every
+# 3 spaced them 33/67 ms apart - motion judder no network or USB fix could remove.
+# Must equal the UVC frame in pi/scripts/uvc-raw-setup.sh (tests/test-artifact-identity.py checks it).
+STREAM_W, STREAM_H = 424, 240
+STREAM_FPS = 30
 
 # Deliberately a fixed value: this encoder has no congestion feedback, so a "smart" bitrate here
 # would be a guess wearing a suit. Adaptive rate control belongs behind real RTCP feedback.
@@ -306,6 +309,8 @@ STREAM_W, STREAM_H = 480, 270
 #   480x270 @600k -> 0.16 s,                      SSIM 0.961 / 0.941
 #   480x270 @500k -> 0.14-0.15 s,                 SSIM 0.960 / 0.938
 #   320x180 @400k -> 0.11 s,                      SSIM 0.940 / 0.917 (visibly soft)
+#   424x240 @30fps 600k (from a 30 fps camera) -> 0.17 s, SSIM 0.953 / 0.931 per frame, 50% more
+#   frames and no 30->20 cadence judder; 700k measured no visible gain (0.954 / 0.934)
 STREAM_BITRATE = "600k"
 
 
@@ -593,7 +598,7 @@ class Session:
         return bool(self.voice_proc and self.voice_proc.poll() is None)
 
     @_locked
-    def start(self, pi_host, video_idx, audio_idx, fps=20, mic_gain=0, return_port=5004, mic_name=None):
+    def start(self, pi_host, video_idx, audio_idx, fps=STREAM_FPS, mic_gain=0, return_port=5004, mic_name=None):
         self.stop()
         self.bridge, self.return_port = pi_host, return_port
         ff = _ffmpeg()

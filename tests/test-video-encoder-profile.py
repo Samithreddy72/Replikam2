@@ -53,9 +53,9 @@ else:
         "video leg asks VideoToolbox for -profile:v baseline")
     (ok if "-realtime" in video and video[video.index("-realtime") + 1] == "1" else no)("realtime encode kept")
     (ok if sa.STREAM_BITRATE == "600k" else no)("bitrate is 600k (%s)" % sa.STREAM_BITRATE)
-    for flag, want in (("-b:v", "600k"), ("-r", "20"), ("-g", "20")):
+    for flag, want in (("-b:v", "600k"), ("-r", "30"), ("-g", "30")):
         (ok if flag in video and video[video.index(flag) + 1] == want else no)("%s %s" % (flag, want))
-    (ok if "scale=480:270,format=nv12" in " ".join(video) else no)("encodes 480x270 (the UVC frame)")
+    (ok if "scale=424:240,format=nv12" in " ".join(video) else no)("encodes 424x240 (the UVC frame)")
 
     # Does the real encoder honour it? Encode 1 s from a test source with the same encoder args.
     ff = shutil.which("ffmpeg")
@@ -67,7 +67,7 @@ else:
         out = pathlib.Path(tempfile.mkdtemp()) / "t.h264"
         r = subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
                             "testsrc2=size=1280x720:rate=30", "-t", "3", "-vf", vf,
-                            "-fps_mode", "cfr", "-r", "20"] + enc + ["-f", "h264", str(out)],
+                            "-fps_mode", "cfr", "-r", "30"] + enc + ["-f", "h264", str(out)],
                            capture_output=True, text=True)
         if r.returncode != 0 or not out.exists():
             skip("VideoToolbox encode unavailable here: %s" % (r.stderr.strip()[:120] or r.returncode))

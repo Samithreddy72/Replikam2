@@ -50,7 +50,7 @@ else:
 bw._VIDEO_SEEN.clear()
 bw._video_bytes = lambda pid: 0
 bw.video_throughput("1", 100.0)
-FRAME = bw._video_frame_bytes()      # bytes per frame as the bridge computes it (480x270 YUY2 fallback off-Pi)
+FRAME = bw._video_frame_bytes()      # bytes per frame as the bridge computes it (424x240 YUY2 fallback off-Pi)
 bw._video_bytes = lambda pid: FRAME * 20 * 2        # two seconds of 20fps
 r = bw.video_throughput("1", 102.0)
 if r is not None and abs(r - 20.0) < 0.5:
@@ -77,11 +77,27 @@ else:
 print("\n  ---- the expectation is read, not hard-coded ----")
 # A health check comparing against a constant nobody maintains silently rots when the pipeline
 # changes. The expected rate comes from the setup script that configures the gadget.
-if "framerate=(" in src and "def _expected_fps" in src:
-    ok("expected fps is parsed from the gadget setup, with a documented fallback")
-else:
-    no("expected frame rate is a bare constant")
-if bw._video_frame_bytes() == 480 * 270 * 2:
+# Behaviour, not a source grep: until 2026-09-24 _expected_fps read the descriptor script, found no
+# pattern it recognised, and returned its fallback whatever the gadget advertised.
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+real_uvc = (ROOT / "pi" / "scripts" / "uvc-raw-setup.sh").read_text()
+real_read = bw.read
+def fake_files(files):
+    bw.read = lambda path: files.get(path, "")
+fake_files({"/home/pi/uvc-raw-setup.sh": real_uvc})
+got = bw._expected_fps()
+(ok if got == 30 else no)("reads 30 fps from the shipped descriptor script (%s)" % got)
+fake_files({"/home/pi/uvc-raw-setup.sh": real_uvc.replace("\n333333\n", "\n500000\n")})
+got = bw._expected_fps()
+(ok if got == 20 else no)("follows the descriptor: a 500000 interval reads as 20 fps (%s)" % got)
+fake_files({"/usr/local/bin/bridge-gadget-setup.sh": 'set-caps /dev/video40 "YUYV:424x240@25/1"'})
+got = bw._expected_fps()
+(ok if got == 25 else no)("without the descriptor, falls back to the loopback caps (%s)" % got)
+fake_files({})
+got = bw._expected_fps()
+(ok if got == 30 else no)("nothing readable -> the documented default, 30 (%s)" % got)
+bw.read = real_read
+if bw._video_frame_bytes() == 424 * 240 * 2:
     ok("frame size derives from the configured format (YUY2, 2 bytes/pixel)")
 else:
     no("frame size is wrong", bw._video_frame_bytes())
