@@ -215,6 +215,25 @@ try:
         check(t is not None and t.status == "failed", "an update that never reported back counts as failed (halts widening)",
               t.status if t else None)
 
+    # ---- nb: the terminal tool speaks fleet numbers ---------------------------------------------
+    (T / "tok").write_text("ADMIN")
+    NBENV = dict(os.environ, FLEET_URL=BASE, FLEET_TOKEN_FILE=str(T / "tok"))
+    def nb(*args):
+        r = subprocess.run([sys.executable, str(ROOT / "tools/nb")] + list(args), capture_output=True, text=True,
+                           env=NBENV, timeout=60)
+        return r.returncode, r.stdout + r.stderr
+    rc, out = nb("list")
+    check(rc == 0 and "NB-001" in out and "NB-007" in out and "LIVE" in out, "nb list shows numbers and states", out[-400:])
+    for q in ("NB-007", "nb7", "7", "007"):
+        rc, out = nb("show", q)
+        check(rc == 0 and "NB-007 Main Hall" in out, "nb show %s finds NB-007" % q, out[:200])
+    rc, out = nb("rename", "7", "Main Hall East", "--yes")
+    check(rc == 0 and "NB-007 Main Hall East" in out, "nb rename by number", out)
+    rc, out = nb("renumber", "7", "1", "--yes")
+    check(rc != 0 and "already" in out, "nb renumber refuses a number in use", out)
+    rc, out = nb("renumber", "main hall east", "8", "--yes")
+    check(rc == 0 and "NB-008" in out, "nb renumber by name", out)
+
     # ---- live stream -----------------------------------------------------------------------------
     r = httpx.get(BASE + "/admin/stream", headers=P, timeout=5)
     check(r.status_code == 401, "presenter cannot open the live stream")

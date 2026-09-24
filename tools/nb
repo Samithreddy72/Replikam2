@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """nb — manage every NetBridge bridge in the fleet from this Mac.
 
-    nb list                              every bridge: online, OS, uptime, video/voice/return, power, updates
+    nb list                              every bridge: number, state, PIN, OS, uptime, streams, power, updates
     nb show <bridge>                     one bridge in detail
+    nb claim <code|id> <name>            claim a new bridge (gets the next NB number and its mesh key)
+    nb rename <bridge> <new name>        rename a bridge
+    nb renumber <bridge> <number>        change its fleet number (NB-007); numbers are unique
+    nb pin <bridge> [PIN]                set / rotate the go-live PIN (random 6 digits if none given; shown once)
+    nb clear-lockout <bridge>            lift the 1-hour lockout after 3 wrong PINs
+    nb lock <bridge>                     end the live PIN session now (the presenter must re-enter the PIN)
     nb running <bridge>                  which files are built-in / updated / waiting / parked
     nb logs <bridge> [unit] [-n N]       recent log lines (whole system, or one service)
     nb read <bridge> <path> [-n N]       read a file on the bridge (read-only; secrets are redacted)
@@ -17,7 +23,8 @@
     nb ssh <bridge> [command ...]        owner SSH over the tailnet
     nb run <bridge> <type> ['{"json":"args"}']   any allowed fleet command (advanced)
 
-<bridge> is a name ("Testing 2", or a unique prefix like "test"), or a device id (or its end).
+<bridge> is a fleet number (NB-003, nb3 or just 3), a name ("Testing 2", or a unique prefix like
+"test"), or a device id (or its end).
 Anything that changes a bridge asks first; add --yes to skip the question (scripts).
 Config: FLEET_URL (default https://fleet.scine.online), token in ~/.netbridge/fleet-automation-token.
 """
@@ -31,7 +38,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 DONE = {"done", "failed", "rejected", "timeout", "expired", "cancelled", "error"}
 CHANGES = {"deploy-script", "revert-script", "unquarantine", "update", "reboot", "restart", "start",
            "stop", "profile", "set-peer", "reset-clock", "gadget-tune", "gadget-tune-clear",
-           "jitter-fix", "jitter-reset", "golden-restore", "set-pin", "unlock", "lock"}
+           "jitter-fix", "jitter-reset", "golden-restore", "set-pin", "clear-lockout", "lock"}
 WAIT_S = {"update": 1800, "deploy-script": 1000, "diagnose": 1000, "revert-script": 700,
           "unquarantine": 700, "restart": 700, "reboot": 60}
 YES = "--yes" in sys.argv
@@ -73,6 +80,12 @@ def pick(query, allow_all=False):
     devs = devices()
     if allow_all and query.lower() == "all":
         return [d for d in devs if d.get("claimed")]
+    # A fleet number: NB-003, nb3, 3 - the name you and the panel use for a bridge.
+    m = re.fullmatch(r"(?:nb-?)?0*(\d{1,4})", query.strip().lower())
+    if m:
+        hit = [d for d in devs if d.get("number") == int(m.group(1))]
+        if hit:
+            return hit
     q = query.lower()
     exact = [d for d in devs if (d.get("name") or "").lower() == q or d["id"] == query]
     if exact:
@@ -96,7 +109,7 @@ def short_uptime(u):
 
 
 def label(d):
-    return "%s (%s)" % (d.get("name") or "unnamed", d["id"][-8:])
+    return "%s%s (%s)" % ((d["label"] + " ") if d.get("label") else "", d.get("name") or "unnamed", d["id"][-8:])
 
 
 def live(d):
@@ -155,9 +168,20 @@ def show_result(c):
 
 
 # ------------------------------------------------------------------------ commands
+def pin_word(l):
+    p = l.get("pin") or {}
+    if p.get("lockout"):
+        return "LOCKOUT"
+    if p.get("pin_set") is False:
+        return "NO PIN"
+    if (p.get("session") or {}).get("active"):
+        return "in use"
+    return "set" if p.get("pin_set") else "?"
+
+
 def cmd_list(_):
-    devs = devices()
-    print("%-18s %-6s %-15s %-9s %-11s %-8s %-6s %s" % ("BRIDGE", "ONLINE", "OS", "UPTIME", "V/VOICE/RET", "POWER", "TEMP", "UPDATES"))
+    devs = sorted(devices(), key=lambda d: (d.get("number") is None, d.get("number") or 0, d.get("name") or ""))
+    print("%-7s %-16s %-9s %-7s %-15s %-9s %-11s %-8s %-6s %s" % ("NO.", "BRIDGE", "STATE", "PIN", "OS", "UPTIME", "V/VOICE/RET", "POWER", "TEMP", "UPDATES"))
     for d in devs:
         l = d.get("latest") or {}
         s = l.get("streams") or {}
@@ -176,8 +200,9 @@ def cmd_list(_):
         ota = l.get("ota") or {}
         if ota.get("state") and ota.get("state") not in ("committed",):
             upd.append("OS %s: %s" % (ota.get("version", ""), ota["state"]))
-        print("%-18s %-6s %-15s %-9s %-11s %-8s %-6s %s" % (
-            (d.get("name") or d["id"][-8:])[:18], "yes" if d.get("online") else "NO",
+        print("%-7s %-16s %-9s %-7s %-15s %-9s %-11s %-8s %-6s %s" % (
+            d.get("label") or ("new" if not d.get("claimed") else "-"), (d.get("name") or d.get("pairing_code") or d["id"][-8:])[:16],
+            (d.get("state") or ("online" if d.get("online") else "offline")).upper()[:9], pin_word(l),
             (d.get("version") or "?")[:15], short_uptime(l.get("uptime")), streams,
             ("%s%%" % pw) if pw is not None else "?", str(l.get("temp", "?"))[:6], "; ".join(upd) or "-"))
 
@@ -187,11 +212,17 @@ def cmd_show(a):
     d = api("GET", "/admin/devices/%s" % d["id"])
     l = d.get("latest") or {}
     p = l.get("power") or {}
-    print("%s — %s, OS %s, last seen %s" % (label(d), "ONLINE" if d.get("online") else "OFFLINE", d.get("version"), d.get("last_seen")))
+    print("%s — %s, OS %s, last seen %s" % (label(d), (d.get("state") or ("online" if d.get("online") else "offline")).upper(),
+                                              d.get("version"), d.get("last_seen")))
+    pn = l.get("pin") or {}
+    ses = pn.get("session") or {}
+    print("  PIN %s%s | session %s | laptop %s" % (pin_word(l), " (required on every go-live)" if pn.get("protocol", 0) >= 2 else " (old gate: not enforced)",
+                                                ("presenter %s, %s s" % (ses.get("peer"), ses.get("age_s"))) if ses.get("active") else "none",
+                                                {True: "connected", False: "not connected"}.get(d.get("laptop"), "?")))
     print("  uptime %s | temp %s | tailnet %s | mesh %s" % (l.get("uptime"), l.get("temp"), d.get("tailscale_ip") or l.get("tailscale_ip"),
                                                          (l.get("mesh_path") or {}).get("via")))
     print("  streams %s | restarts %s" % (l.get("streams"), l.get("restarts")))
-    print("  USB: %s" % ((l.get("usb") or {}).get("detail")))
+    print("  USB: %s | camera misses %s/s | /data free %s MB" % ((l.get("usb") or {}).get("detail"), l.get("usb_misses_per_s"), l.get("data_free_mb")))
     print("  power: %s" % (p.get("summary") or p))
     print("  audio: return %s Hz, mismatch %s, clock %s" % (l.get("return_rate"), l.get("return_mismatch"), (l.get("clock") or {}).get("verdict")))
     print("  updates: %s | parked: %s | OS update: %s" % (l.get("overrides"), l.get("quarantined"), l.get("ota")))
@@ -236,7 +267,8 @@ def cmd_usb(a):
     if not c or c.get("status") != "done":
         return show_result(c)
     rows = [l for l in (c.get("output") or "").splitlines() if "enodata=" in l]
-    total = sum(int(re.search(r"enodata=(\d+)", l).group(1)) for l in rows)
+    # all three kinds of missed transfer, exactly as the bridge reports usb_misses_per_s to the panel
+    total = sum(int(m) for l in rows for m in re.findall(r"(?:enodata|exdev|other)=(\d+)", l))
     for l in rows:
         print("  " + l)
     if rows:
@@ -351,6 +383,72 @@ def cmd_ssh(a):
     os.execvp("ssh", cmd)
 
 
+def cmd_claim(a):
+    devs = devices()
+    q = a[0].upper()
+    hit = [d for d in devs if not d.get("claimed") and (d.get("pairing_code") == q or d.get("pairing_code") == "BRIDGE-" + q or d["id"].endswith(a[0]))]
+    if len(hit) != 1:
+        die("no single unclaimed bridge matches %r — nb list shows new ones as 'new'" % a[0])
+    name = " ".join(a[1:]).strip()
+    if not name:
+        die("give it a name: nb claim %s \"Mumbai Studio\"" % a[0])
+    d = api("POST", "/admin/devices/%s/claim" % hit[0]["id"], {"name": name})
+    print("  ✔ claimed %s as %s — next: nb pin %s" % (hit[0].get("pairing_code"), label(d), d.get("label") or name))
+    return 0
+
+
+def _patch(d, body):
+    r = api("PATCH", "/admin/devices/%s" % d["id"], body)
+    print("  ✔ now %s" % label(r))
+    return 0
+
+
+def cmd_rename(a):
+    d = pick(a[0])[0]
+    name = " ".join(a[1:]).strip()
+    confirm("Rename to %r" % name, [d])
+    return _patch(d, {"name": name})
+
+
+def cmd_renumber(a):
+    d = pick(a[0])[0]
+    m = re.fullmatch(r"(?:nb-?)?0*(\d{1,4})", a[1].strip().lower())
+    if not m:
+        die("a fleet number is 1-9999 (NB-007, 7)")
+    confirm("Renumber to NB-%03d" % int(m.group(1)), [d])
+    return _patch(d, {"number": int(m.group(1))})
+
+
+def cmd_pin(a):
+    d = pick(a[0])[0]
+    body = {}
+    if len(a) > 1:
+        if not re.fullmatch(r"\d{4,8}", a[1]):
+            die("the PIN is 4-8 digits")
+        body["pin"] = a[1]
+    confirm("Set a new go-live PIN (a session already live is not ended)", [d])
+    r = api("POST", "/admin/devices/%s/pin" % d["id"], body)
+    print("  PIN for %s:  %s   ← shown once; the fleet keeps no copy. Hand it to your presenter yourself." % (label(d), r.get("pin")))
+    for _ in range(45):
+        time.sleep(4)
+        for c in api("GET", "/admin/devices/%s/commands?limit=30" % d["id"]):
+            if str(c.get("id")) == str(r.get("command_id")) and c.get("status") in DONE:
+                return show_result(c)
+    print("  ⏳ the bridge has not applied it yet (offline?) — it will on its next check-in")
+    return 0
+
+
+def cmd_clear_lockout(a):
+    d = pick(a[0])[0]
+    return show_result(run(d, "clear-lockout"))
+
+
+def cmd_lock(a):
+    d = pick(a[0])[0]
+    confirm("LOCK (ends the live session; media keeps running)", [d])
+    return show_result(run(d, "lock"))
+
+
 def cmd_run(a):
     d = pick(a[0])[0]
     args = json.loads(a[2]) if len(a) > 2 else {}
@@ -365,6 +463,8 @@ COMMANDS = {
     "usb": (cmd_usb, 1), "diagnose": (cmd_diagnose, 1), "deploy": (cmd_deploy, 2),
     "revert": (cmd_revert, 2), "unquarantine": (cmd_unquarantine, 1), "update": (cmd_update, 2),
     "ota": (cmd_ota, 1), "reboot": (cmd_reboot, 1), "ssh": (cmd_ssh, 1), "run": (cmd_run, 2),
+    "claim": (cmd_claim, 2), "rename": (cmd_rename, 2), "renumber": (cmd_renumber, 2), "pin": (cmd_pin, 1),
+    "clear-lockout": (cmd_clear_lockout, 1), "lock": (cmd_lock, 1),
 }
 
 if __name__ == "__main__":
