@@ -65,7 +65,7 @@ RTP_VIDEO, RTP_VOICE = 5000, 5002
 # Build stamp. build.py rewrites this line, and it is what the updater compares against
 # the signed manifest — so a build that forgets to bump it simply never updates, rather
 # than update-looping.
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 
 
 # --------------------------------------------------------------------------- state
@@ -1166,22 +1166,42 @@ def _quit(p, timeout=4.0):
 SESSION = Session()
 
 
-def _kill_orphan_media():
+MESH_PROC = "netbridge-mesh.exe" if IS_WIN else "netbridge-mesh"
+MEDIA_PROCS = ("ffmpeg", "gst-launch-1.0")
+MEDIA_MARKS = ("dump_extra=freq=keyframe", "payload_type 97", "udpsrc port=5004")
+
+
+def _proc_name(pid):
+    """The executable's own name for `pid` - never anything from its arguments - or '' if gone."""
+    try:
+        out = subprocess.run(["ps", "-o", "ucomm=" if IS_MAC else "comm=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=3).stdout.strip()
+    except Exception:
+        return ""
+    return os.path.basename(out)
+
+
+def _kill_orphan_media(names=MEDIA_PROCS, marks=MEDIA_MARKS):
     """Startup-only reaper for OUR leftover ffmpeg/GStreamer from a hard-killed prior run.
     Normal exits are handled by the signal cleanup in main(); a SIGKILL/crash can't run any
     handler, so a fresh launch sweeps up its own zombies here. Matched by unmistakable arg
     signatures unique to us (our RTP video flag, our voice payload, our return udpsrc port),
-    so no unrelated ffmpeg/gst on the machine is ever touched. Safe only at startup, before
-    this instance has a live session of its own."""
+    so no unrelated ffmpeg/gst on the machine is ever touched - AND only in a process that
+    really is ffmpeg/gst-launch: `pgrep -f` matches whole command lines, so a Terminal `grep`
+    or an editor with one of these strings in its arguments used to be SIGKILLed too
+    (2026-09-25). Safe only at startup, before this instance has a live session of its own."""
     if IS_WIN:
         return  # rely on the signal cleanup; a broad image kill would be unsafe on Windows
     import signal as _sig
-    for pat in ("dump_extra=freq=keyframe", "payload_type 97", "udpsrc port=5004"):
+    for pat in marks:
         try:
             out = subprocess.run(["pgrep", "-f", pat], capture_output=True, text=True)
             for tok in out.stdout.split():
                 try:
-                    os.kill(int(tok), _sig.SIGKILL)
+                    pid = int(tok)
+                    if _proc_name(pid) not in names:
+                        continue      # our signature in some OTHER program's arguments: not ours
+                    os.kill(pid, _sig.SIGKILL)
                 except (ValueError, ProcessLookupError, PermissionError):
                     pass
         except Exception:
@@ -1235,22 +1255,27 @@ def _mesh_bin():
     return None
 
 
-def _kill_orphan_mesh(exclude_pid=None):
+def _kill_orphan_mesh(exclude_pid=None, name=None):
     """Reap leftover netbridge-mesh helpers from a previous/crashed session.
 
     An orphaned helper keeps holding the media + control ports (5000/5002/5004/18080).
     The next go-live's helper then can't bind them and the session half-fails — the
     classic 'unlock timed out' with the video/voice checks stuck red. We own at most one
     helper (self.proc) which callers stop() first, so killing every other netbridge-mesh
-    here is safe. Best-effort: never let cleanup raise into the go-live path."""
+    here is safe. Best-effort: never let cleanup raise into the go-live path.
+
+    Matched by the PROCESS NAME, exactly (pgrep -x; taskkill /IM on Windows). It was
+    `pgrep -f netbridge-mesh`, which matches whole command lines: at every launch and every
+    go-live it SIGKILLed any process that merely MENTIONED the helper - a Terminal grep, an
+    editor, a build (found 2026-09-25 when it killed a test shell)."""
     import signal as _sig
-    name = "netbridge-mesh.exe" if IS_WIN else "netbridge-mesh"
+    name = name or MESH_PROC
     try:
         if IS_WIN:
             subprocess.run(["taskkill", "/F", "/IM", name],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            out = subprocess.run(["pgrep", "-f", "netbridge-mesh"],
+            out = subprocess.run(["pgrep", "-x", name],
                                  capture_output=True, text=True)
             for tok in out.stdout.split():
                 try:
