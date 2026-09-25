@@ -122,7 +122,12 @@ if [ $have_root -eq 1 ]; then
   "$DEBUGFS" -R "stat /usr/sbin/nft" "$ROOTDEV" 2>/dev/null | grep -q Inode && echo yes >"$CAT/.nft"
 fi
 has() { [ -s "$CAT/$1" ]; }
-grepf() { grep -qE "$2" "$CAT/$1" 2>/dev/null; }
+# Code lines only, for EVERY check. A comment that names a pattern must neither trip a "must not
+# contain" check nor satisfy a "must contain" one. Image 2.2.0 exposed three such checks
+# (2026-09-25): fleet-brain failed on the comment saying it had been removed, and the setup-AP
+# password and PIN count-first checks passed on comments alone. No -q on the second grep: under
+# pipefail an early exit can SIGPIPE the first grep and turn a real match into "no match".
+grepf() { grep -vE '^[[:space:]]*#' "$CAT/$1" 2>/dev/null | grep -E "$2" >/dev/null; }
 
 # ---------------------------------------------------------------- boot
 sec "It will boot at all"
@@ -166,7 +171,10 @@ grep -q "bridge-firstboot" "$CAT/.wants" 2>/dev/null && ok "firstboot runs on th
   || no "firstboot not enabled — provisioning will never happen"
 has bridge-wifi-portal.sh && ok "Wi-Fi setup portal present (the only sanctioned way to join)" \
   || no "no setup portal — a bridge at a new venue could not be joined to Wi-Fi"
-grepf bridge-wifi-portal.sh 'bridge2626' \
+# The portal takes its key from bridge-derive-pass, which enforces the value; in the portal itself
+# 'bridge2626' is only a comment, so grepping the portal passed on the comment alone (2026-09-25).
+grepf bridge-derive-pass '^FIXED=bridge2626$' && grepf bridge-derive-pass '"\$FIXED"' \
+  && grepf bridge-wifi-portal.sh '^[[:space:]]*/usr/local/bin/bridge-derive-pass[[:space:]]*(;|$)|\$\(/usr/local/bin/bridge-derive-pass' \
   && ok "setup-AP password is the fixed 'bridge2626' (the agreed policy for every bridge)" \
   || warn "setup-AP password is not the fixed policy value — check before shipping a card"
 has wifi-guardian.sh && ok "wifi-guardian present (rejoins when the venue drops it)" \
@@ -246,7 +254,19 @@ grepf bridge-agent.py 'STDIN = \{"set-pin"' && ! grepf bridge-agent.py '"sudo", 
   || no "agent passes the PIN in argv or can still unlock remotely"
 [ -s "$CAT/.nft" ] && ok "nft present (package nftables)" || no "no nft - the media gate cannot be armed"
 # The 2026-09-25 audit findings, each of which the previous code got wrong.
-grepf bridge-pin 'COUNT FIRST' && ok "a wrong PIN is counted before it is checked (full storage cannot mean unlimited guesses)" \
+# Where the CODE lines sit inside cmd_unlock: the try is written, a failed write refuses, and only
+# then is the PIN verified. (This used to grep for the comment "COUNT FIRST", which proves nothing.)
+count_first() {
+  awk '/^def cmd_unlock\(/ {f = 1; next}
+       f && /^def / {f = 0}
+       !f || /^[[:space:]]*#/ {next}
+       /write_atomic\(TRIES,/ && !w {w = NR}
+       /except OSError/ && w && !e {e = NR}
+       /^[[:space:]]+out\(\{"ok": False/ && e && !o {o = NR}
+       /if not verify\(pin, stored\)/ && !v {v = NR}
+       END {exit !(w && e && o && v && w < e && e < o && o < v)}' "$CAT/bridge-pin" 2>/dev/null
+}
+count_first && ok "a wrong PIN is counted before it is checked (full storage cannot mean unlimited guesses)" \
   || no "PIN tries counted after the check - a full /etc/bridge allows unlimited guesses"
 grepf bridge-web.py 'ip\.is_loopback' && ! grepf bridge-web.py 'LOOPBACK = \("127\.", "::1"' \
   && ok "callers are recognised by parsing the address (no ::1:2:3:4 posing as loopback)" \
