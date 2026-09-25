@@ -14,7 +14,7 @@ import hashlib
 import json
 import time
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc
@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import Base, engine, get_db
 from . import auth, models, notifier
-from .alerts import device_alerts, is_online
+from .alerts import device_alerts, is_online, alert_fix, bridge_title
 from .models import (Device, Telemetry, Command, DiagBundle, User, AuditLog,
                      Rollout, RolloutTarget, utcnow)
 from .schemas import (EnrollIn, EnrollOut, CommandOut, CommandResultIn,
@@ -420,8 +420,8 @@ def _notify_new_device(db, dev):
         db.flush()
         if notifier.any_channel_configured():
             payload = notifier.build_message(
-                dev.hostname or dev.pairing_code or dev.id, dev.id,
-                "new_device", detail, "firing", None)
+                bridge_title(dev), dev.id,
+                "new_device", detail, "firing", alert_fix("new_device", dev))
             if any(notifier.deliver(payload).values()):
                 ev.notified_at = utcnow()
         db.commit()
@@ -619,7 +619,10 @@ def _safe_alerts(dev: Device) -> list:
         return device_alerts(dev)
     except Exception as e:                  # malformed telemetry from one bridge
         print("[alerts] could not evaluate %s: %r" % (dev.id, e))
-        return [{"kind": "telemetry_unreadable", "detail": "this bridge sent telemetry the fleet could not read"}]
+        return [{"kind": "telemetry_unreadable", "title": notifier.alert_title("telemetry_unreadable"),
+                 "severity": notifier._severity("telemetry_unreadable"),
+                 "detail": "this bridge sent telemetry the fleet could not read",
+                 "fix": alert_fix("telemetry_unreadable", dev)}]
 
 
 def _device_view(dev: Device) -> dict:
@@ -1620,6 +1623,137 @@ def alerts_history(actor=Depends(auth.require_admin), db: Session = Depends(get_
             for e in rows]
 
 
+# ----------------------------- alerts, bridge by bridge -----------------------------
+# The Alerts page was one flat list: what is firing now, plus the newest 50 episodes for the
+# whole fleet. One flapping bridge pushed every other bridge's history off the end within a day,
+# and there was no way to ask "what has NB-002 been doing this week?" (owner, 2026-09-25).
+#   /admin/alerts/bridges   which bridge needs me: one row per bridge, worst first
+#   /admin/alerts/episodes  the full history, a page at a time, by bridge / state / severity / kind
+# The live stream still pushes each episode as it opens or resolves; the panel uses those as the
+# signal to refresh the page it is showing.
+INFO_KINDS = frozenset(("new_device",))          # a record, not a problem
+
+
+def _alert_severity(kind: str) -> str:
+    return "info" if kind in INFO_KINDS else notifier._severity(kind)
+
+
+def _utc(t):
+    """SQLite hands back tz-naive datetimes; they are UTC (same rule as alerts.is_online)."""
+    return t.replace(tzinfo=dt.timezone.utc) if t is not None and t.tzinfo is None else t
+
+
+def _iso(t):
+    return _utc(t).isoformat() if t is not None else None
+
+
+def _bridge_name(d: Device) -> str:
+    return " · ".join(x for x in (fleet_label(d.number), d.name or d.pairing_code or d.id) if x)
+
+
+@app.get("/admin/alerts/bridges")
+def alerts_by_bridge(actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
+    """One row per bridge: what is firing on it now (with its one-click fix and since when), and
+    how often it alerted in the last 24 h / 7 days. Bridges with critical alerts first, then
+    warnings, then the rest in fleet-number order."""
+    from sqlalchemy import func
+    from .models import AlertEvent
+    devs = db.scalars(select(Device).where(Device.org_id == actor.org)).all()
+    ids = [d.id for d in devs]
+    now = utcnow()
+    since, day, week, last = {}, {}, {}, {}
+    if ids:
+        for e in db.scalars(select(AlertEvent).where(AlertEvent.device_id.in_(ids),
+                                                     AlertEvent.resolved_at.is_(None))).all():
+            k = (e.device_id, e.kind)
+            if k not in since or _utc(e.opened_at) < since[k]:
+                since[k] = _utc(e.opened_at)
+        for window, into in ((dt.timedelta(hours=24), day), (dt.timedelta(days=7), week)):
+            for dev_id, n in db.execute(select(AlertEvent.device_id, func.count())
+                                        .where(AlertEvent.device_id.in_(ids), AlertEvent.opened_at >= now - window,
+                                               AlertEvent.kind.not_in(tuple(INFO_KINDS)))
+                                        .group_by(AlertEvent.device_id)).all():
+                into[dev_id] = n
+        for dev_id, t in db.execute(select(AlertEvent.device_id, func.max(AlertEvent.opened_at))
+                                    .where(AlertEvent.device_id.in_(ids), AlertEvent.kind.not_in(tuple(INFO_KINDS)))
+                                    .group_by(AlertEvent.device_id)).all():
+            last[dev_id] = t
+    rows = []
+    for d in devs:
+        online = is_online(d)
+        alerts = _safe_alerts(d)
+        firing = [{"kind": a["kind"], "title": notifier.alert_title(a["kind"]), "severity": _alert_severity(a["kind"]),
+                   "detail": a.get("detail"),
+                   "fix": a.get("fix"), "since": _iso(since.get((d.id, a["kind"])))} for a in alerts]
+        crit = sum(1 for a in firing if a["severity"] == "critical")
+        rows.append({"device_id": d.id, "number": d.number, "label": fleet_label(d.number), "name": d.name,
+                     "pairing_code": d.pairing_code, "claimed": d.claimed_at is not None, "online": online,
+                     "state": _device_state(d, online, alerts), "open": firing,
+                     "open_critical": crit, "open_warning": len(firing) - crit,
+                     "episodes_24h": day.get(d.id, 0), "episodes_7d": week.get(d.id, 0),
+                     "last_alert_at": _iso(last.get(d.id))})
+    rows.sort(key=lambda r: (-r["open_critical"], -r["open_warning"], r["number"] is None, r["number"] or 0,
+                             (r["name"] or r["pairing_code"] or r["device_id"]).lower()))
+    return {"bridges": rows,
+            "totals": {"bridges": len(rows),
+                       "needing_attention": sum(1 for r in rows if r["open"]),
+                       "open_critical": sum(r["open_critical"] for r in rows),
+                       "open_warning": sum(r["open_warning"] for r in rows),
+                       "episodes_24h": sum(r["episodes_24h"] for r in rows)}}
+
+
+@app.get("/admin/alerts/episodes")
+def alert_episodes(device_id: str | None = Query(None, max_length=128),
+                   status: str = Query("all", pattern="^(all|open|resolved)$"),
+                   severity: str = Query("all", pattern="^(all|critical|warning|info)$"),
+                   kind: str | None = Query(None, pattern="^[a-z_]{1,40}$"),
+                   page: int = Query(1, ge=1, le=1_000_000),
+                   page_size: int = Query(25, ge=1, le=100),
+                   actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
+    """Alert episodes (fired -> resolved), newest first, one page at a time. Filters: one bridge,
+    open / resolved, severity, kind. A page past the end returns the LAST page (after a bridge is
+    forgotten, a panel that was on page 9 of 9 lands on 8 of 8, not on an empty table)."""
+    from sqlalchemy import func
+    from .models import AlertEvent
+    devs = {d.id: d for d in db.scalars(select(Device).where(Device.org_id == actor.org)).all()}
+    if device_id is not None and device_id not in devs:
+        raise HTTPException(404, "no such bridge")        # another org's bridge looks exactly like no bridge
+    base = [AlertEvent.device_id == device_id] if device_id is not None else \
+        [AlertEvent.device_id.in_(select(Device.id).where(Device.org_id == actor.org))]
+    if kind is not None:
+        base.append(AlertEvent.kind == kind)
+    if severity == "critical":
+        base.append(AlertEvent.kind.in_(tuple(notifier.CRITICAL_KINDS)))
+    elif severity == "info":
+        base.append(AlertEvent.kind.in_(tuple(INFO_KINDS)))
+    elif severity == "warning":
+        base.append(AlertEvent.kind.not_in(tuple(notifier.CRITICAL_KINDS | INFO_KINDS)))
+    count = lambda *extra: db.scalar(select(func.count(AlertEvent.id)).where(*base, *extra)) or 0
+    n_open, n_resolved = count(AlertEvent.resolved_at.is_(None)), count(AlertEvent.resolved_at.is_not(None))
+    wanted = {"all": [], "open": [AlertEvent.resolved_at.is_(None)], "resolved": [AlertEvent.resolved_at.is_not(None)]}[status]
+    total = {"all": n_open + n_resolved, "open": n_open, "resolved": n_resolved}[status]
+    pages = max(1, -(-total // page_size))
+    page = min(page, pages)
+    rows = db.scalars(select(AlertEvent).where(*base, *wanted)
+                      .order_by(desc(AlertEvent.opened_at), desc(AlertEvent.id))
+                      .offset((page - 1) * page_size).limit(page_size)).all()
+    now = utcnow()
+    items = []
+    for e in rows:
+        opened, resolved = _utc(e.opened_at), _utc(e.resolved_at)
+        d = devs.get(e.device_id)
+        items.append({"id": e.id, "device_id": e.device_id, "device": _bridge_name(d) if d else e.device_id,
+                      "kind": e.kind, "title": notifier.alert_title(e.kind), "severity": _alert_severity(e.kind),
+                      "detail": e.detail,
+                      "opened_at": _iso(opened), "resolved_at": _iso(resolved),
+                      "duration_s": int(((resolved or now) - opened).total_seconds()) if opened else None,
+                      "notified": e.notified_at is not None})
+    return {"items": items, "page": page, "page_size": page_size, "pages": pages, "total": total,
+            "has_prev": page > 1, "has_next": page < pages,
+            "first": (page - 1) * page_size + 1 if items else 0, "last": (page - 1) * page_size + len(items),
+            "counts": {"open": n_open, "resolved": n_resolved, "all": n_open + n_resolved}}
+
+
 @app.post("/admin/alerts/test")
 def alerts_test(who=Depends(auth.require_admin)):
     """Send a synthetic alert through every configured channel, so an admin can
@@ -1686,7 +1820,8 @@ async def admin_stream(request: Request, actor=Depends(auth.require_admin)):
                 for e in db.scalars(select(AlertEvent).where(AlertEvent.device_id.in_(ids))
                                     .order_by(desc(AlertEvent.id)).limit(60)).all():
                     aviews[e.id] = {"id": e.id, "device_id": e.device_id, "device": names.get(e.device_id),
-                                    "kind": e.kind, "detail": e.detail,
+                                    "kind": e.kind, "title": notifier.alert_title(e.kind),
+                                    "severity": _alert_severity(e.kind), "detail": e.detail,
                                     "opened_at": e.opened_at.isoformat() if e.opened_at else None,
                                     "resolved_at": e.resolved_at.isoformat() if e.resolved_at else None,
                                     "notified": e.notified_at is not None}

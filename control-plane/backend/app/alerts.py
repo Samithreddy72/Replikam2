@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from .config import settings
 from .models import Device, utcnow
+from .notifier import alert_title, _severity
 
 
 def is_online(dev: Device) -> bool:
@@ -20,27 +21,113 @@ def is_online(dev: Device) -> bool:
 
 
 
-# Known remediations per alert kind (the walkthrough's "known fix attached").
-# fix.command must be in the backend ALLOWED_COMMANDS + agent allow-list.
+# EVERY ALERT CARRIES ITS OWN FIX (owner rule, 2026-09-25). Two shapes:
+#   one click   {"command": <in ALLOWED_COMMANDS and the agent allow-list>, "args", "label", "steps"}
+#               the panel routes it through the same action path as the menu, so set-pin opens its
+#               dialog and reboot / unquarantine / revert ask for confirmation exactly as they do there;
+#   hands-on    {"command": None, "label", "steps"}: nothing in software can fix it (power, heat, a
+#               bridge that is switched off), so the steps say exactly what a person does.
+# "steps" is what the panel shows under "How to fix", and what the alert email lists.
+# tests/test-fleet-alerts.py fails if any kind this module can raise has no fix, or names a command
+# the server or the bridge would refuse.
 _FIXES = {
-    "clock_suspect": {"command": "reset-clock", "args": {}, "label": "Reset audio clock now"},
-    "service_down":  {"command": "restart",     "args": {}, "label": "Restart media services"},
-    # Return audio running at the wrong rate (pitch-shifted/robotic). The bridge's own
-    # watchdog re-opens it within ~10s, so by the time a human reads this it is usually
-    # already fixed - the alert's job is the AUDIT TRAIL (it kept happening silently for
-    # a whole evening once). The fix restarts media services for the stubborn case.
-    "return_mismatch": {"command": "restart", "args": {}, "label": "Re-sync return audio now"},
-    # PIN gate and updates (2026-09-25): each alert an admin can act on carries its button. The
-    # panel routes these through the same action path as the menu, so set-pin opens its dialog
-    # and unquarantine asks for confirmation exactly as it does there.
-    "pin_lockout":        {"command": "clear-lockout", "args": {}, "label": "Clear the lockout"},
-    "pin_not_set":        {"command": "set-pin", "args": {}, "label": "Set a PIN…"},
-    "update_rolled_back": {"command": "unquarantine", "args": {}, "label": "Put the parked update back…"},
+    "offline": {"command": None, "label": "How to bring it back", "steps": [
+        "Check it has power: the red light on the Pi is on.",
+        "Moved to a new place? After a minute without Wi-Fi it opens its setup Wi-Fi {setup_ssid} - join it "
+        "from a phone (password: Setup label in its details) and pick the venue's Wi-Fi.",
+        "Still missing? Unplug the meeting laptop, then power-cycle the bridge.",
+        "It shows up here again within a minute of coming back."]},
+    "throttled": {"command": None, "label": "Fix the power", "steps": [
+        "It is browning out (under-voltage): audio stutters and it can reboot in the middle of a meeting.",
+        "Check the power cable and its connection to the Pi - reseat it; avoid long or thin cables.",
+        "This is electrical: restarting services will not fix it."]},
+    "service_down": {"command": "restart", "args": {}, "label": "Restart media services", "steps": [
+        "Unplug the meeting laptop first - restarting the camera with it attached can reboot the bridge.",
+        "Restart the media services (about 10 s; a live session drops and comes back).",
+        "If it fails again, open Logs for the service named above."]},
+    "temp_high": {"command": None, "label": "Cool it down", "steps": [
+        "Give it air: out of direct sun, not in a closed box or bag, nothing stacked on it.",
+        "It slows itself down when hot, which drops video frames.",
+        "The alert clears by itself once it has cooled."]},
+    "clock_suspect": {"command": "reset-clock", "args": {}, "label": "Reset audio clock now", "steps": [
+        "Rebuilds the USB audio device: the meeting laptop's camera, mic and speaker drop and come back - "
+        "re-select them in the meeting app.",
+        "Best done between meetings."]},
+    # Return audio at the wrong rate (pitch-shifted/robotic). The bridge's own watchdog re-opens it
+    # within ~10 s, so by the time a human reads this it is usually fixed - the alert is the AUDIT
+    # TRAIL (it once went on silently for a whole evening). The button is for the stubborn case.
+    "return_mismatch": {"command": "restart", "args": {}, "label": "Re-sync return audio now", "steps": [
+        "The bridge usually fixes this itself within 10 s.",
+        "If it keeps coming back: unplug the meeting laptop, then restart media services."]},
+    "pin_lockout": {"command": "clear-lockout", "args": {}, "label": "Clear the lockout", "steps": [
+        "Someone typed 3 wrong PINs, so the bridge refuses every PIN for an hour.",
+        "A presenter mistyping? Clear the lockout.",
+        "Not expected? Set a new PIN instead - that clears the lockout too."]},
+    "pin_not_set": {"command": "set-pin", "args": {}, "label": "Set a PIN…", "steps": [
+        "Every bridge needs a PIN: without one, going live is refused (older bridges stay open to anyone).",
+        "Set a 4-8 digit PIN and give it to your presenters."]},
+    "pin_gate_unavailable": {"command": "reboot", "args": {}, "label": "Reboot to re-arm the gate…", "steps": [
+        "The PIN still guards go-live, but video and voice are not blocked at the network level.",
+        "The bridge retries every 15 s by itself.",
+        "If this stays, reboot it outside a meeting (unplug the meeting laptop first)."]},
+    "usb_misses": {"command": None, "label": "Fix the USB link", "steps": [
+        "Plug the meeting laptop straight into the bridge - no USB hub - with a short data cable.",
+        "Check the Power line in the bridge's details: brownouts cause missed frames too.",
+        "Still freezing? Collect diagnostics from the Diagnostics tab."]},
+    "disk_low": {"command": None, "label": "Free up space", "steps": [
+        "/data holds logs, diagnostics bundles and installed updates.",
+        "Revert installed updates you no longer need (Installed updates -> Revert).",
+        "If it keeps filling, collect diagnostics and check which part grows."]},
+    "update_rolled_back": {"command": "unquarantine", "args": {}, "label": "Put the parked update back…", "steps": [
+        "The bridge undid an update that failed its health check and now runs the built-in file.",
+        "Put it back only once the cause is fixed - otherwise revert it for good."]},
+    "safe_mode": {"command": "revert-script", "args": {}, "label": "Revert an update…", "steps": [
+        "3 unhealthy boots in a row, so every installed update is switched off this boot.",
+        "Revert the most recent update (the usual cause), then reboot.",
+        "Nothing installed recently? Collect diagnostics."]},
+    "os_update_failed": {"command": None, "label": "What to do", "steps": [
+        "The bridge went back to its previous OS by itself and is running normally.",
+        "Read the reason above, fix the update, then retry it from the Updates page."]},
+    "mesh_relayed": {"command": None, "label": "Get a direct connection", "steps": [
+        "The venue network blocks a direct connection, so the session runs through a relay: expect extra delay.",
+        "Try the presenter on another network (a phone hotspot usually works), or ask the venue to allow UDP."]},
+    "restart_storm": {"command": "diagnose", "args": {}, "label": "Collect diagnostics", "steps": [
+        "Media keeps crashing or the bridge keeps rebooting.",
+        "Usual causes: power (see the Power line) or a recent update (see Installed updates - revert it).",
+        "The diagnostics bundle shows which service fails."]},
+    "telemetry_unreadable": {"command": None, "label": "What to do", "steps": [
+        "The bridge sent status the fleet could not read - usually software out of step with the fleet.",
+        "Check its Version; update it from the Updates page or reflash it with the current image."]},
+    "new_device": {"command": None, "label": "Claim it", "steps": [
+        "A new SD card joined the fleet. Open the fleet, find it under New and claim it: that names it, gives "
+        "it a fleet number and its mesh key.",
+        "Not yours? Leave it unclaimed - an unclaimed bridge cannot be used or controlled."]},
 }
 
 
-def alert_fix(kind: str):
-    return _FIXES.get(kind)
+def bridge_title(dev) -> str:
+    """How a person names a bridge everywhere: "NB-001 · Hall" (an unclaimed one by its code)."""
+    num = getattr(dev, "number", None)
+    return " · ".join(x for x in (("NB-%03d" % num) if num else None,
+                                  getattr(dev, "name", None) or getattr(dev, "pairing_code", None) or getattr(dev, "id", None)) if x)
+
+
+def setup_ssid(dev) -> str:
+    """The setup Wi-Fi a bridge opens when it has no network: the same rule as bridge-wifi-portal.sh
+    ("BridgeSetup-" + the pairing code without its "BRIDGE-" prefix)."""
+    code = (getattr(dev, "pairing_code", None) or "").strip()
+    return "BridgeSetup-" + (code[len("BRIDGE-"):] if code.startswith("BRIDGE-") else code or "…")
+
+
+def alert_fix(kind: str, dev=None):
+    """The fix for one alert kind, as a fresh copy (callers may add to it); steps filled in for `dev`."""
+    fix = _FIXES.get(kind)
+    if fix is None:
+        return None
+    out = dict(fix)
+    out["args"] = dict(fix.get("args") or {})
+    out["steps"] = [s.replace("{setup_ssid}", setup_ssid(dev)) for s in fix.get("steps", [])]
+    return out
 
 
 def restart_storm(dev: Device, db, window_min: int = 15,
@@ -90,8 +177,11 @@ def restart_storm(dev: Device, db, window_min: int = 15,
 def device_alerts(dev: Device, db=None) -> list[dict]:
     out = []
     if not is_online(dev):
-        out.append({"kind": "offline", "detail": "no heartbeat"})
-        return out  # offline has no one-click fix; a human must power-cycle it
+        # No command can reach a bridge that is off: its fix is the hands-on steps.
+        out.append({"kind": "offline", "title": alert_title("offline"), "severity": _severity("offline"),
+                    "detail": "no heartbeat",
+                    "fix": alert_fix("offline", dev)})
+        return out
     t = dev.latest if isinstance(dev.latest, dict) else {}
     # Telemetry comes from devices, so every nested field is checked for its shape: one odd value
     # must not hide a bridge's other alerts (or, before 2026-09-25, 500 the whole fleet list).
@@ -140,7 +230,7 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
     except (TypeError, ValueError):
         pass
     if t.get("clock_suspect"):
-        out.append({"kind": "clock_suspect", "detail": "return-audio I/O errors; run reset-clock"})
+        out.append({"kind": "clock_suspect", "detail": "return-audio I/O errors"})
     # Rate mismatch: the robotic/pitch-shift class. Published by the bridge's watchdog the
     # moment device pace and pipeline caps disagree; the file (and so this alert) clears on
     # the next successful re-open. Discovered 2026-08-01: 36 or 69 RTP pkts/s where
@@ -160,15 +250,15 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
         except (TypeError, ValueError):
             left = 0
         out.append({"kind": "pin_lockout",
-                    "detail": "3 wrong PIN tries — bridge locked for %d more min; rotate the PIN if unexpected" % max(1, left // 60)})
+                    "detail": "3 wrong PIN tries — PINs refused for %d more min" % max(1, left // 60)})
     # PIN. Every bridge must be PIN-gated: without a PIN anyone who can reach it over the
     # mesh can go live on it. Bridges from the 2026-09-24 image refuse go-live outright
     # until a PIN is set (pin.required); older ones stay open, which is worse.
     if pin and pin.get("pin_set") is False:
         out.append({"kind": "pin_not_set",
-                    "detail": ("no PIN set — go-live is BLOCKED until you set one"
+                    "detail": ("go-live is BLOCKED until you set one"
                                if pin.get("required") else
-                               "no PIN set — anyone on the mesh can go live on this bridge")})
+                               "anyone on the mesh can go live on this bridge")})
     if pin.get("gate") == "unavailable":
         out.append({"kind": "pin_gate_unavailable",
                     "detail": "the media gate could not be armed — go-live still needs the PIN, "
@@ -177,8 +267,7 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
     um = t.get("usb_misses_per_s")
     if isinstance(um, (int, float)) and um >= settings.usb_miss_alert_per_s:
         out.append({"kind": "usb_misses",
-                    "detail": "USB camera missing %.1f slots/s — video freezes likely; "
-                              "check the power supply and wiring" % um})
+                    "detail": "missing %.1f USB slots/s — video freezes likely" % um})
     free = t.get("data_free_mb")
     if isinstance(free, (int, float)) and free < settings.disk_low_mb:
         out.append({"kind": "disk_low", "detail": "only %d MB free on /data" % free})
@@ -209,7 +298,7 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
         if storm:
             out.append(storm)
     for a in out:
-        fix = alert_fix(a["kind"])
-        if fix:
-            a["fix"] = fix
+        a["title"] = alert_title(a["kind"])
+        a["severity"] = _severity(a["kind"])      # the same list the email uses
+        a["fix"] = alert_fix(a["kind"], dev)
     return out

@@ -127,6 +127,59 @@
   .empty{padding:44px 20px;text-align:center;color:var(--muted)}
   .skeleton{padding:44px 20px;text-align:center;color:var(--faint)}
 
+  /* ---- alerts page ---- */
+  .pagehead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+  .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0 0 16px}
+  .stat{padding:12px 16px}
+  .stat .n{font-size:22px;font-weight:750;letter-spacing:-.01em;line-height:1.25}
+  .stat .l{font-size:12px;color:var(--muted)}
+  .stat.bad .n{color:var(--bad)} .stat.warn .n{color:var(--warn)} .stat.ok .n{color:var(--ok)}
+  .alayout{display:grid;grid-template-columns:280px minmax(0,1fr);gap:18px;align-items:start}
+  .amain{min-width:0}
+  .alist{padding:6px;position:sticky;top:74px;max-height:calc(100vh - 96px);overflow:auto}
+  .alist-h{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);padding:8px 10px 6px}
+  .abr{display:flex;gap:10px;align-items:center;width:100%;text-align:left;background:none;border:0;border-radius:10px;
+    padding:9px 10px;cursor:pointer;color:var(--ink)}
+  .abr:hover{background:var(--surface-2)}
+  .abr[aria-current="true"]{background:var(--surface-2);box-shadow:inset 3px 0 0 var(--ink)}
+  .abr:focus-visible{outline:2px solid var(--info);outline-offset:-2px}
+  .abr .sd{flex:0 0 auto}
+  .abr-main{flex:1;min-width:0}
+  .abr-name{font-weight:700;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .abr-sub{font-size:11.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cnts{display:flex;gap:4px;flex:0 0 auto}
+  .cnt{min-width:22px;height:20px;padding:0 6px;border-radius:10px;font-size:11.5px;font-weight:750;
+    display:inline-flex;align-items:center;justify-content:center}
+  .cnt.bad{background:var(--bad-soft);color:var(--bad)} .cnt.warn{background:var(--warn-soft);color:var(--warn)}
+  .cnt.ok{background:var(--ok-soft);color:var(--ok)}
+  .apanel{padding:4px 16px}
+  .ahist-h{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:24px 0 10px}
+  .ahist-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .ahist-tools select{width:auto;padding:6px 10px;font-size:13px}
+  .newbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 10px;padding:9px 12px;
+    border-radius:9px;background:var(--info-soft);color:var(--info);font-size:13px}
+  .newbar .linkbtn{color:var(--info)}
+  .sev{display:inline-flex;align-items:center;gap:7px;font-weight:650;white-space:nowrap}
+  .sev .dot{width:8px;height:8px;border-radius:50%;background:var(--warn);flex:0 0 auto}
+  .sev.critical .dot{background:var(--bad)} .sev.info .dot{background:var(--info)}
+  table.onebridge .c-bridge{display:none}
+  .pager{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:10px 2px 0}
+  .pager-r{display:flex;align-items:center;gap:8px}
+  .pager select{width:auto;padding:5px 8px;font-size:12.5px}
+  .alertrow .adot.info{background:var(--info)}
+  .fixsteps{margin-top:6px;font-size:12.5px}
+  .fixsteps summary{cursor:pointer;color:var(--ink);font-weight:650}
+  .fixsteps ol{margin:6px 0 2px;padding-left:20px;color:var(--muted)}
+  .fixsteps li{margin:2px 0}
+  .asince{font-size:11.5px;color:var(--faint);margin-top:2px}
+  #alTable .c-bridge,#alTable .c-when{white-space:nowrap}
+  #alTable .c-detail{min-width:200px}
+  /* below 1100 px the bridge list moves above the history as a compact grid, so the table keeps its width */
+  @media (max-width:1100px){.alayout{grid-template-columns:1fr} .alist{position:static;max-height:none;display:grid;
+    grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:2px} .alist-h{grid-column:1/-1}}
+  @media (max-width:900px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media (max-width:700px){.pagehead{flex-direction:column;gap:6px} .pager-r{flex-wrap:wrap}}
+
   /* ---- drawer ---- */
   .scrim{position:fixed;inset:0;background:rgba(10,16,14,.35);z-index:40}
   .drawer{position:fixed;top:0;right:0;bottom:0;width:min(640px,100vw);background:var(--bg);z-index:41;
@@ -296,17 +349,49 @@
 
     <!-- ALERTS -->
     <section id="page-alerts" class="page" hidden>
-      <h1>Alerts</h1>
-      <p class="lede">What needs you right now, with its fix — and what happened while nobody was looking. Alerts are also emailed.</p>
-      <div class="card" style="padding:4px 16px" id="openAlerts"></div>
-      <div class="inline" style="margin:22px 0 10px;justify-content:space-between">
-        <h2 class="sec" style="margin:0">Recent episodes</h2>
+      <div class="pagehead">
+        <div>
+          <h1>Alerts</h1>
+          <p class="lede">What needs you now, bridge by bridge, each with its fix, and every alert episode, a page at a time. Alerts are also emailed.</p>
+        </div>
         <button class="btn ghost sm" id="testAlertBtn" type="button">Send a test alert</button>
       </div>
-      <div class="card tablecard">
-        <table class="grid"><thead><tr><th>Bridge</th><th>Alert</th><th>Detail</th><th>Started</th><th>Resolved</th><th>Emailed</th></tr></thead>
-          <tbody id="alertHist"></tbody></table>
-        <div id="alertHistEmpty" class="empty" hidden>No alert episodes recorded yet.</div>
+      <div class="stats" id="alStats" aria-live="polite"></div>
+      <div class="alayout">
+        <aside class="card alist" aria-label="Alerts by bridge">
+          <div class="alist-h">By bridge</div>
+          <div id="alBridges"></div>
+        </aside>
+        <div class="amain">
+          <h2 class="sec" id="alNowTitle" style="margin-top:0">Needs attention now</h2>
+          <div class="card apanel" id="alNow"></div>
+          <div class="ahist-h">
+            <h2 class="sec" id="alHistTitle" style="margin:0">History</h2>
+            <div class="ahist-tools">
+              <div class="chips" id="alStatus" role="group" aria-label="Show"></div>
+              <select id="alSeverity" aria-label="Severity">
+                <option value="all">All severities</option><option value="critical">Critical</option>
+                <option value="warning">Warnings</option><option value="info">Info</option>
+              </select>
+            </div>
+          </div>
+          <div class="newbar" id="alNew" hidden><span id="alNewTxt"></span><button class="linkbtn" id="alNewBtn" type="button">Show the latest</button></div>
+          <div class="card tablecard">
+            <table class="grid" id="alTable"><thead><tr><th class="c-bridge">Bridge</th><th>Alert</th><th>Detail</th><th>Started</th><th>Lasted</th><th>Emailed</th></tr></thead>
+              <tbody id="alRows"></tbody></table>
+            <div id="alMsg" class="skeleton">Loading…</div>
+          </div>
+          <div class="pager" id="alPager" hidden>
+            <span class="small muted" id="alRange"></span>
+            <span class="pager-r">
+              <label class="small muted" for="alSize">Rows</label>
+              <select id="alSize"><option>25</option><option>50</option><option>100</option></select>
+              <button class="btn ghost sm" id="alPrev" type="button">‹ Newer</button>
+              <span class="small" id="alPageNo"></span>
+              <button class="btn ghost sm" id="alNext" type="button">Older ›</button>
+            </span>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -471,7 +556,7 @@ const ALERT_LABEL = {offline: "Offline", throttled: "Power — under-voltage", s
   pin_lockout: "PIN lockout", pin_not_set: "No PIN set", pin_gate_unavailable: "PIN media gate off",
   usb_misses: "USB camera missing frames", disk_low: "Low disk space", update_rolled_back: "Update rolled back",
   safe_mode: "Safe mode", os_update_failed: "OS update failed", mesh_relayed: "Relayed connection",
-  restart_storm: "Restart storm"};
+  restart_storm: "Restart storm", telemetry_unreadable: "Unreadable status", new_device: "New bridge enrolled"};
 
 // ---------------------------------------------------------------------------------- helpers
 function h(tag, attrs, ...kids){
@@ -649,12 +734,12 @@ function onBlock(block){
   if (ev === "device"){ if (S.seenThisConn) S.seenThisConn.add(o.id); upsertDevice(o); return; }
   if (ev === "device_removed"){ removeDevice(o.id); return; }
   if (ev === "command"){ upsertCommand(o); return; }
-  if (ev === "alert"){ S.alerts.set(o.id, o); schedule("alerts"); return; }
+  if (ev === "alert"){ onAlertEvent(o); return; }
   if (ev === "ready"){
     // A device deleted while we were disconnected never gets a device_removed: drop what this
     // connection's snapshot did not include.
     if (S.seenThisConn) for (const id of [...S.devices.keys()]) if (!S.seenThisConn.has(id)) removeDevice(id);
-    S.seenThisConn = null; S.ready = true; setConn("live");
+    S.seenThisConn = null; S.ready = true; AL.primed = true; setConn("live");
     $("fleetSkeleton").hidden = true; schedule("fleet");
     if (DR.pending){ DR.pending = null; route(); }          // a link to a bridge opened before the data arrived
     return;
@@ -664,12 +749,16 @@ function onBlock(block){
 // A stream that has gone silent (no keep-alive for 45 s) is dead even if the socket says not.
 setInterval(() => { if (KEY && S.ctl && S.last && Date.now() - S.last > 45000){ S.last = Date.now(); openStream(); } }, 10000);
 
-function upsertDevice(d){ S.devices.set(d.id, d); schedule("fleet", d.id); for (const f of (LIVE_NOTES.get(d.id) || [])) f(d); }
+function upsertDevice(d){
+  const was = S.devices.get(d.id);
+  S.devices.set(d.id, d); schedule("fleet", d.id); for (const f of (LIVE_NOTES.get(d.id) || [])) f(d);
+  if (alertKinds(was) !== alertKinds(d)) alertsChanged();          // an alert started or cleared on this bridge
+}
 function removeDevice(id){
   S.devices.delete(id);
   const r = ROWS.get(id); if (r){ r.tr.remove(); ROWS.delete(id); }
   if (DR.id === id){ closeDrawer(); toast("That bridge was removed from the fleet.", "warn"); }
-  schedule("fleet");
+  schedule("fleet"); alertsChanged();
 }
 function upsertCommand(c){
   const prev = S.commands.get(c.id) || {};
@@ -681,7 +770,7 @@ function upsertCommand(c){
 }
 
 // ---- batched painting: many events in one frame cost one paint
-const DIRTY = {fleet: false, ids: new Set(), alerts: false, history: false};
+const DIRTY = {fleet: false, ids: new Set(), history: false};
 let rafPending = false;
 function schedule(what, id){
   DIRTY[what] = true; if (id) DIRTY.ids.add(id);
@@ -689,8 +778,7 @@ function schedule(what, id){
 }
 function paint(){
   rafPending = false;
-  if (DIRTY.fleet){ DIRTY.fleet = false; paintFleet(DIRTY.ids); DIRTY.ids = new Set(); paintOpenAlerts(); }
-  if (DIRTY.alerts){ DIRTY.alerts = false; paintAlertHistory(); }
+  if (DIRTY.fleet){ DIRTY.fleet = false; paintFleet(DIRTY.ids); DIRTY.ids = new Set(); paintAlertSummary(); }
   if (DIRTY.history){ DIRTY.history = false; paintHistory(); }
 }
 
@@ -875,6 +963,8 @@ function buildOverview(p, d){
   DR.f.alerts = h("div");
   p.append(DR.f.claimbox,
     h("h3", {}, "Needs attention"), DR.f.alerts,
+    h("button", {class: "linkbtn", type: "button", style: "margin-top:8px",
+      onclick: () => go("#/alerts/" + encodeURIComponent(d.id))}, "Alert history for this bridge ›"),
     h("h3", {}, "Right now"), h("dl", {class: "kv"}, field("state", "State"), field("session", "Session"), field("laptop", "Meeting laptop"),
       field("pin", "PIN"), field("path", "Connection"), field("seen", "Last heard from")),
     h("h3", {}, "Health"), h("dl", {class: "kv"}, field("power", "Power"), field("usb", "USB camera"), field("temp", "Temperature"),
@@ -933,11 +1023,22 @@ function paintDrawer(){
   if (DR.tab === "updates") paintUpdatesTab(d);
   if (DR.f.actOffline) DR.f.actOffline.hidden = d.online;
 }
-function alertRow(d, a){
-  const fix = a.fix && d.claimed ? h("button", {class: "btn secondary sm", type: "button",
-    onclick: (e) => { e.stopPropagation(); doAction(d.id, a.fix.command); }}, a.fix.label) : null;
-  return h("div", {class: "alertrow"}, h("span", {class: "adot" + (["offline", "pin_not_set", "pin_lockout", "safe_mode", "os_update_failed"].includes(a.kind) ? " bad" : "")}),
-    h("div", {class: "abody"}, h("div", {class: "at"}, ALERT_LABEL[a.kind] || a.kind.replace(/_/g, " ")), h("div", {class: "ad"}, a.detail || "")), fix);
+// One alert with its fix (every alert carries one, 2026-09-25): a button when one click can fix it,
+// and the steps - what the button does, or what a person has to do when nothing in software can.
+function alertRow(d, a, opts = {}){
+  const f = a.fix || null, sev = a.severity || "warning";
+  const canRun = !!(f && f.command && d && d.claimed);
+  const btn = canRun ? h("button", {class: "btn secondary sm", type: "button",
+    onclick: (e) => { e.stopPropagation(); doAction(d.id, f.command); }}, f.label) : null;
+  // A one-click fix cannot reach an unclaimed bridge: say so first, instead of a button that is not there.
+  const list = f ? (f.command && d && !d.claimed ? ["Claim this bridge first (Bridges → New): fixes only reach claimed bridges."] : []).concat(f.steps || []) : [];
+  const steps = list.length ? h("details", {class: "fixsteps", onclick: (e) => e.stopPropagation()},
+    h("summary", {}, canRun ? "What this does" : f.command ? "How to fix" : (f.label || "How to fix")),
+    h("ol", {}, list.map(s => h("li", {}, s)))) : null;
+  const title = (opts.prefix ? opts.prefix + " — " : "") + (a.title || ALERT_LABEL[a.kind] || String(a.kind || "").replace(/_/g, " "));
+  return h("div", {class: "alertrow"}, h("span", {class: "adot" + (sev === "critical" ? " bad" : sev === "info" ? " info" : "")}),
+    h("div", {class: "abody"}, h("div", {class: "at"}, title), a.detail ? h("div", {class: "ad"}, a.detail) : null,
+      opts.since ? h("div", {class: "asince"}, "since " + rel(parseTs(opts.since))) : null, steps), btn);
 }
 async function loadUptime(d){
   DR.fetched.uptime = true;
@@ -1497,25 +1598,180 @@ function forgetDialog(d){
 }
 
 // ---------------------------------------------------------------------------------- alerts
-function paintOpenAlerts(){
-  const box = $("openAlerts");
-  const items = [];
-  for (const d of [...S.devices.values()].sort((a, b) => (a.number || 1e9) - (b.number || 1e9)))
-    for (const a of (d.alerts || [])) items.push([d, a]);
-  patch(box, JSON.stringify(items.map(([d, a]) => [d.id, d.label, d.name, a])), () => items.length
-    ? items.map(([d, a]) => { const row = alertRow(d, a); row.querySelector(".at").textContent = devLabel(d) + " — " + (ALERT_LABEL[a.kind] || a.kind);
-        row.style.cursor = "pointer"; row.addEventListener("click", () => go("#/bridge/" + encodeURIComponent(d.id))); return row; })
-    : [h("div", {class: "empty", style: "padding:26px"}, "Nothing needs you right now.")]);
+// Bridge by bridge, a page at a time (2026-09-25). One selection - every bridge, or one - shows what is firing
+// on it now (live from the stream, each alert with its fix) above its history, which the server pages
+// (/admin/alerts/episodes). The stream's alert events only say "something changed": the summary refreshes, the
+// rows refresh on the first page, and on a later page a bar offers the newest instead of moving rows under the
+// reader. /admin/alerts/bridges adds what the stream does not carry: since when, and 24 h / 7 day counts.
+const AL = {bridge: null, status: "all", severity: "all", page: 1, size: 25, sum: null, data: null, err: null,
+            loading: false, seq: 0, sseq: 0, known: new Set(), base: 0, primed: false, fresh: 0, reload: false, timer: null, stale: true};
+try { const z = parseInt(localStorage.getItem("nb_alert_rows"), 10); if ([25, 50, 100].includes(z)) AL.size = z; } catch (e) {}
+function sumRow(id){ return (AL.sum && AL.sum.bridges.find(b => b.device_id === id)) || null; }
+function sinceOf(id, kind){ const r = sumRow(id); const a = r && r.open.find(x => x.kind === kind); return a ? a.since : null; }
+function devCounts(d){
+  let c = 0, w = 0;
+  for (const a of (d.alerts || [])){ if (a.severity === "critical") c++; else if (a.severity !== "info") w++; }
+  return [c, w];
 }
-function paintAlertHistory(){
-  const rows = [...S.alerts.values()].sort((a, b) => (parseTs(b.opened_at) || 0) - (parseTs(a.opened_at) || 0)).slice(0, 60);
-  $("alertHistEmpty").hidden = rows.length > 0;
-  patch($("alertHist"), JSON.stringify(rows), () => rows.map(e => h("tr", {},
-    h("td", {}, e.device || (S.devices.get(e.device_id) ? devLabel(S.devices.get(e.device_id)) : e.device_id)),
-    h("td", {}, ALERT_LABEL[e.kind] || e.kind), h("td", {class: "small"}, e.detail || ""), h("td", {class: "small muted"}, clock(parseTs(e.opened_at))),
-    h("td", {}, e.resolved_at ? h("span", {class: "small muted"}, clock(parseTs(e.resolved_at))) : pill("warn", "open")),
-    h("td", {}, e.notified ? "yes" : "—"))));
+function alertBridges(){
+  return [...S.devices.values()].map(d => ({d, c: devCounts(d), s: sumRow(d.id)}))
+    .sort((x, y) => (y.c[0] - x.c[0]) || (y.c[1] - x.c[1]) || ((x.d.number == null) - (y.d.number == null))
+      || ((x.d.number || 0) - (y.d.number || 0)) || devName(x.d).localeCompare(devName(y.d)));
 }
+function selLabel(){
+  if (!AL.bridge) return null;
+  const d = S.devices.get(AL.bridge), r = sumRow(AL.bridge);
+  return d ? devLabel(d) : r ? [r.label, r.name || r.pairing_code].filter(Boolean).join(" · ") : AL.bridge;
+}
+function stat(cls, n, label){ return h("div", {class: "card stat " + cls}, h("div", {class: "n"}, n), h("div", {class: "l"}, label)); }
+function bridgeSub(x){
+  if (x.d.state === "offline") return "Offline" + (x.d.last_seen ? " · last heard " + rel(parseTs(x.d.last_seen)) : "");
+  if (!x.s) return STATE_LABEL[x.d.state] || "";
+  if (x.s.episodes_24h) return x.s.episodes_24h + " alert" + (x.s.episodes_24h === 1 ? "" : "s") + " in 24 h · last " + rel(parseTs(x.s.last_alert_at));
+  return x.s.last_alert_at ? "Quiet · last alert " + rel(parseTs(x.s.last_alert_at)) : "No alerts on record";
+}
+function bridgeBtn(id, title, sub, counts, state, current){
+  const [c, w] = counts;
+  return h("button", {class: "abr", type: "button", "aria-current": current ? "true" : "false",
+      onclick: () => go(id ? "#/alerts/" + encodeURIComponent(id) : "#/alerts")},
+    h("span", {class: "sd " + (state || ""), title: state ? (STATE_LABEL[state] || state) : null, style: state ? null : "background:transparent"}),
+    h("span", {class: "abr-main"}, h("div", {class: "abr-name"}, title), h("div", {class: "abr-sub"}, sub)),
+    h("span", {class: "cnts"},
+      c ? h("span", {class: "cnt bad", title: c + " critical"}, c) : null,
+      w ? h("span", {class: "cnt warn", title: w + (w === 1 ? " warning" : " warnings")}, w) : null,
+      !c && !w ? h("span", {class: "cnt ok", title: "nothing firing"}, "✓") : null));
+}
+function paintAlertSummary(){
+  if (PAGE !== "alerts") return;
+  const list = alertBridges(), sel = AL.bridge, minute = Math.floor(Date.now() / 60000);
+  const crit = list.reduce((n, x) => n + x.c[0], 0), warn = list.reduce((n, x) => n + x.c[1], 0);
+  const needing = list.filter(x => x.c[0] + x.c[1]).length, day = AL.sum ? AL.sum.totals.episodes_24h : null;
+  patch($("alStats"), JSON.stringify([crit, warn, needing, list.length, day]), () => [
+    stat(crit ? "bad" : "ok", crit, crit === 1 ? "critical alert now" : "critical alerts now"),
+    stat(warn ? "warn" : "ok", warn, warn === 1 ? "warning now" : "warnings now"),
+    stat(needing ? "warn" : "ok", needing + " / " + list.length, needing === 1 ? "bridge needs attention" : "bridges need attention"),
+    stat("", day == null ? "…" : day, "alert episodes, last 24 h")]);
+  patch($("alBridges"), JSON.stringify([sel, minute, list.map(x => [x.d.id, x.d.label, devName(x.d), x.d.state, x.d.last_seen, x.c,
+      x.s && [x.s.episodes_24h, x.s.last_alert_at]])]), () => [
+    bridgeBtn(null, "All bridges", list.length + (list.length === 1 ? " bridge" : " bridges"), [crit, warn], null, !sel),
+    ...list.map(x => bridgeBtn(x.d.id, devLabel(x.d), bridgeSub(x), x.c, x.d.state, sel === x.d.id))]);
+  const now = [];
+  for (const x of list) if (!sel || x.d.id === sel) for (const a of (x.d.alerts || [])) now.push([x.d, a]);
+  setText($("alNowTitle"), sel ? "Needs attention now — " + selLabel() : "Needs attention now");
+  patch($("alNow"), JSON.stringify([sel, minute, now.map(([d, a]) => [d.id, d.label, devName(d), d.claimed, a, sinceOf(d.id, a.kind)])]),
+    () => now.length ? now.map(([d, a]) => {
+        const row = alertRow(d, a, {prefix: sel ? null : devLabel(d), since: sinceOf(d.id, a.kind)});
+        row.style.cursor = "pointer"; row.title = "Open " + devLabel(d);
+        row.addEventListener("click", () => go("#/bridge/" + encodeURIComponent(d.id))); return row; })
+      : [h("div", {class: "empty", style: "padding:24px"}, sel ? "Nothing is firing on " + selLabel() + " right now." : "Nothing needs you right now.")]);
+  if (sel && !S.devices.get(sel) && S.ready && AL.sum && !sumRow(sel)){ toast("That bridge is no longer in the fleet — showing every bridge.", "warn"); go("#/alerts"); }
+}
+function alertEmpty(){
+  const who = AL.bridge ? " for " + selLabel() : "";
+  if (AL.status === "open") return "Nothing is open" + who + " — all clear.";
+  if (AL.status === "all" && AL.severity === "all") return "No alert episodes recorded" + who + " yet.";
+  return "No alert episodes match these filters" + who + ".";
+}
+function paintAlertRows(){
+  if (PAGE !== "alerts") return;
+  const r = AL.data, msg = $("alMsg"), minute = Math.floor(Date.now() / 60000);
+  setText($("alHistTitle"), AL.bridge ? "History — " + selLabel() : "History — all bridges");
+  $("alTable").classList.toggle("onebridge", !!AL.bridge);
+  const counts = (r && r.counts) || {};
+  patch($("alStatus"), JSON.stringify([AL.status, counts]), () => [["all", "All"], ["open", "Open"], ["resolved", "Resolved"]].map(([v, l]) =>
+    h("button", {class: "chip" + (AL.status === v ? " on" : ""), type: "button", "aria-pressed": AL.status === v ? "true" : "false",
+      onclick: () => { if (AL.status !== v){ AL.status = v; AL.page = 1; loadAlertPage(); } }}, l, counts[v] != null ? h("b", {}, counts[v]) : null)));
+  $("alSeverity").value = AL.severity; $("alSize").value = String(AL.size);
+  $("alNew").hidden = !(AL.fresh > 0 && r && r.page > 1);
+  setText($("alNewTxt"), AL.fresh + (AL.fresh === 1 ? " new alert episode" : " new alert episodes") + " since this page loaded.");
+  if (!r){
+    patch($("alRows"), "none", () => []); $("alPager").hidden = true; msg.hidden = false;
+    if (AL.err){ msg.className = "empty"; msg.replaceChildren(h("div", {}, "Could not load the alert history: " + AL.err),
+        h("button", {class: "btn secondary sm", type: "button", style: "margin-top:10px", onclick: () => loadAlertPage()}, "Try again")); }
+    else { msg.className = "skeleton"; msg.replaceChildren("Loading…"); }
+    return;
+  }
+  $("alTable").style.opacity = AL.loading ? ".55" : "";
+  patch($("alRows"), JSON.stringify([r.items, minute]), () => r.items.map(e => {
+    const open = !e.resolved_at, secs = open ? (Date.now() - (parseTs(e.opened_at) || Date.now())) / 1000 : e.duration_s;
+    return h("tr", {},
+      h("td", {class: "c-bridge"}, h("button", {class: "linkbtn", type: "button", style: "color:var(--ink);font-size:13px", title: "Show only this bridge",
+        onclick: () => go("#/alerts/" + encodeURIComponent(e.device_id))}, e.device)),
+      h("td", {}, h("span", {class: "sev " + (e.severity || "warning")}, h("span", {class: "dot"}), e.title || ALERT_LABEL[e.kind] || e.kind)),
+      h("td", {class: "small c-detail"}, e.detail || "—"),
+      h("td", {class: "small muted c-when", title: e.opened_at ? new Date(parseTs(e.opened_at)).toString() : null}, clock(parseTs(e.opened_at))),
+      h("td", {}, open ? pill(e.severity === "critical" ? "bad" : "warn", "open · " + dur(secs))
+        : h("span", {class: "small muted", title: "resolved " + clock(parseTs(e.resolved_at))}, dur(secs))),
+      h("td", {class: "small"}, e.notified ? "yes" : "—"));
+  }));
+  msg.className = "empty"; msg.hidden = r.items.length > 0;
+  if (!r.items.length) msg.replaceChildren(alertEmpty());
+  $("alPager").hidden = r.total === 0;
+  setText($("alRange"), r.total ? "Showing " + r.first + "–" + r.last + " of " + r.total : "");
+  setText($("alPageNo"), "Page " + r.page + " of " + r.pages);
+  $("alPrev").disabled = !r.has_prev || AL.loading; $("alNext").disabled = !r.has_next || AL.loading;
+}
+async function loadAlertSummary(){
+  const my = ++AL.sseq;
+  try { const s = await api("/admin/alerts/bridges"); if (my !== AL.sseq) return; AL.sum = s; }
+  catch (e) { if (e.message === "auth" || my !== AL.sseq) return; }       // the live parts still paint from the stream
+  paintAlertSummary();
+}
+async function loadAlertPage(scroll){
+  const my = ++AL.seq;
+  const q = new URLSearchParams({page: AL.page, page_size: AL.size, status: AL.status, severity: AL.severity});
+  if (AL.bridge) q.set("device_id", AL.bridge);
+  AL.loading = true; AL.reload = false; paintAlertRows();
+  try {
+    const r = await api("/admin/alerts/episodes?" + q.toString());
+    if (my !== AL.seq) return;                       // a newer request (filter, page) superseded this one
+    AL.data = r; AL.page = r.page; AL.err = null;
+    if (r.page === 1){ AL.fresh = 0; for (const id of AL.known) AL.base = Math.max(AL.base, id); }
+    for (const i of r.items){ AL.known.add(i.id); if (r.page === 1) AL.base = Math.max(AL.base, i.id); }
+  } catch (e) {
+    if (my !== AL.seq || e.message === "auth") return;
+    if (e.status === 404 && AL.bridge){ toast("That bridge is no longer in the fleet — showing every bridge.", "warn"); go("#/alerts"); return; }
+    AL.err = e.message; if (!AL.data) AL.data = null;
+  }
+  AL.loading = false; paintAlertRows();
+  if (scroll){ const y = $("alHistTitle").getBoundingClientRect().top + window.scrollY - 76; if (window.scrollY > y) window.scrollTo({top: y, behavior: "smooth"}); }
+}
+function openAlerts(bridge){                         // route: #/alerts or #/alerts/<device id>
+  bridge = bridge || null;
+  const changed = AL.bridge !== bridge;
+  AL.bridge = bridge;
+  if (changed){ AL.page = 1; AL.data = null; AL.fresh = 0; }
+  paintAlertSummary(); paintAlertRows();
+  loadAlertSummary();
+  if (changed || AL.stale || !AL.data){ AL.stale = false; loadAlertPage(); }
+}
+// Stream hooks
+// "New" = an episode id never seen before AND newer than what the page was built against. Ids, not a running
+// maximum: the stream sends the newest first, so two episodes in one tick used to count as one.
+function onAlertEvent(o){
+  const unseen = !AL.known.has(o.id);
+  AL.known.add(o.id);
+  if (!AL.primed) AL.base = Math.max(AL.base, o.id);
+  else if (unseen && o.id > AL.base && !o.resolved_at && AL.status !== "resolved"
+           && (!AL.bridge || AL.bridge === o.device_id) && (AL.severity === "all" || o.severity === AL.severity)) AL.fresh++;
+  if (AL.data && AL.data.items.some(i => i.id === o.id)) AL.reload = true;   // a row on screen resolved
+  alertsChanged();
+}
+function alertKinds(d){ return d ? (d.alerts || []).map(a => a.kind).sort().join(",") : ""; }
+function alertsChanged(){
+  if (PAGE !== "alerts"){ AL.stale = true; return; }
+  clearTimeout(AL.timer);
+  AL.timer = setTimeout(() => {
+    loadAlertSummary();
+    if (!AL.data || AL.page === 1 || AL.reload) loadAlertPage(); else paintAlertRows();
+  }, 700);
+}
+$("alSeverity").addEventListener("change", (e) => { AL.severity = e.target.value; AL.page = 1; loadAlertPage(); });
+$("alSize").addEventListener("change", (e) => { AL.size = parseInt(e.target.value, 10) || 25; AL.page = 1; store("nb_alert_rows", String(AL.size)); loadAlertPage(); });
+$("alPrev").addEventListener("click", () => { if (AL.page > 1){ AL.page--; loadAlertPage(true); } });
+$("alNext").addEventListener("click", () => { if (AL.data && AL.data.has_next){ AL.page++; loadAlertPage(true); } });
+$("alNewBtn").addEventListener("click", () => { AL.page = 1; loadAlertPage(true); });
+setInterval(() => { if (ADMIN && PAGE === "alerts" && !document.hidden){ loadAlertSummary(); paintAlertRows(); } }, 60000);
 $("testAlertBtn").addEventListener("click", async () => {
   try { const r = await api("/admin/alerts/test", {method: "POST"});
     const sent = Object.entries(r.sent || {}).map(([k, v]) => k + (v ? " ✓" : " ✗")).join(", ");
@@ -1649,6 +1905,7 @@ function route(){
   if (!$("drawer").hidden) closeDrawer();
   if (!["fleet", "alerts", "updates", "team", "audit"].includes(page)) page = "fleet";
   showPage(page);
+  if (page === "alerts") openAlerts(parts[1] ? decodeURIComponent(parts[1]) : null);
 }
 function showPage(page){
   const changed = PAGE !== page; PAGE = page;
@@ -1658,13 +1915,6 @@ function showPage(page){
   if (page === "updates") loadUpdatesPage();
   if (page === "team") loadTeam();
   if (page === "audit") loadAudit();
-  if (page === "alerts"){ paintOpenAlerts(); loadAlertHistory(); }
-}
-async function loadAlertHistory(){
-  try { const rows = await api("/admin/alerts/history");
-    rows.forEach((e, i) => { const id = "h" + i + "-" + e.device_id + "-" + e.opened_at; if (![...S.alerts.values()].some(x => x.device_id === e.device_id && x.opened_at === e.opened_at && x.kind === e.kind)) S.alerts.set(id, e); });
-    schedule("alerts");
-  } catch (e) {}
 }
 window.addEventListener("hashchange", route);
 

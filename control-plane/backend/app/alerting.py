@@ -11,7 +11,7 @@ import logging
 
 from sqlalchemy import select
 
-from .alerts import device_alerts, alert_fix
+from .alerts import device_alerts, alert_fix, bridge_title
 from .models import Device, AlertEvent, utcnow
 from . import notifier
 
@@ -38,7 +38,7 @@ def evaluate(db) -> dict:
         open_events = {e.kind: e for e in db.scalars(
             select(AlertEvent).where(AlertEvent.device_id == dev.id,
                                      AlertEvent.resolved_at.is_(None))).all()}
-        name = dev.name or dev.pairing_code or dev.id
+        name = bridge_title(dev)                  # "NB-001 · Hall" in every email subject
 
         # 1) NEW alerts: a kind that's firing now with no open event.
         for kind, a in current.items():
@@ -54,7 +54,7 @@ def evaluate(db) -> dict:
             stats["opened"] += 1
             if configured:
                 payload = notifier.build_message(
-                    name, dev.id, kind, a.get("detail", ""), "firing", alert_fix(kind))
+                    name, dev.id, kind, a.get("detail", ""), "firing", alert_fix(kind, dev))
                 res = notifier.deliver(payload)
                 if any(res.values()):
                     ev.notified_at = utcnow()
@@ -85,7 +85,7 @@ def evaluate(db) -> dict:
                 if ev.notified_at or kind not in current:
                     continue
                 payload = notifier.build_message(
-                    name, dev.id, kind, ev.detail or "", "firing", alert_fix(kind))
+                    name, dev.id, kind, ev.detail or "", "firing", alert_fix(kind, dev))
                 if any(notifier.deliver(payload).values()):
                     ev.notified_at = utcnow()
                     db.commit()

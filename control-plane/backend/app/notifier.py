@@ -20,13 +20,32 @@ from .config import settings
 log = logging.getLogger("notifier")
 
 
+# offline / thermal / lockout / a rebooting bridge are the wake-you-up ones.
+# critical = someone must act now. The PIN ones block or expose go-live; safe mode means every
+# update is off. The rest (USB misses, low disk, a parked update, a failed OS update that
+# already rolled itself back, a relayed session) are warnings. ONE list: the email, the
+# /admin/alerts/* API and the panel all read it, so they can never disagree.
+CRITICAL_KINDS = frozenset(("offline", "temp_high", "pin_lockout", "restart_storm",
+                            "pin_not_set", "pin_gate_unavailable", "safe_mode"))
+
+
 def _severity(kind: str) -> str:
-    # offline / thermal / lockout / a rebooting bridge are the wake-you-up ones.
-    # critical = someone must act now. The PIN ones block or expose go-live; safe mode means every
-    # update is off. The rest (USB misses, low disk, a parked update, a failed OS update that
-    # already rolled itself back, a relayed session) are warnings.
-    return "critical" if kind in ("offline", "temp_high", "pin_lockout", "restart_storm",
-                                  "pin_not_set", "pin_gate_unavailable", "safe_mode") else "warning"
+    return "critical" if kind in CRITICAL_KINDS else "warning"
+
+
+# What each alert is called wherever a person reads it: email subjects, the panel, nb.
+TITLES = {
+    "offline": "Offline", "throttled": "Power: under-voltage", "service_down": "A service is down",
+    "temp_high": "Running hot", "clock_suspect": "Audio clock", "return_mismatch": "Return audio at the wrong rate",
+    "pin_lockout": "PIN lockout", "pin_not_set": "No PIN set", "pin_gate_unavailable": "PIN media gate off",
+    "usb_misses": "USB camera missing frames", "disk_low": "Low disk space", "update_rolled_back": "Update rolled back",
+    "safe_mode": "Safe mode", "os_update_failed": "OS update failed", "mesh_relayed": "Relayed connection",
+    "restart_storm": "Restart storm", "telemetry_unreadable": "Unreadable status", "new_device": "New bridge enrolled",
+}
+
+
+def alert_title(kind: str) -> str:
+    return TITLES.get(kind) or str(kind or "alert").replace("_", " ").capitalize()
 
 
 def build_message(dev_name: str, dev_id: str, kind: str, detail: str,
@@ -35,10 +54,11 @@ def build_message(dev_name: str, dev_id: str, kind: str, detail: str,
     return {
         "event": event,                       # firing | resolved
         "kind": kind,                         # offline | throttled | temp_high | ...
+        "title": alert_title(kind),           # "No PIN set" - what a person reads
         "severity": _severity(kind),
         "device": {"name": dev_name, "id": dev_id},
         "detail": detail or "",
-        "fix": fix or None,                   # {command,label} when a one-click fix exists
+        "fix": fix or None,                   # {command|None, label, steps}: every alert has one
     }
 
 
@@ -85,14 +105,20 @@ def _send_email(payload: dict) -> bool:
         return False
     d = payload["device"]
     verb = "FIRING" if payload["event"] == "firing" else "RESOLVED"
-    subject = "[NetBridge %s] %s — %s" % (payload["severity"].upper(), d["name"], payload["kind"])
+    title = payload.get("title") or alert_title(payload["kind"])
+    subject = "[NetBridge %s] %s — %s%s" % (payload["severity"].upper(), d["name"], title,
+                                            " (resolved)" if payload["event"] != "firing" else "")
     lines = [
-        "%s: %s" % (verb, payload["kind"]),
+        "%s: %s" % (verb, title),
         "Bridge : %s (%s)" % (d["name"], d["id"]),
         "Detail : %s" % payload["detail"],
     ]
-    if payload.get("fix"):
-        lines.append("Fix    : %s" % payload["fix"].get("label", payload["fix"].get("command", "")))
+    fix = payload.get("fix") or {}
+    if fix:
+        lines.append("Fix    : %s%s" % (fix.get("label") or fix.get("command") or "",
+                                        "  (one click in the fleet panel)" if fix.get("command") else ""))
+        for i, step in enumerate(fix.get("steps") or [], 1):
+            lines.append("         %d. %s" % (i, step))
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = settings.alert_email_from

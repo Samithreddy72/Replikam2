@@ -3,6 +3,9 @@
 
     nb list                              every bridge: number, state, PIN, OS, uptime, streams, power, updates
     nb show <bridge>                     one bridge in detail
+    nb alerts [bridge] [--open|--resolved] [--critical|--warning] [--page N] [--rows N]
+                                         what needs you now, bridge by bridge (each alert with its fix),
+                                         then the alert history a page at a time (newest first)
     nb claim <code|id> <name>            claim a new bridge (gets the next NB number and its mesh key)
     nb rename <bridge> <new name>        rename a bridge
     nb renumber <bridge> <number>        change its fleet number (NB-007); numbers are unique
@@ -233,6 +236,87 @@ def cmd_show(a):
         print("    #%s %-14s %-9s %s" % (c["id"], c["type"], c["status"], c["created_at"][:19]))
 
 
+def _opt(a, name, default):
+    """--name VALUE out of the argument list (removed), or the default."""
+    if name in a:
+        i = a.index(name)
+        if i + 1 < len(a):
+            v = a[i + 1]; del a[i:i + 2]
+            return v
+        del a[i]
+    return default
+
+
+def _ago(iso):
+    if not iso:
+        return "—"
+    import datetime as dt
+    s = max(0, (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(iso)).total_seconds())
+    return "%ds ago" % s if s < 60 else "%dmin ago" % (s // 60) if s < 3600 else "%dh ago" % (s // 3600) if s < 86400 else "%dd ago" % (s // 86400)
+
+
+def _dur(s):
+    s = int(s or 0)
+    return "%ds" % s if s < 60 else "%dmin" % (s // 60) if s < 3600 else "%dh%02dm" % (s // 3600, (s % 3600) // 60)
+
+
+# The nb command that runs an alert's one-click fix (the panel runs the same fleet command).
+FIX_CMD = {"set-pin": "nb pin {b}", "clear-lockout": "nb clear-lockout {b}", "reboot": "nb reboot {b}",
+           "diagnose": "nb diagnose {b}", "unquarantine": "nb unquarantine {b}", "revert-script": "nb revert {b} <name>  (see: nb running {b})",
+           "restart": "nb run {b} restart", "reset-clock": "nb run {b} reset-clock"}
+
+
+def _fix_cmd(b, command):
+    if not b.get("claimed"):
+        return "claim it first: nb claim %s <name>" % (b.get("pairing_code") or b["device_id"])
+    ref = b.get("label") or b["device_id"]
+    return FIX_CMD.get(command, "nb run {b} %s" % command).format(b=ref)
+
+
+def cmd_alerts(a):
+    """What needs attention now, bridge by bridge (with the fix), then one page of history."""
+    a = list(a)
+    status = "open" if "--open" in a else "resolved" if "--resolved" in a else "all"
+    severity = "critical" if "--critical" in a else "warning" if "--warning" in a else "all"
+    for f in ("--open", "--resolved", "--critical", "--warning"):
+        while f in a:
+            a.remove(f)
+    try:
+        page, rows = int(_opt(a, "--page", 1)), int(_opt(a, "--rows", 25))
+    except ValueError:
+        die("--page and --rows take a number")
+    dev = pick(a[0])[0] if a else None
+    s = api("GET", "/admin/alerts/bridges")
+    t = s["totals"]
+    print("%d critical and %d warnings now · %d of %d bridges need attention · %d alert episodes in 24 h"
+          % (t["open_critical"], t["open_warning"], t["needing_attention"], t["bridges"], t["episodes_24h"]))
+    for b in s["bridges"]:
+        if dev and b["device_id"] != dev["id"]:
+            continue
+        name = " · ".join(x for x in (b.get("label"), b.get("name") or b.get("pairing_code") or b["device_id"]) if x)
+        flag = "%d critical, %d warning" % (b["open_critical"], b["open_warning"]) if b["open"] else "ok"
+        print("\n%-28s %-22s %d in 24 h · %d in 7 days · last %s" % (name, flag, b["episodes_24h"], b["episodes_7d"], _ago(b.get("last_alert_at"))))
+        for al in b["open"]:
+            print("  %s %s — %s (since %s)" % ("!!" if al["severity"] == "critical" else " !", al.get("title") or al["kind"],
+                                             al.get("detail") or "", _ago(al.get("since"))))
+            fix = al.get("fix") or {}
+            if fix:
+                print("     fix: %s%s" % (fix.get("label"), ("   ->  " + _fix_cmd(b, fix["command"])) if fix.get("command") else ""))
+                for i, step in enumerate(fix.get("steps") or [], 1):
+                    print("          %d. %s" % (i, step))
+    q = "page=%d&page_size=%d&status=%s&severity=%s" % (page, rows, status, severity) + ("&device_id=%s" % dev["id"] if dev else "")
+    h = api("GET", "/admin/alerts/episodes?" + q)
+    print("\nHistory%s — %s, %s: %s" % ((" of " + label(dev)) if dev else "", status, severity,
+                                       ("showing %d–%d of %d · page %d of %d" % (h["first"], h["last"], h["total"], h["page"], h["pages"])) if h["total"] else "nothing"))
+    for e in h["items"]:
+        lasted = ("open " + _dur(e["duration_s"])) if not e.get("resolved_at") else _dur(e["duration_s"])
+        print("  %-19s %-22s %-8s %-30s %-10s %s" % (e["opened_at"][:16].replace("T", " "), e["device"][:22], e["severity"],
+                                                    (e.get("title") or e["kind"])[:30], lasted, (e.get("detail") or "")[:60]))
+    if h.get("has_next"):
+        print("  … older: nb alerts%s --page %d" % ((" " + (dev.get("label") or dev["id"])) if dev else "", h["page"] + 1))
+    return 0
+
+
 def cmd_simple(ctype, args_fn=lambda a: {}):
     def f(a):
         d = pick(a[0])[0]
@@ -460,7 +544,7 @@ def cmd_run(a):
 
 
 COMMANDS = {
-    "list": (cmd_list, 0), "ls": (cmd_list, 0), "show": (cmd_show, 1),
+    "list": (cmd_list, 0), "ls": (cmd_list, 0), "show": (cmd_show, 1), "alerts": (cmd_alerts, 0),
     "running": (cmd_simple("running"), 1), "logs": (cmd_logs, 1), "read": (cmd_read, 2),
     "usb": (cmd_usb, 1), "diagnose": (cmd_diagnose, 1), "deploy": (cmd_deploy, 2),
     "revert": (cmd_revert, 2), "unquarantine": (cmd_unquarantine, 1), "update": (cmd_update, 2),
