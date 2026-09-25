@@ -1,0 +1,34 @@
+# The PIN media gate on a real Linux kernel (tests/pin-gate-kernel).
+#
+# Every other test drives bridge-pin through a fake nft; this loads the real ruleset into a real
+# kernel and sends real datagrams at it. Runs whenever the PIN tool, its units or this test change.
+name: PIN gate on a real kernel
+
+on:
+  push:
+    paths:
+      - pi/scripts/bridge-pin
+      - pi/systemd/bridge-pin-gate.service
+      - pi/systemd/bridge-pin-sessions.service
+      - tests/pin-gate-kernel/**
+      - .github/workflows/test-pin-gate.yml
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gate with the bridge's userland (Debian trixie - nft 1.1, Python 3.13)
+        run: docker run --rm --privileged -v "$PWD:/src" -w /src debian:trixie bash tests/pin-gate-kernel/run.sh
+
+      - name: Gate with the runner's own userland
+        run: |
+          sudo apt-get update -qq >/dev/null
+          sudo apt-get install -y -qq nftables >/dev/null
+          sudo bash tests/pin-gate-kernel/run.sh
+
+      - name: The units under real systemd
+        run: sudo bash tests/pin-gate-kernel/units.sh
