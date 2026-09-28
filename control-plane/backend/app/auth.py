@@ -1,4 +1,5 @@
 """Auth helpers: device-token auth for the agent, API-key auth for the admin panel."""
+import datetime as dt
 import hashlib
 import secrets
 
@@ -35,6 +36,29 @@ def require_device(authorization: str | None = Header(default=None),
     return dev
 
 
+def as_utc(t):
+    """SQLite hands datetimes back without a zone; every one the fleet writes is UTC."""
+    if t is None:
+        return None
+    return t.replace(tzinfo=dt.timezone.utc) if t.tzinfo is None else t.astimezone(dt.timezone.utc)
+
+
+def session_outlived_user(db: Session, sess, user) -> bool:
+    """True when a sign-in is older than the account it now points at.
+
+    A session names its user by number only. On a database created before 2026-09-28 SQLite
+    reuses the number of a deleted user for the next one, so a sign-in left behind by a revoked
+    user would resolve to whoever was added next, with that person's role. No genuine sign-in
+    can predate its own account, so such a session belongs to somebody else and is refused.
+
+    SQLite only: that is the one engine here that reuses ids, and sessions.created_at has no
+    zone, so on a server whose clock zone is not UTC the comparison could refuse a fresh sign-in."""
+    if db.get_bind().dialect.name != "sqlite":
+        return False
+    s, u = as_utc(getattr(sess, "created_at", None)), as_utc(getattr(user, "created_at", None))
+    return s is not None and u is not None and s < u
+
+
 def _user_for_token(tok: str, db: Session):
     from .models import User, utcnow
     th = hash_token(tok)
@@ -46,6 +70,12 @@ def _user_for_token(tok: str, db: Session):
         sess = db.scalar(select(_S).where(_S.token_hash == th))
         if sess is not None:
             u = db.get(User, sess.user_id)
+            if u is None or session_outlived_user(db, sess, u):
+                # Its user is gone (or the number now belongs to someone newer): this token can
+                # never be valid again, so drop the row rather than re-checking it forever.
+                db.delete(sess)
+                db.commit()
+                u = None
     if u:
         u.last_seen = utcnow()
         db.commit()

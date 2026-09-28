@@ -130,5 +130,44 @@ check(rc == 64, "updater refuses a malformed version itself too")
 rc, out = ota("--url", "https://example/ota/v", "--force")
 check(rc == 0 and "source=https://example/ota/v force=1" in out, "update --url + --force")
 
+# ---- a stuck mesh never starves the command path (2026-09-28) ------------------------------------
+# A whole tick of the REAL main(), with the network and every subprocess stubbed. The provision
+# step used to run first, and `tailscale up` blocks until the node is Running: with the tailnet's
+# control server unreachable, systemd killed the tick (TimeoutStartSec) before commands were pulled.
+import re as _re
+order, ts_calls = [], []
+def tick_http(method, url, token=None, body=None):
+    path = "/" + url.split("://", 1)[-1].split("/", 1)[-1]
+    order.append(method + " " + path)
+    if path == "/v1/commands":
+        return []
+    if path == "/v1/provision":
+        return {"provision": {"tailscale_auth_key": "tskey-auth-TESTONLY", "tailscale_hostname": "netbridge-T001"}}
+    return {}
+def tick_run(argv, **kw):
+    if argv and argv[0] == "tailscale":
+        ts_calls.append((list(argv), kw.get("timeout")))
+    class P: returncode = 0; stdout = ""; stderr = ""
+    return P()
+agent.http = tick_http
+agent.subprocess.run = tick_run
+agent.load_conf = lambda: {"CONTROL_URL": "https://fleet.test"}
+agent.telemetry = lambda: {"version": "2.2.0-test"}
+agent.enroll = lambda base, conf, tel, force=False: "tok"
+agent.collect_results = lambda base, token: order.append("collect_results")
+try:
+    agent.main()
+finally:
+    agent.subprocess.run = real_run
+check("GET /v1/commands" in order and "GET /v1/provision" in order
+      and order.index("GET /v1/commands") < order.index("GET /v1/provision"),
+      "a tick pulls its commands BEFORE applying a mesh key (%s)" % " -> ".join(order))
+unit = (REPO / "pi/systemd/bridge-agent.service").read_text()
+limit = int(_re.search(r"^TimeoutStartSec=(\d+)", unit, _re.M).group(1))
+argv, cap = ts_calls[0] if ts_calls else ([], None)
+wait = next((int(a.split("=", 1)[1].rstrip("s")) for a in argv if a.startswith("--timeout=")), None)
+check(wait is not None and cap is not None and wait < cap < limit,
+      "tailscale up stops waiting (--timeout=%ss, killed at %ss) inside the unit's %ss limit" % (wait, cap, limit))
+
 print("\n  %d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

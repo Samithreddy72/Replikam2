@@ -1,7 +1,8 @@
 """SQLAlchemy models for the fleet control plane."""
 import datetime as dt
 
-from sqlalchemy import String, Integer, Float, Boolean, DateTime, ForeignKey, JSON, Text, LargeBinary
+from sqlalchemy import (String, Integer, Float, Boolean, DateTime, ForeignKey, JSON, Text, LargeBinary,
+                        Index)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -13,6 +14,12 @@ def utcnow():
 
 class Device(Base):
     __tablename__ = "devices"
+    # A fleet number means one bridge within an org (2026-09-28). Picking "max + 1" and checking
+    # "is it free?" in Python cannot stop two claims or renumbers that run at the same moment from
+    # both taking NB-006, so the database refuses the second. NULLs never collide in a unique
+    # index, so any number of unclaimed, unnumbered bridges can coexist. Existing databases get
+    # the same index from main._migrate().
+    __table_args__ = (Index("uq_devices_org_number", "org_id", "number", unique=True),)
 
     # device_id = the Pi CPU serial (stable across reflash).
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -39,6 +46,19 @@ class Device(Base):
     # GET /v1/provision (which clears it). Never exposed in admin device views.
     provision: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Mesh self-heal bookkeeping (2026-09-28), read by main._mesh_heal_due(). Until this date the
+    # fleet minted a new tailnet key on EVERY 15 s poll while a bridge had no mesh address: about
+    # 5,760 Tailscale API calls and 5,760 audit rows a day for one bridge at a venue that blocks
+    # the mesh, and a single empty sample (tailscaled restarting) re-keyed a working node with
+    # --reset, which gives it a new identity and address and drops live mesh sessions.
+    #   mesh_lost_at   when the bridge first reported NO mesh address; cleared when it reports one.
+    #   mesh_key_at    when the fleet last handed the bridge a mesh key (claim, an admin re-key or
+    #                  its own re-issue) or tried to mint one for it. No second key within 10 min.
+    #   mesh_autokeys  automatic re-issues since the bridge last had an address. Only the first
+    #                  of an outage is written to the audit log.
+    mesh_lost_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    mesh_key_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    mesh_autokeys: Mapped[int] = mapped_column(Integer, default=0)
 
     commands: Mapped[list["Command"]] = relationship(back_populates="device")
 
@@ -55,8 +75,17 @@ class Telemetry(Base):
 class User(Base):
     """A person with their own credential (phase 5). role: admin | presenter.
     Invite flow: created with a one-time invite token (hash stored); redeeming
-    it mints the personal bearer token (hash stored). No plaintext at rest."""
+    it mints the personal bearer token (hash stored). No plaintext at rest.
+
+    AUTOINCREMENT (2026-09-28): without it SQLite hands a new row max(id)+1, which is the id of
+    the user just revoked whenever they were the newest account. Every sign-in (Session) points
+    at a user by that number, so a revoked presenter's token became the NEXT person's
+    credential - an admin's, if the next person added was an admin. With it, an id is never
+    given out twice. Only a freshly created table gets the keyword (SQLite cannot add it to an
+    existing one); older databases are protected by revoke_user() deleting the sessions and by
+    auth._user_for_token() refusing a session older than its user."""
     __tablename__ = "users"
+    __table_args__ = {"sqlite_autoincrement": True}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String, unique=True, index=True)
@@ -230,8 +259,12 @@ class Session(Base):
     signing into the presenter app silently logged you out of the fleet panel, and a second
     device logged out the first. Being signed in on the panel AND the app at the same time is
     the normal case, not an edge case. Each sign-in now gets its own row, revocable
-    independently. User.token_hash is kept so tokens minted before this still work."""
+    independently. User.token_hash is kept so tokens minted before this still work.
+
+    A session dies with its user: revoke_user() deletes them together (2026-09-28). See User
+    for how a leftover row signed a revoked person in as somebody else."""
     __tablename__ = "sessions"
+    __table_args__ = {"sqlite_autoincrement": True}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, index=True)
