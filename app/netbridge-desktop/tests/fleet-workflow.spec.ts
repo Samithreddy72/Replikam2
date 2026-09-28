@@ -45,3 +45,22 @@ test('Cancelling a baseline dialog never saves a baseline',async({page})=>{
  await expect(dialog).toHaveCount(0);
  expect(writes).toEqual([]);
 });
+
+
+test('Unconfirmed baseline requires its explicit save action',async({page})=>{
+ const writes:any[]=[];
+ await page.route('http://fleet.test/**',async route=>{
+  const req=route.request();
+  if(new URL(req.url()).pathname==='/')return route.fulfill({contentType:'text/html',body:html});
+  if(req.method()==='POST')writes.push(req.postDataJSON());
+  return route.fulfill({json:{id:123,status:'done',timeout_s:1}});
+ });
+ await page.goto('http://fleet.test/');
+ await page.evaluate(()=> (window as any).goldenSaveDialog({id:'a',name:'Room A',online:true}));
+ await page.getByRole('dialog').getByRole('button',{name:'Save unconfirmed',exact:true}).click();
+ await expect.poll(()=>writes.length).toBe(1);
+ expect(writes[0].type).toBe('golden-save');
+ expect(writes[0].args.confirmed).toBe(false);
+ expect(writes[0].args.verified).toBe('');
+ expect(writes[0].args.note).toMatch(/^UNCONFIRMED /);
+});

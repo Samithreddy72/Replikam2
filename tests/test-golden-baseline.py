@@ -118,8 +118,8 @@ if "confirmed: heard" in panel:
     ok("the panel sends what the operator actually answered")
 else:
     no("the panel does not send the confirmation")
-if "Cancel = save it unconfirmed" in panel:
-    ok("declining to confirm still saves — recorded as unconfirmed, not blocked")
+if 'alt: "Save unconfirmed", cancel: "Cancel"' in panel and 'onAlt: () => save(false)' in panel:
+    ok("unconfirmed save is explicit and separate from Cancel")
 else:
     no("an operator who cannot verify has no honest option")
 
