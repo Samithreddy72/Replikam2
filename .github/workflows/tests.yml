@@ -1,0 +1,35 @@
+name: NetBridge release test gate
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install isolated Python and media test runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-tools ffmpeg bc
+          /usr/bin/python3 -m venv --system-site-packages .test-venv
+          .test-venv/bin/pip install -r control-plane/backend/requirements.txt httpx==0.28.1 numpy==2.4.6 -r app/netbridge-source/requirements-build.txt
+      - name: Run all Python and shell tests; skips block release
+        env:
+          FLEET_TEST_PY: ${{ github.workspace }}/.test-venv/bin/python
+        run: bash tools/run-tests.sh --python .test-venv/bin/python --media-python .test-venv/bin/python
+      - name: Check desktop interface
+        working-directory: app/netbridge-desktop
+        run: |
+          npm ci
+          npm test
+          npm run build

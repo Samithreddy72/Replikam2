@@ -17,6 +17,9 @@ class Gate(unittest.TestCase):
     def test_unittest_skip_is_reported_and_blocks_release(self):
         r=self.run_case("echo 'Ran 3 tests in 0.001s'\necho 'OK (skipped=1)'\n")
         self.assertNotEqual(r.returncode,0,r.stdout);self.assertIn('2 passed, 0 failed, 1 skipped',r.stdout)
+    def test_custom_skips_block_release(self):
+        r=self.run_case("echo '3 passed, 0 failed, 2 skipped'\n")
+        self.assertNotEqual(r.returncode,0,r.stdout);self.assertIn('2 skipped',r.stdout)
     def test_success_passes(self):
         r=self.run_case("echo '3 passed, 0 failed'\n")
         self.assertEqual(r.returncode,0,r.stdout)

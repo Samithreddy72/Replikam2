@@ -325,6 +325,10 @@
     <section id="page-fleet" class="page">
       <h1>Every bridge on one screen.</h1>
       <p class="lede">Live — changes arrive the moment they happen, and nothing on this page redraws under you. Click a bridge to see everything about it and act on it.</p>
+      <div id="liveSummary" class="banner" role="status"></div>
+      <button class="btn secondary" type="button" onclick="fleetReadiness()">Check fleet readiness</button>
+      <button class="btn secondary" type="button" onclick="fleetDigest()">Daily summary</button>
+      <button class="btn secondary" type="button" onclick="fleetBulk()">Schedule selected bridges</button>
       <div class="toolbar">
         <div class="chips" id="chips">
           <button class="chip on" data-f="all" type="button">All <b id="n-all">0</b></button>
@@ -480,7 +484,7 @@ function store(k, v){ try { if (v) localStorage.setItem(k, v); else localStorage
 
 // Commands the BACKEND refuses without confirm:true (CONFIRM_REQUIRED in main.py).
 // tests/test-fleet-ui-contract.py fails if the two sets ever differ.
-const BACKEND_CONFIRM = new Set(["reboot","update","deploy-script","revert-script",
+const BACKEND_CONFIRM = new Set(["free-space","reboot","update","deploy-script","revert-script",
                                  "unquarantine","golden-restore","reset-clock","lock"]);
 // Anything here interrupts media or ends a session: it always asks first, and says so plainly
 // when a presenter is live on that bridge. Every member carries ⚠ in its label and nothing else
@@ -498,6 +502,7 @@ const GOES_STALE = new Set(["reboot","restart","start","stop","profile","reset-c
 // opposite fixes, so separate groups. (profile:lan is gone: bridges stay on WAN, and the
 // server refuses it anyway.)
 const ACTIONS = [
+  ["free-space", "Remove archived journal logs above 64 MB…"],
   ["#Start here", null],
   ["jitter-diagnose", "Diagnose it for me — names the cause (changes nothing)"],
 
@@ -897,10 +902,12 @@ function matches(d){
   if (FILTER !== "all" && d.state !== FILTER) return false;
   if (!QUERY) return true;
   const t = T(d);
-  return [d.label, d.name, d.pairing_code, d.id, d.tailscale_ip, t.ip, d.hostname].filter(Boolean).join(" ").toLowerCase().includes(QUERY);
+  return [d.label, d.name, d.site, d.notes, d.pairing_code, d.id, d.tailscale_ip, t.ip, d.hostname].filter(Boolean).join(" ").toLowerCase().includes(QUERY);
 }
 function paintFleet(ids){
   const devs = [...S.devices.values()];
+  const live=devs.filter(d=>d.online && d.state==='live');
+  $('liveSummary').textContent=live.length ? 'Live now: '+live.map(d=>devLabel(d)+' · USB misses '+(T(d).usb_misses_per_s??'unknown')+'/s · '+((T(d).power||{}).summary||'power unknown')).join(' | ') : 'No live presenter is currently reported by Fleet.';
   const counts = {all: devs.length, live: 0, active: 0, degraded: 0, offline: 0, new: 0};
   for (const d of devs) if (counts[d.state] !== undefined) counts[d.state]++;
   for (const k of Object.keys(counts)) setText($("n-" + k), counts[k]);
@@ -1158,10 +1165,32 @@ function buildDiagnostics(p, d){
   const path = h("input", {type: "text", value: "/run/netbridge-usb-video.txt", "aria-label": "Path on the bridge"});
   DR.f.logsOut = h("div"); DR.f.readOut = h("div");
   p.append(
-    h("h3", {}, "Diagnose it for me"),
+    h("h3", {}, "Check this bridge"),
+    h("button", {class:"btn primary sm", type:"button", onclick: () => workflowHealth(d)}, "Check health — changes nothing"),
+    h("button", {class:"btn secondary sm", type:"button", onclick: () => workflowSettings(d)}, "Site, notes and maintenance"),
+    h("h3", {}, "Investigate media delivery"),
     h("div", {class: "inline"}, h("button", {class: "btn primary sm", type: "button", onclick: () => doAction(d.id, "jitter-diagnose")}, "Run the diagnosis"),
       h("span", {class: "small muted"}, "Measures power, path, rates and config, names the most likely cause and offers its fix. Changes nothing.")),
     DR.f.diagOut,
+    h("h3", {}, "Replacement-card recovery"),
+    h("button",{class:"btn secondary sm",type:"button",onclick:()=>{
+      openDialog({title:'Recover this bridge identity',ok:'Issue 15-minute recovery token',body:h('p',{},'Use only for a replacement card. End the meeting, disconnect the laptop and keep the original card offline. This preserves Fleet history; successful recovery revokes the old card credential.'),onOk:async()=>{
+        const r=await api(`/admin/devices/${encodeURIComponent(d.id)}/recovery-grant`,{method:'POST',body:JSON.stringify({confirm:true})});
+        openDialog({title:'Recovery token — shown once',cancel:'Close',body:[h('p',{},r.instructions),h('pre',{style:'white-space:pre-wrap'},r.recovery_token),h('p',{},'Expires '+r.expires_at)]});return true;
+      }});}},"Recover a replacement card…"),
+    h("h3", {}, "Alert ownership"),
+    h("button",{class:"btn secondary sm",type:"button",onclick:()=>workflowAlerts(d)},"Acknowledge or snooze alerts"),
+    h("h3", {}, "Session and incident history"),
+    h("button", {class:"btn secondary sm",type:"button",onclick:()=>workflowHistory(d)}, "Open timeline"),
+    h("button", {class:"btn secondary sm",type:"button",onclick:async()=>{
+      try{const rows=await api(`/admin/devices/${encodeURIComponent(d.id)}/sessions`);
+        openDialog({title:"Observed sessions",cancel:"Close",body:[h("p",{},"Observed at the bridge. Presenter identity and displayed picture are not verified."),...rows.map(r=>h("p",{},r.started_at+" — "+r.status+"; "+r.warning_samples+" of "+r.samples+" samples had power/USB warnings."))]});
+      }catch(e){toast(e.message,"warn");}}}, "Session history"),
+    h("h3", {}, "Presenter support reports"),
+    h("button", {class:"btn secondary sm", type:"button", onclick: async()=>{
+      try{const rows=await api(`/admin/devices/${encodeURIComponent(d.id)}/support-reports`);
+        openDialog({title:"Presenter reports",cancel:"Close",body:rows.length?rows.map(r=>h("div",{},h("h3",{},"NB-SUPPORT-"+r.id),h("p",{},r.presenter+" · "+r.created_at),h("pre",{style:"white-space:pre-wrap"},JSON.stringify(r.report,null,2)))):h("p",{},"No reports submitted.")});
+      }catch(e){toast(e.message,"warn");}}}, "View reports"),
     h("h3", {}, "Diagnostics bundles"),
     DR.f.bundles,
     h("div", {class: "inline", style: "margin-top:8px"}, h("button", {class: "btn secondary sm", type: "button", onclick: () => doAction(d.id, "diagnose")}, "Collect a fresh bundle (~40 s)")),
@@ -1174,6 +1203,58 @@ function buildDiagnostics(p, d){
       onclick: () => runRead(d.id, "read-file", {path: path.value.trim(), lines: 200, tail: true}, DR.f.readOut)}, "Read")),
     h("p", {class: "hint"}, "Read-only. The bridge refuses anything outside its allowed folders and redacts anything that looks like a credential."),
     DR.f.readOut);
+}
+async function workflowAlerts(d){
+ try{const rows=await api(`/admin/devices/${encodeURIComponent(d.id)}/open-alerts`);
+ const handle=async(id,action,hours)=>{try{await api(`/admin/devices/${encodeURIComponent(d.id)}/open-alerts/${id}`,{method:'POST',body:JSON.stringify({action,hours})});await workflowAlerts(d);}catch(e){toast(e.message,'warn');}};
+ openDialog({title:'Open alerts — '+devLabel(d),cancel:'Close',body:rows.length?rows.map(r=>h('div',{},h('p',{},r.kind+' — '+r.detail),h('p',{},r.handling.acknowledged_by?'Being handled by '+r.handling.acknowledged_by:'Unassigned'),h('p',{},r.handling.snoozed_until?'Notifications snoozed until '+r.handling.snoozed_until:''),
+ h('button',{class:'btn secondary sm',onclick:()=>handle(r.id,'ack')},"I'm on it"),
+ h('button',{class:'btn secondary sm',onclick:()=>handle(r.id,'snooze',1)},'Snooze 1 hour'),
+ h('button',{class:'btn secondary sm',onclick:()=>handle(r.id,'unsnooze')},'Resume notifications'))):h('p',{},'No open alert episodes.')});
+ }catch(e){toast(e.message,'warn');}
+}
+function fleetBulk(){
+ const selected=h('select',{multiple:true,size:8,'aria-label':'Bridges to schedule'},[...S.devices.values()].filter(matches).map(d=>h('option',{value:d.id},devLabel(d))));
+ const command=h('select',{'aria-label':'Action'},[['reboot','Reboot when idle'],['restart','Restart media when idle']].map(([value,label])=>h('option',{value},label)));
+ openDialog({title:'Schedule maintenance actions',ok:'Schedule selected',body:[h('p',{},'Choose bridges explicitly. Each action waits for its bridge to be idle, expires after 30 minutes, and can be cancelled in History. Restarting media interrupts video and audio.'),selected,command],onOk:async()=>{
+ const ids=[...selected.selectedOptions].map(o=>o.value);if(!ids.length)throw Error('Select at least one bridge.');
+ const r=await api('/admin/operations/bulk',{method:'POST',body:JSON.stringify({device_ids:ids,command:{type:command.value,args:{},confirm:true,when:'idle'}})});
+ const output=r.results.map(v=>devLabel(S.devices.get(v.device_id))+': '+(v.result?'queued #'+v.result.id:JSON.stringify(v.refused))).join('\n');
+ openDialog({title:'Scheduling results',cancel:'Close',body:h('pre',{style:'white-space:pre-wrap'},output)});return true;
+ }});
+}
+async function fleetDigest(){
+ try{const r=await api('/admin/digest');openDialog({title:'Daily summary',cancel:'Close',body:[h('p',{},'Optional email to this organisation’s administrators at '+r.schedule+'. Currently '+(r.enabled?'enabled':'disabled')+'.'),h('pre',{style:'white-space:pre-wrap'},r.preview)],ok:r.enabled?'Disable daily email':'Enable daily email',onOk:async()=>{await api('/admin/digest',{method:'POST',body:JSON.stringify({enabled:!r.enabled})});toast('Daily summary preference saved','ok');}});
+ }catch(e){toast(e.message,'warn');}
+}
+async function fleetReadiness(){
+ try{const r=await api('/admin/readiness');openDialog({title:"Fleet readiness",cancel:"Close",body:[
+  h("p",{},"Based on recent telemetry; this does not start media or verify the receiving picture."),
+  ...r.devices.map(v=>h("div",{},h("strong",{},devLabel(S.devices.get(v.device_id)||{id:v.device_id})+': '+v.status),
+    ...v.checks.filter(c=>c.status!=='pass').map(c=>h("p",{},c.label+' — '+c.detail))))]});
+ }catch(e){toast(e.message,'warn');}
+}
+async function workflowHistory(d,cursor){
+ try{const r=await api(`/admin/devices/${encodeURIComponent(d.id)}/timeline`+(cursor?'?cursor='+encodeURIComponent(cursor):''));
+ openDialog({title:devLabel(d)+" — timeline",cancel:"Close",body:[h("p",{},r.note),...r.entries.map(e=>h("p",{},e.at+" · "+e.title+" — "+e.detail))],ok:r.next_cursor?"Older events":null,onOk:()=>{workflowHistory(d,r.next_cursor);return true;}});
+ }catch(e){toast(e.message,"warn");}
+}
+async function workflowHealth(d){
+  try {
+    const r = await api(`/admin/devices/${encodeURIComponent(d.id)}/health`);
+    openDialog({title: devLabel(d) + " — health", cancel:"Close", body:[
+      h("p", {}, "Checked " + new Date(r.checked_at).toLocaleTimeString() + ". Receiving-laptop picture is not verified."),
+      ...r.checks.map(c => h("div", {class:"fixsteps"}, h("strong", {}, c.label + ": " + c.status), h("p", {}, c.detail)))]});
+  } catch(e){toast("Health check unavailable: " + e.message,"warn");}
+}
+function workflowSettings(d){
+  const site=h("input",{value:d.site||"",maxLength:48,"aria-label":"Site or room"});
+  const notes=h("textarea",{maxLength:2000,"aria-label":"Installation notes"},d.notes||"");
+  const minutes=h("select",{"aria-label":"Maintenance duration"},[["","Keep current window"],["0","End maintenance"],["30","30 minutes"],["60","1 hour"],["240","4 hours"]].map(([v,l])=>h("option",{value:v},l)));
+  const reason=h("input",{maxLength:200,"aria-label":"Maintenance reason"});
+  openDialog({title:devLabel(d)+" — administration",ok:"Save",body:[h("p",{},"Maintenance mutes notification delivery and holds idle-scheduled work. It does not stop a meeting."),site,notes,minutes,reason],
+    onOk:async()=>{const body={site:site.value,notes:notes.value};if(minutes.value!==""){body.maintenance_minutes=Number(minutes.value);body.reason=reason.value;}
+      await api(`/admin/devices/${encodeURIComponent(d.id)}/operations`,{method:"POST",body:JSON.stringify(body)});toast("Saved","ok");}});
 }
 async function loadBundles(d){
   DR.fetched.bundles = true;
@@ -1260,7 +1341,7 @@ function paintHistory(){
     setText(tdAsked, clock(parseTs(c.created_at)));
     const t0 = parseTs(c.created_at), t1 = parseTs(c.completed_at);
     setText(tdTook, t0 && t1 ? dur((t1 - t0) / 1000) : c.status === "pending" ? "queued" : c.status === "sent" ? "running…" : "—");
-    r.cancel.hidden = c.status !== "pending";
+    r.cancel.hidden = !["pending", "waiting"].includes(c.status);
     if (!r.out.hidden) setText(r.out.querySelector("pre"), c.output || c.fail_reason || "(no output yet)");
   }
   // rows whose command the fleet no longer has (a forgotten bridge, retention) leave the table
@@ -1272,7 +1353,7 @@ function paintHistory(){
 
 // ------------------------------------------------------------------------------- commands
 async function queueCommand(d, type, args, confirmed, opt = {}){
-  const req = {type, args, confirm: confirmed};
+  const req = {type, args, confirm: confirmed, when: opt.when || "now"};
   if (opt.allowDowngrade) req.allow_downgrade = true;
   let r;
   try { r = await api(`/admin/devices/${d.id}/commands`, {method: "POST", body: JSON.stringify(req)}); }
@@ -1280,6 +1361,11 @@ async function queueCommand(d, type, args, confirmed, opt = {}){
     // Refused for THIS bridge: a different one of these is still in flight there, or the version is
     // older than it runs. Say which and why, and let a loop over several bridges carry on.
     const why = e.status === 409 && e.body && e.body.detail && e.body.detail.error;
+    if (why === "meeting_guard"){
+      openDialog({title: "Schedule safely", body: h("p", {}, e.message + " The action will wait for an idle bridge and expire after 30 minutes. You can cancel it in History."),
+        ok: "Run when idle", onOk: async () => { await queueCommand(d, type, args, confirmed, {...opt, when:"idle"}); }});
+      return null;
+    }
     if (why === "busy" || why === "downgrade"){ toast(devLabel(d) + ": not queued — " + e.message, "warn", {ms: 16000}); return null; }
     throw e;
   }
@@ -1388,7 +1474,7 @@ async function followTrial(devId, devName, c, view){
 }
 async function cancelCommand(devId, cmdId, devName){
   const c = S.commands.get(cmdId);
-  if (c && c.status !== "pending"){ toast("Too late to cancel #" + cmdId + " — the bridge already has it.", "warn"); return; }
+  if (c && !["pending", "waiting"].includes(c.status)){ toast("Too late to cancel #" + cmdId + " — the bridge already has it.", "warn"); return; }
   try {
     await api(`/admin/devices/${devId}/commands/${cmdId}`, {method:"DELETE"});
     toast("Cancelled #" + cmdId + " — " + (devName || "the bridge") + " never received it.", "ok");
@@ -1452,6 +1538,7 @@ function confirmAndRun(d, type, value, args){
     "reset-clock": "Rebuilds the USB audio device. The meeting laptop's camera, mic and speaker drop and re-enumerate — re-select them there.",
     profile: "Sets the bridge's receive buffer to the WAN profile and restarts media. ~5 s video freeze.",
     lock: "Ends the live PIN session at once: the presenter's video and voice stop being accepted until someone enters the PIN again. Media services keep running.",
+    "free-space": "Permanently removes older archived journal logs until archived usage is at most 64 MB. Current logs and media settings are preserved.",
     "golden-restore": "Rewrites only the tunable settings back to the known-good baseline and restarts just what changed. Anything that needs a code deploy is reported, not silently \"fixed\".",
     "jitter-fix": "Deepest buffers everywhere. ~5 s video freeze."}[type] || label;
   const hot = d.state === "live";

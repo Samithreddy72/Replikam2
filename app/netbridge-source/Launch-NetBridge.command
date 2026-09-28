@@ -11,13 +11,26 @@
 cd "$(dirname "$0")"
 URL=http://127.0.0.1:8765/
 
-up(){ curl -s -m 2 "$URL"api/state >/dev/null 2>&1; }
+up(){
+  local state version signed
+  state=$(curl -fsS -m 2 "${URL}api/state" 2>/dev/null) || return 1
+  version=$(printf '%s' "$state" | plutil -extract version raw -o - - 2>/dev/null) || return 1
+  signed=$(printf '%s' "$state" | plutil -extract signed_in raw -o - - 2>/dev/null) || return 1
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] && [[ "$signed" == true || "$signed" == false ]]
+}
 
 # Already running: just bring it up. The app is not started again, so it will not open a
 # second tab of its own.
 if up; then
   echo "NetBridge is already running — opening it."
   open "$URL"; sleep 1; exit 0
+fi
+
+if lsof -nP -iTCP:8765 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "Port 8765 is occupied but does not return valid NetBridge status."
+  lsof -nP -iTCP:8765 -sTCP:LISTEN
+  echo "Quit that application, then launch NetBridge again."
+  exit 1
 fi
 
 echo "Starting NetBridge…  (first launch takes ~15s while it unpacks)"

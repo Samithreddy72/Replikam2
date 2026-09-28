@@ -9,8 +9,9 @@
    marginally-powered Pi and always resets Windows audio defaults.
 4. **After ANY client replug, re-check Windows:** mic/speaker = Source/Sink, levels = 100,
    meeting app device selection (they silently reset).
-5. **Power is physics.** If the Pi reboots when the laptop connects: stronger 5V/3A supply,
-   thick short GPIO wires, or a 2200µF capacitor across pins 2(+)/6(−). No software fixes volts.
+5. **Power is physics.** If the Pi resets at laptop connection or go-live, inspect the supply,
+   voltage drop and power/data isolation during maintenance. Do not improvise parallel USB/GPIO
+   supplies or assume a capacitor fixes sustained undervoltage. Follow [power acceptance](POWER-ACCEPTANCE.md).
 6. **You will never hear your own voice in Meet/Zoom/Teams** — they don't loop your mic
    back. Verify with the app's mic level meter or another participant.
 7. **Echo = Mac speakers leaking into the Mac mic.** Wear headphones on the Mac

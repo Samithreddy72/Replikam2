@@ -35,7 +35,7 @@ from sqlalchemy import func, select
 from .alerts import device_alerts, alert_fix, bridge_title, is_online, unreadable_alert, HISTORY_KINDS
 from .config import settings
 from .models import Device, AlertEvent, utcnow
-from . import notifier
+from . import notifier, workflow
 
 log = logging.getLogger("alerting")
 
@@ -91,6 +91,7 @@ def evaluate(db, now: dt.datetime | None = None, started_at: dt.datetime | None 
             late_resolves.setdefault(e.device_id, []).append(e)
 
     for dev in db.scalars(select(Device)).all():
+        notify_device = configured and not workflow.maintenance(dev, now)
         open_events, changed = {}, False
         for e in db.scalars(select(AlertEvent).where(AlertEvent.device_id == dev.id,
                                                      AlertEvent.resolved_at.is_(None))
@@ -180,15 +181,18 @@ def evaluate(db, now: dt.datetime | None = None, started_at: dt.datetime | None 
                 db.commit()
                 stats["resolved"] += 1
                 # Only announce a resolution for something we actually announced firing.
-                if configured and ev.notified_at:
+                if notify_device and ev.notified_at and not workflow.notification_muted(ev,now):
                     outbox.append((notifier.build_message(name, dev.id, kind, ev.detail or "", "resolved", None,
                                                           opened_at=ev.opened_at, resolved_at=ev.resolved_at),
                                    _mark(ev, "resolve_notified_at", now), "resolve_notified"))
 
         # 3) ANNOUNCE: an open episode that is firing and not yet emailed - it has just lasted
         # long enough, or its delivery failed before, or the channel was set up since.
-        if configured:
+        if notify_device:
             for kind, ev in open_events.items():
+                until=workflow.utc((ev.handling or {}).get("snoozed_until"))
+                if until and until > now:
+                    continue
                 if ev.notified_at or ev.resolved_at is not None or kind not in current or ev.clear_since is not None:
                     continue
                 hold = settings.alert_offline_confirm_s if kind == "offline" else settings.alert_notify_after_s
@@ -214,8 +218,8 @@ def evaluate(db, now: dt.datetime | None = None, started_at: dt.datetime | None 
 
         # 4) LATE RESOLVED emails: the episode closed while the channel was failing. (Read before
         # this pass changed anything, so nothing resolved just now is in here twice.)
-        for ev in late_resolves.get(dev.id, []):
-            if ev.resolve_notified_at is None and ev.resolved_at is not None:
+        for ev in (late_resolves.get(dev.id, []) if notify_device else []):
+            if ev.resolve_notified_at is None and ev.resolved_at is not None and not workflow.notification_muted(ev,now):
                 outbox.append((notifier.build_message(name, dev.id, ev.kind, ev.detail or "", "resolved", None,
                                                       opened_at=ev.opened_at, resolved_at=ev.resolved_at),
                                _mark(ev, "resolve_notified_at", now), "resolve_notified"))

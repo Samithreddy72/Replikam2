@@ -130,7 +130,7 @@ try:
     b = r.json() if r.status_code == 200 else []
     check(r.status_code == 200 and [x["label"] for x in b] == ["NB-001", "NB-002", "NB-007"],
           "presenter gets the claimed bridges, by number, to go live", r.text)
-    check(b and set(b[0]) == {"id", "number", "label", "name", "pairing_code", "online", "tailscale_ip", "ip"},
+    check(b and set(b[0]) == {"id", "number", "label", "name", "pairing_code", "online", "tailscale_ip", "ip", "pin_protocol", "maintenance"},
           "…with only what routing needs — no live telemetry, alerts or history", b[:1])
     r = c.get("/auth/bridges", headers=A)
     check(r.status_code == 200 and len(r.json()) == 3, "an admin who presents gets the same list")
@@ -234,6 +234,7 @@ try:
           "PIN-lockout and rolled-back-update alerts carry their fix buttons", fixes)
     # An admin is already installing on two bridges ("Install on…") when the rollout starts
     # (2026-09-28): the same version on NB-001, another version on NB-002.
+    tel(ids[0]); tel(ids[1])  # installation fixtures are idle, with fresh device-side evidence
     pre_same = c.post("/admin/devices/%s/commands" % ids[0], headers=A,
                       json={"type": "update", "args": {"version": "2.1.1-abc1234"}, "confirm": True}).json().get("id")
     pre_other = c.post("/admin/devices/%s/commands" % ids[1], headers=A,

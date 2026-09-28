@@ -92,7 +92,9 @@ disr = set(re.findall(r'"([^"]+)"',
            re.search(r"const DISRUPTIVE = new Set\(\[(.*?)\]\)", panel, re.S).group(1)))
 disr_base = {d.split(":")[0] for d in disr}
 for c in sorted(conf):
-    if c in panel_set and c not in disr_base:
+    confirmation_ui = set(re.findall(r'"([a-z-]+)"',
+        re.search(r"const BACKEND_CONFIRM = new Set\(\[(.*?)\]\)", panel, re.S).group(1)))
+    if c in panel_set and c not in disr_base | confirmation_ui:
         no("%s needs backend confirmation but the UI does not warn about it" % c)
     else:
         ok("%-15s guarded at the backend%s" % (c, "" if c not in panel_set else " and flagged in the UI"))

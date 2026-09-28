@@ -80,7 +80,7 @@ if [ $have_root -eq 1 ]; then
            /etc/bridge /etc/default /data; do
     "$DEBUGFS" -R "ls -l $d" "$ROOTDEV" 2>/dev/null | sed "s|^|$d |" >>"$IDX"
   done
-  for f in /etc/rc.local /boot/cmdline.txt /etc/fstab \
+  for f in /etc/passwd /etc/shells /etc/rc.local /boot/cmdline.txt /etc/fstab \
            /home/pi/uvc-raw-setup.sh /usr/local/bin/bridge-agent.py \
            /usr/local/bin/bridge-web.py /usr/local/bin/bridge-read.py \
            /usr/local/bin/bridge-pitch.py /usr/local/bin/bridge-golden.py \
@@ -600,6 +600,10 @@ grepf bridge-agent.py 'quarantine' && ok "auto-rollback quarantine present" \
   || warn "no quarantine — a bad override cannot self-revert"
 
 sec "Remote maintenance: signed updates, rollback, owner SSH, OTA (2026-09-24)"
+_owner_shell=$(awk -F: '$1=="pi" {print $7}' "$CAT/passwd" 2>/dev/null)
+[ "$_owner_shell" = /bin/bash ] && grep -qxF "$_owner_shell" "$CAT/shells" \
+  && ok "owner SSH account has a valid login shell" || no "owner SSH account cannot open its login shell"
+
 # What a signed update may replace is the read-only catalog. The safety net itself must never be
 # in it: the loader, the installer, the rollback guard, the command runner, the A/B switch and
 # the security/provisioning tools change only with a whole new image.

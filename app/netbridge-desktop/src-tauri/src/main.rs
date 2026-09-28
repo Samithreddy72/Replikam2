@@ -18,7 +18,7 @@ struct Engine {
 fn allowed(method: &str, path: &str) -> bool {
     match method {
         "GET" => matches!(path, "/api/state" | "/api/devices" | "/api/bridges" | "/api/audio/diagnostics" | "/api/desktop/status"),
-        "POST" => matches!(path, "/api/signin-request" | "/api/signin-redeem" | "/api/signout" | "/api/remember" | "/api/unlock" | "/api/golive" | "/api/stop" | "/api/return" | "/api/return-tuning" | "/api/audio/recover" | "/api/microphone" | "/api/desktop/configure"),
+        "POST" => matches!(path, "/api/support-report" | "/api/preflight" | "/api/signin-request" | "/api/signin-redeem" | "/api/signout" | "/api/remember" | "/api/unlock" | "/api/golive" | "/api/stop" | "/api/return" | "/api/return-tuning" | "/api/audio/recover" | "/api/microphone" | "/api/desktop/configure"),
         _ => false,
     }
 }
@@ -146,7 +146,22 @@ fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| { if let Some(window) = app.get_webview_window("main") { let _ = window.show(); let _ = window.set_focus(); } }))
-        .setup(|app| { let engine = Engine::launch(app); app.manage(engine); Ok(()) })
+         .setup(|app| {
+            use tauri::{menu::{Menu, MenuItem}, tray::TrayIconBuilder};
+            let open = MenuItem::with_id(app,"open","Open NetBridge",true,None::<&str>)?;
+            let quit = MenuItem::with_id(app,"quit","Quit NetBridge…",true,None::<&str>)?;
+            let menu = Menu::with_items(app,&[&open,&quit])?;
+            let mut tray = TrayIconBuilder::new().menu(&menu).tooltip("NetBridge — open the app for live status")
+                .on_menu_event(|app,event| {
+                    if let Some(window)=app.get_webview_window("main") {
+                        let _=window.show(); let _=window.set_focus();
+                        if event.id.as_ref()=="quit" { let _=window.close(); }
+                    }
+                });
+            if let Some(icon)=app.default_window_icon(){tray=tray.icon(icon.clone());}
+            tray.build(app)?;
+            let engine = Engine::launch(app); app.manage(engine); Ok(())
+        })
         .invoke_handler(tauri::generate_handler![engine_request, check_update, install_update, export_report])
         .build(tauri::generate_context!()).expect("Unable to start NetBridge Studio");
     app.run(|app, event| {

@@ -56,6 +56,13 @@ for t in tests/test-*.py tests/test-*.sh; do
   fi
 
   line=$(printf '%s' "$out" | grep -oE "[0-9]+ passed, [0-9]+ failed" | tail -1)
+  if [ -n "$line" ]; then
+    custom_skips=$(printf '%s' "$out" | grep -E "[0-9]+ passed, [0-9]+ failed" | tail -1 | grep -oE '[0-9]+ skipped' | grep -oE '^[0-9]+' || true)
+    SKIP=$((SKIP + ${custom_skips:-0}))
+    if printf '%s' "$out" | grep -qE 'SKIPPED.*dependencies absent|SKIP .*not installed'; then
+      SKIP=$((SKIP+1))
+    fi
+  fi
   # unittest files end with their own summary: "Ran N tests ..." then "OK" or "FAILED (failures=F, errors=E)".
   # That IS a result, so read it rather than calling the file broken.
   if [ -z "$line" ] && ran=$(printf '%s' "$out" | grep -oE "^Ran [0-9]+ tests?" | tail -1 | grep -oE "[0-9]+"); then

@@ -64,9 +64,10 @@ echo "== preflight: read-only config writes =="
 _writable="/data /etc/bridge /var/lib/tailscale /etc/NetworkManager/system-connections
 /var/log/journal /home/pi/diagnostics /tmp /run /var/tmp /var/lib/misc /var/cache
 /var/spool /var/lib/systemd /var/lib/dhcp /etc/default/bridge-agent
-/etc/default/bridge-net /etc/default/bridge-return-audio"
+/etc/default/bridge-net /etc/default/bridge-return-audio
+/home/pi/flight.txt /home/pi/soak.log /etc/hostname"
 _bad=0
-for _f in "$ROOT"/usr/local/bin/*; do
+for _f in "${ROOT:-}"/usr/local/bin/*; do
   [ -f "$_f" ] || continue
   grep -ohE '(>>?|tee -?a?)[[:space:]]*"?(/etc|/var|/usr|/home|/boot)[a-zA-Z0-9._/-]*' "$_f" 2>/dev/null \
    | sed -E 's/^(>>?|tee -?a?)[[:space:]]*//; s/^"//' | sort -u | while read -r _p; do

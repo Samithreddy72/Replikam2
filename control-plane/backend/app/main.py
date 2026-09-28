@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import Base, engine, get_db
-from . import auth, models, notifier
+from . import auth, models, notifier, workflow
 from .alerts import (device_alerts, is_online, HISTORY_KINDS, history_alert, unreadable_alert, alert_fix,
                      bridge_title, REFUSED_WHILE_BUSY)
 from .models import (Device, Telemetry, Command, DiagBundle, User, AuditLog,
@@ -38,7 +38,7 @@ from .schemas import (EnrollIn, EnrollOut, CommandOut, CommandResultIn,
 # before they were ever queued, so every new button would have failed on first click.
 # No "set-peer" (2026-09-25 audit): it let any admin token point a room's microphone at any address
 # with no PIN session. The return destination is set only by the presenter app, with its ticket.
-ALLOWED_COMMANDS = {"restart", "reset-clock", "profile", "update", "reboot",
+ALLOWED_COMMANDS = {"free-space", "restart", "reset-clock", "profile", "update", "reboot",
                     "start", "stop", "diagnose",
                     # PIN gate (2026-09-25): set a PIN, lift a brute-force lockout, end the live
                     # session. There is deliberately NO remote unlock: only a presenter typing the
@@ -100,7 +100,7 @@ DEFAULT_TIMEOUT_S = 240
 # panel. The FRONTEND already warns; that is not a control, because the API is reachable
 # without it - which is exactly how the accidental reboot happened. The backend now refuses
 # them unless the caller states the intent explicitly.
-CONFIRM_REQUIRED = {"reboot", "update", "deploy-script", "revert-script",
+CONFIRM_REQUIRED = {"free-space", "reboot", "update", "deploy-script", "revert-script",
                     "unquarantine", "golden-restore", "reset-clock",
                     # ends the live session at once: the presenter's video stops arriving
                     "lock"}
@@ -229,7 +229,14 @@ def _sweep_expired(db: Session) -> int:
     """
     now = utcnow()
     n = 0
-    for c in db.scalars(select(Command).where(Command.status.in_(("sent", "pending")))).all():
+    for c in db.scalars(select(Command).where(Command.status.in_(("sent", "pending", "waiting")))).all():
+        deadline = workflow.utc((c.policy or {}).get("expires_at"))
+        if c.status != "sent" and deadline:
+            if now >= deadline and _move(db, c, ("pending", "waiting"), status="expired",
+                    fail_reason="Scheduled action expired before delivery", completed_at=now):
+                n += 1
+            if now >= deadline or (c.policy or {}).get("when") == "idle" or not _goes_stale(c.type,c.args):
+                continue
         if c.status == "sent":
             started, limit = c.sent_at or c.created_at, c.timeout_s or DEFAULT_TIMEOUT_S
             reason = ("no result within %ds of delivery — the device may have rebooted, "
@@ -404,6 +411,9 @@ def _migrate():
         try: return {c["name"] for c in insp.get_columns(t)}
         except Exception: return set()
     with engine.begin() as conn:
+        for table, column in (("devices", "operations"), ("commands", "policy"), ("alert_events", "handling")):
+            if table in insp.get_table_names() and column not in cols(table):
+                conn.execute(_text(f"ALTER TABLE {table} ADD COLUMN {column} JSON"))
         if "provision" not in cols("devices"):
             conn.execute(_text("ALTER TABLE devices ADD COLUMN provision JSON"))
         # M5 org scoping: existing users/audit predate org_id — add it, default
@@ -610,9 +620,19 @@ def enroll(body: EnrollIn, request: Request, db: Session = Depends(get_db)):
         # identity. Otherwise any holder can rotate its token and collect its PIN/mesh key.
         if dev.org_id != settings.bootstrap_tokens[body.bootstrap_token]:
             raise HTTPException(403, "bootstrap organization does not own this device")
-        current = auth._bearer(request.headers.get("Authorization"))
+        header = request.headers.get("Authorization", "")
+        current = auth._bearer(header) if header.startswith("Bearer ") else ""
         if not dev.token_hash or not auth.secrets.compare_digest(auth.hash_token(current), dev.token_hash):
-            raise HTTPException(401, "existing device credential required; contact the fleet owner for recovery")
+            recovered = False
+            if body.recovery_token and len(body.recovery_token) <= 256:
+                claimed = db.execute(update(models.RecoveryGrant).where(
+                    models.RecoveryGrant.token_hash==auth.hash_token(body.recovery_token),
+                    models.RecoveryGrant.device_id==dev.id,
+                    models.RecoveryGrant.used_at.is_(None),models.RecoveryGrant.expires_at>utcnow())
+                    .values(used_at=utcnow()))
+                recovered = claimed.rowcount == 1
+            if not recovered:
+                raise HTTPException(401, "existing device credential required; contact the fleet owner for recovery")
     if is_new:
         # The bootstrap token decides which org the device enrolls into, so a
         # customer's cards land directly in their org (never visible to others).
@@ -666,6 +686,13 @@ def telemetry(body: dict, dev: Device = Depends(auth.require_device),
         dev.setup_pass = sp
     dev.last_seen = now
     dev.latest = body
+    # Nested transaction keeps an optional history failure from rejecting telemetry.
+    try:
+        with db.begin_nested():
+            workflow.observe_session(db,dev,now)
+    except Exception:
+        import logging
+        logging.getLogger("workflow").exception("Could not record observed session")
     if body.get("version"):
         dev.version = body["version"]
     # The DEVICE is authoritative about its own mesh identity, including its ABSENCE.
@@ -686,7 +713,7 @@ def telemetry(body: dict, dev: Device = Depends(auth.require_device),
 @app.get("/v1/commands", response_model=list[CommandOut])
 def pull_commands(dev: Device = Depends(auth.require_device), db: Session = Depends(get_db)):
     rows = db.scalars(
-        select(Command).where(Command.device_id == dev.id, Command.status == "pending")
+        select(Command).where(Command.device_id == dev.id, Command.status.in_(("pending", "waiting")))
         .order_by(Command.created_at)
     ).all()
     now = utcnow()
@@ -696,11 +723,26 @@ def pull_commands(dev: Device = Depends(auth.require_device), db: Session = Depe
     # re-pulled every tick (that once looped reset-clock -> gadget teardown).
     for c in rows:
         cid, ctype, args, created = c.id, c.type, dict(c.args or {}), c.created_at
+        policy = c.policy or {}
+        expires = workflow.utc(policy.get("expires_at"))
+        if expires and now >= expires:
+            _move(db, c, ("pending", "waiting"), status="expired", completed_at=now,
+                  fail_reason="The scheduled action expired before safe delivery.")
+            continue
+        if c.type in workflow.DISRUPTIVE and not policy.get("force_live"):
+            if workflow.activity(dev, now)["busy"]:
+                continue
+        if c.status == "waiting":
+            if workflow.maintenance(dev, now):
+                continue
+            if not _move(db, c, ("waiting",), status="pending"):
+                continue
+
         if created is not None and created.tzinfo is None:
             created = created.replace(tzinfo=dt.timezone.utc)
         # Checked HERE as well as by the sweep: a bridge coming back after a weekend polls within
         # seconds, before any timer runs, and must not be handed Friday's reboot (2026-09-28).
-        if _goes_stale(ctype, args) and created and (now - created).total_seconds() > STALE_UNCOLLECTED_S:
+        if policy.get("when") != "idle" and _goes_stale(ctype, args) and created and (now - created).total_seconds() > STALE_UNCOLLECTED_S:
             _move(db, c, ("pending",), status="expired", fail_reason=_stale_reason(ctype), completed_at=now)
             continue
         # The clock the timeout runs against (sent_at). Without it, "how long has this been out?"
@@ -708,7 +750,7 @@ def pull_commands(dev: Device = Depends(auth.require_device), db: Session = Depe
         # offline before it polled - and would expire commands that were never delivered late.
         # Conditional: a cancel that won the race keeps its word, and the bridge never sees it.
         if _move(db, c, ("pending",), status="sent", sent_at=now):
-            out.append(CommandOut(id=cid, type=ctype, args=args))
+            out.append(CommandOut(id=cid, type=ctype, args=args, safety={"force_live": bool(policy.get("force_live"))}))
     db.commit()
     return out
 
@@ -979,6 +1021,9 @@ def _device_view(dev: Device, eps=None) -> dict:
         "state": _device_state(dev, online, alerts),
         # the meeting laptop is plugged in and has enumerated the USB camera/mic/speaker
         "laptop": (t.get("udc") == "configured") if online else None,
+        "maintenance": workflow.maintenance(dev),
+        "site": (dev.operations or {}).get("site", ""),
+        "notes": (dev.operations or {}).get("notes", ""),
         "latest": dev.latest,
         "alerts": alerts,
     }
@@ -1168,7 +1213,7 @@ def forget_device(device_id: str, actor=Depends(auth.require_admin),
     label = dev.name or dev.pairing_code or device_id
     from .models import Telemetry, TelemetryRollup, AlertEvent, Command, DiagBundle
     removed = 0
-    for model in (RolloutTarget, TelemetryRollup, Telemetry, AlertEvent, Command, DiagBundle):
+    for model in (RolloutTarget, TelemetryRollup, Telemetry, AlertEvent, Command, DiagBundle, models.SupportIncident, models.ObservedSession, models.RecoveryGrant):
         try:
             removed += db.query(model).filter(model.device_id == device_id).delete(
                 synchronize_session=False)
@@ -1469,7 +1514,7 @@ def list_commands(device_id: str, limit: int = 20, actor=Depends(auth.require_ad
              "fail_reason": c.fail_reason,
              # An operator asking "can I just try that again?" should not have to reason about
              # the state machine themselves.
-             "cancellable": c.status == "pending",
+             "cancellable": c.status in ("pending", "waiting"),
              "retryable": c.status in ("failed", "rejected", "expired", "cancelled")}
             for c in rows]
 
@@ -1505,8 +1550,8 @@ def cancel_command(device_id: str, cmd_id: int, actor=Depends(auth.require_admin
     # write. The cancel used to overwrite that and answer cancelled:true while the bridge ran the
     # command - exactly the dishonesty this endpoint exists to prevent. If the poll won, the
     # re-read status is "sent" and the answer below is the truthful 409.
-    if c.status == "pending" and _move(
-            db, c, ("pending",), status="cancelled", completed_at=utcnow(),
+    if c.status in ("pending", "waiting") and _move(
+            db, c, ("pending", "waiting"), status="cancelled", completed_at=utcnow(),
             fail_reason="cancelled by %s before the device collected it" % (
                 getattr(actor, "email", None) or "an operator")):
         db.commit()
@@ -1544,7 +1589,7 @@ def _find_in_flight(db: Session, device_id: str, ctype: str, args):
     """-> (identical, other): an identical command (same type AND args) already pending or sent
     on this bridge, else the newest different one of the same type. Never both."""
     rows = db.scalars(select(Command).where(Command.device_id == device_id, Command.type == ctype,
-                                            Command.status.in_(("pending", "sent")))
+                                            Command.status.in_(("pending", "waiting", "sent")))
                       .order_by(Command.id.desc())).all()
     want = _args_key(args)
     for c in rows:
@@ -1609,6 +1654,15 @@ def issue_command(device_id: str, body: IssueCommandIn, actor=Depends(auth.requi
             "detail": ("this command interrupts service or changes what code runs; "
                        "re-issue it with confirm=true"),
         })
+    if body.when not in ("now", "idle") or not 60 <= body.expires_in_s <= 86400:
+        raise HTTPException(400, "Choose now or idle, and an expiry between 60 and 86400 seconds")
+    if body.force_live and (not body.confirm or body.when != "now"):
+        raise HTTPException(400, "An immediate live override requires explicit confirmation")
+    if body.type in workflow.DISRUPTIVE and body.when == "now" and not body.force_live:
+        state = workflow.activity(dev)
+        if state["busy"]:
+            raise HTTPException(409, {"error":"meeting_guard", "detail":state["reason"],
+                                     "alternative":"Schedule this action for when the bridge is idle."})
     # NO SILENT DOWNGRADE (2026-09-28). Nothing compared the version asked for with the one the
     # bridge runs, and the version pickers listed the OLDEST first. A 2.1 image installed on a 2.2
     # bridge commits if its health check passes and drops the bridge back to PIN protocol 1: the
@@ -1664,12 +1718,16 @@ def issue_command(device_id: str, body: IssueCommandIn, actor=Depends(auth.requi
             raise _busy_refusal(other, body.args)
 
     c = Command(device_id=device_id, type=body.type, args=body.args or {},
+                status="waiting" if body.when == "idle" else "pending",
+                policy={"force_live": body.force_live, "when":body.when,
+                        "expires_at": ((utcnow()+dt.timedelta(seconds=body.expires_in_s)).isoformat()
+                            if body.when == "idle" or body.type in workflow.DISRUPTIVE else None)},
                 timeout_s=_timeout_for(body.type),
                 idempotency_key=body.idempotency_key)
     db.add(c)
     db.commit()
     # audit: never include args (set-pin/unlock carry the PIN)
-    _audit(db, actor, "command:%s" % body.type, dev.name or device_id)
+    _audit(db, actor, ("guard:override:" if body.force_live else "command:") + body.type, dev.name or device_id)
     return {"id": c.id, "status": c.status, "timeout_s": c.timeout_s}
 
 
@@ -2143,6 +2201,7 @@ def presenter_bridges(actor=Depends(auth.require_viewer), db: Session = Depends(
         out.append({"id": d.id, "number": d.number, "label": fleet_label(d.number),
                     "name": d.name or d.pairing_code, "pairing_code": d.pairing_code,
                     "online": is_online(d), "tailscale_ip": d.tailscale_ip,
+                    "pin_protocol": _pin_protocol(d), "maintenance": bool(workflow.maintenance(d)),
                     "ip": (d.latest or {}).get("ip")})
     out.sort(key=lambda b: (b["number"] is None, b["number"] or 0, b["name"] or ""))
     return out
@@ -2374,7 +2433,7 @@ def _command_view(c, device_name=None) -> dict:
             "sent_at": c.sent_at.isoformat() if c.sent_at else None,
             "completed_at": c.completed_at.isoformat() if c.completed_at else None,
             "timeout_s": c.timeout_s, "fail_reason": c.fail_reason,
-            "cancellable": c.status == "pending",
+            "cancellable": c.status in ("pending", "waiting"),
             "retryable": c.status in ("failed", "rejected", "expired", "cancelled")}
 
 
@@ -2553,6 +2612,213 @@ def _mount_payloads():
     app.mount("/payloads", _DownloadOnly(directory=d), name="payloads")
 
 
+
+@app.get("/admin/devices/{device_id}/health")
+def workflow_health(device_id: str, actor=Depends(auth.require_admin), db: Session=Depends(get_db)):
+    dev = _scoped_device(db, device_id, actor)
+    return workflow.health(dev, _safe_alerts(dev))
+
+@app.get("/admin/readiness")
+def workflow_readiness(actor=Depends(auth.require_admin), db: Session=Depends(get_db)):
+    devs = db.scalars(select(Device).where(Device.org_id == actor.org)).all()
+    return {"checked_at": utcnow().isoformat(),
+            "devices": [workflow.health(d, _safe_alerts(d)) for d in devs]}
+
+@app.post("/admin/devices/{device_id}/operations")
+def workflow_operations(device_id: str, body: dict, actor=Depends(auth.require_admin), db: Session=Depends(get_db)):
+    dev = _scoped_device(db, device_id, actor)
+    if set(body)-{"site", "notes", "maintenance_minutes", "reason"}:
+        raise HTTPException(400, "Unsupported operation field")
+    value = dict(dev.operations or {})
+    for key, limit in (("site",48),("notes",2000)):
+        if key in body:
+            text = body[key]
+            if not isinstance(text,str) or len(text)>limit or "\x00" in text:
+                raise HTTPException(400, "%s must be text up to %s characters" % (key,limit))
+            value[key] = text.strip()
+    if "maintenance_minutes" in body:
+        minutes=body["maintenance_minutes"]
+        reason=body.get("reason", "")
+        if type(minutes) is not int or (minutes != 0 and not 5 <= minutes <= 10080):
+            raise HTTPException(400,"Maintenance must be 5 minutes to 7 days, or 0 to end it")
+        if minutes and (not isinstance(reason,str) or not 3 <= len(reason.strip()) <= 200):
+            raise HTTPException(400,"Provide a maintenance reason (3–200 characters)")
+        value["maintenance"] = {"until":(utcnow()+dt.timedelta(minutes=minutes)).isoformat(),
+            "reason":reason.strip(),"by":actor.email} if minutes else None
+    dev.operations=value
+    db.commit()
+    _audit(db,actor,"operations:update",dev.id)
+    return {"site":value.get("site",""),"notes":value.get("notes",""),"maintenance":workflow.maintenance(dev)}
+
+@app.post("/auth/support-reports")
+def submit_support_report(body: dict, actor=Depends(auth.require_viewer), db: Session=Depends(get_db)):
+    device_id=body.get("device_id")
+    if not isinstance(device_id,str): raise HTTPException(400,"Choose a bridge")
+    dev=_scoped_device(db,device_id,actor)
+    if not dev.claimed_at: raise HTTPException(409,"Bridge is not claimed")
+    cutoff=utcnow()-dt.timedelta(days=1)
+    count=db.scalar(select(func.count(models.SupportIncident.id)).where(
+        models.SupportIncident.org_id==actor.org, models.SupportIncident.presenter==actor.email,
+        models.SupportIncident.created_at>=cutoff))
+    if count >= 20: raise HTTPException(429,"Daily report limit reached; contact your fleet administrator")
+    symptom=body.get("symptom","other")
+    if symptom not in ("video","microphone","return_audio","connection","other"):
+        raise HTTPException(400,"Choose a supported symptom")
+    incoming=body.get("report",{})
+    if not isinstance(incoming,dict): raise HTTPException(400,"Report must be an object")
+    clean={"symptom":symptom}
+    for key in ("app_version","platform"):
+        value=incoming.get(key,"")
+        if not isinstance(value,str) or not re.fullmatch(r"[A-Za-z0-9_. -]{0,64}",value):
+            raise HTTPException(400,"Invalid report version/platform")
+        clean[key]=value
+    for key in ("live","wanted","return_on"):
+        clean[key]=incoming.get(key) if type(incoming.get(key)) is bool else None
+    clean["delivery"]={}
+    for key in ("video_arriving","voice_arriving","return_audio","client_sees_camera"):
+        v=(incoming.get("delivery") or {}).get(key) if isinstance(incoming.get("delivery"),dict) else None
+        clean["delivery"][key]=v if type(v) is bool else None
+    # Store only explicit fields. No free-form logs, recordings, tokens, host paths or PINs.
+    clean["bridge_health"]=workflow.health(dev,_safe_alerts(dev))
+    row=models.SupportIncident(device_id=dev.id,org_id=actor.org,presenter=actor.email,report=clean)
+    db.add(row);db.commit()
+    return {"id":row.id,"reference":"NB-SUPPORT-%s" % row.id}
+
+@app.get("/admin/devices/{device_id}/support-reports")
+def support_reports(device_id: str, actor=Depends(auth.require_admin), db: Session=Depends(get_db)):
+    _scoped_device(db,device_id,actor)
+    rows=db.scalars(select(models.SupportIncident).where(models.SupportIncident.device_id==device_id,
+        models.SupportIncident.org_id==actor.org).order_by(models.SupportIncident.id.desc()).limit(30)).all()
+    return [{"id":r.id,"created_at":r.created_at.isoformat(),"presenter":r.presenter,"report":r.report} for r in rows]
+
+@app.get("/admin/devices/{device_id}/sessions")
+def observed_sessions(device_id: str, actor=Depends(auth.require_admin), db: Session=Depends(get_db)):
+    _scoped_device(db,device_id,actor)
+    rows=db.scalars(select(models.ObservedSession).where(models.ObservedSession.device_id==device_id)
+        .order_by(models.ObservedSession.id.desc()).limit(100)).all()
+    return [{"id":r.id,"started_at":r.started_at.isoformat(),"last_seen":r.last_seen.isoformat(),
+             "ended_at":r.ended_at.isoformat() if r.ended_at else None,"end_reason":r.end_reason,
+             "presenter":"Not recorded","samples":r.samples,"warning_samples":r.warning_samples,
+             "status":"ended" if r.ended_at else "observed_live" if (utcnow()-workflow.utc(r.last_seen)).total_seconds()<=45 else "unknown"} for r in rows]
+
+@app.get("/admin/devices/{device_id}/timeline")
+def workflow_timeline(device_id: str, cursor: str | None=None, actor=Depends(auth.require_admin), db: Session=Depends(get_db)):
+    import base64
+    from sqlalchemy import or_, and_
+    _scoped_device(db,device_id,actor)
+    boundary=None
+    if cursor:
+        try:
+            stamp,kind,number=json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+            stamp=workflow.utc(stamp)
+            if not stamp or not isinstance(kind,str) or type(number) is not int: raise ValueError()
+            boundary=(stamp,kind,number)
+        except Exception: raise HTTPException(400,"Invalid timeline cursor")
+    entries=[]
+    sources=[('command',Command,Command.created_at),('alert',models.AlertEvent,models.AlertEvent.opened_at),
+             ('support',models.SupportIncident,models.SupportIncident.created_at),
+             ('session',models.ObservedSession,models.ObservedSession.started_at)]
+    for kind,model,stampcol in sources:
+        stmt=select(model).where(model.device_id==device_id)
+        if boundary:
+            ts,k,n=boundary
+            tie=model.id<n if kind==k else model.id>=0 if kind<k else model.id<0
+            stmt=stmt.where(or_(stampcol<ts,and_(stampcol==ts,tie)))
+        for r in db.scalars(stmt.order_by(stampcol.desc(),model.id.desc()).limit(31)).all():
+            stamp=getattr(r,stampcol.key)
+            if kind=='command':title=r.type;detail=r.status
+            elif kind=='alert':title=r.kind;detail='resolved' if r.resolved_at else 'open'
+            elif kind=='support':title='Presenter report';detail='NB-SUPPORT-%s' % r.id
+            else:title='Observed media session';detail=r.end_reason or 'End not yet observed'
+            entries.append({'id':r.id,'kind':kind,'at':workflow.utc(stamp).isoformat(timespec='microseconds'),
+                            'title':title,'detail':detail})
+    entries.sort(key=lambda r:(r['at'],r['kind'],r['id']),reverse=True)
+    more=len(entries)>30;entries=entries[:30]
+    token=None
+    if more:
+        r=entries[-1];token=base64.urlsafe_b64encode(json.dumps([r['at'],r['kind'],r['id']]).encode()).decode()
+    return {'entries':entries,'next_cursor':token,'note':'Times reflect Fleet observations. Media sessions do not verify the receiving picture.'}
+
+@app.get("/admin/devices/{device_id}/open-alerts")
+def workflow_open_alerts(device_id: str, actor=Depends(auth.require_admin), db: Session=Depends(get_db)):
+    _scoped_device(db,device_id,actor)
+    rows=db.scalars(select(models.AlertEvent).where(models.AlertEvent.device_id==device_id,
+        models.AlertEvent.resolved_at.is_(None)).order_by(models.AlertEvent.opened_at.desc()).limit(100)).all()
+    return [{"id":r.id,"kind":r.kind,"detail":r.detail,"handling":r.handling or {}} for r in rows]
+
+@app.post("/admin/devices/{device_id}/open-alerts/{alert_id}")
+def workflow_handle_alert(device_id: str, alert_id:int, body:dict, actor=Depends(auth.require_admin), db:Session=Depends(get_db)):
+    _scoped_device(db,device_id,actor)
+    event=db.get(models.AlertEvent,alert_id)
+    if not event or event.device_id!=device_id: raise HTTPException(404,"No such alert")
+    if event.resolved_at: raise HTTPException(409,"This alert episode has ended")
+    action=body.get("action")
+    value=dict(event.handling or {})
+    if action=='ack':value.update(acknowledged_by=actor.email,acknowledged_at=utcnow().isoformat())
+    elif action=='snooze':
+        hours=body.get('hours',1)
+        if type(hours) is not int or hours not in (1,4,24):raise HTTPException(400,"Choose 1, 4 or 24 hours")
+        value.update(snoozed_until=(utcnow()+dt.timedelta(hours=hours)).isoformat(),snoozed_by=actor.email)
+    elif action=='unsnooze':value.pop('snoozed_until',None);value.pop('snoozed_by',None)
+    else:raise HTTPException(400,"Choose ack, snooze or unsnooze")
+    event.handling=value;db.commit();_audit(db,actor,'alert:'+action,device_id)
+    return value
+
+@app.get("/admin/self-check")
+def workflow_selfcheck(actor=Depends(auth.require_admin),db:Session=Depends(get_db)):
+    from sqlalchemy import text
+    db.execute(text('SELECT 1'))
+    return {"database":"reachable","email_configured":notifier.email_configured(),
+            "alerts_configured":notifier.any_channel_configured(),
+            "backup":"Use tools/fleet-backup.py; off-device delivery must be configured and restore-tested.",
+            "checked_at":utcnow().isoformat()}
+
+@app.get("/admin/digest")
+def workflow_digest_preview(actor=Depends(auth.require_admin),db:Session=Depends(get_db)):
+    from .workflow_digest import summary
+    row=db.get(models.WorkflowSettings,actor.org)
+    return {"enabled":bool(row and (row.data or {}).get('daily_digest')),"schedule":"09:00 Asia/Kolkata",
+            "preview":summary(db,actor.org)}
+
+@app.post("/admin/digest")
+def workflow_digest_config(body:dict,actor=Depends(auth.require_admin),db:Session=Depends(get_db)):
+    if type(body.get('enabled')) is not bool:raise HTTPException(400,'enabled must be true or false')
+    row=db.get(models.WorkflowSettings,actor.org)
+    if not row:row=models.WorkflowSettings(org_id=actor.org,data={});db.add(row)
+    data=dict(row.data or {});data['daily_digest']=body['enabled'];row.data=data;db.commit()
+    _audit(db,actor,'digest:configure',str(body['enabled']))
+    return {"enabled":body['enabled'],"schedule":"09:00 Asia/Kolkata"}
+
+@app.post("/admin/operations/bulk")
+def workflow_bulk(body:dict,actor=Depends(auth.require_admin),db:Session=Depends(get_db)):
+    ids=body.get('device_ids')
+    if not isinstance(ids,list) or not 1<=len(ids)<=50 or any(not isinstance(i,str) for i in ids) or len(set(ids))!=len(ids):
+        raise HTTPException(400,'Choose 1–50 distinct bridges')
+    for device_id in ids:_scoped_device(db,device_id,actor)
+    command=body.get('command')
+    try:request=IssueCommandIn.model_validate(command)
+    except Exception:raise HTTPException(400,'Invalid command request')
+    # One bridge refusing never silently widens the operation or overrides its guard.
+    results=[]
+    for device_id in ids:
+        try:results.append({'device_id':device_id,'result':issue_command(device_id,request,actor,db)})
+        except HTTPException as exc:results.append({'device_id':device_id,'refused':exc.detail,'status':exc.status_code})
+    return {'results':results}
+
+@app.post("/admin/devices/{device_id}/recovery-grant")
+def workflow_recovery_grant(device_id:str,body:dict,actor=Depends(auth.require_admin),db:Session=Depends(get_db)):
+    dev=_scoped_device(db,device_id,actor)
+    if body.get('confirm') is not True:raise HTTPException(400,'Confirm replacement-card recovery explicitly')
+    activity=workflow.activity(dev)
+    if activity.get('live') or activity.get('laptop'):raise HTTPException(409,'End the meeting and disconnect the laptop before recovery')
+    token=auth.secrets.token_urlsafe(32)
+    db.query(models.RecoveryGrant).filter(models.RecoveryGrant.device_id==device_id,models.RecoveryGrant.used_at.is_(None)).delete(synchronize_session=False)
+    expires=utcnow()+dt.timedelta(minutes=15)
+    db.add(models.RecoveryGrant(device_id=device_id,token_hash=auth.hash_token(token),expires_at=expires));db.commit()
+    _audit(db,actor,'recovery:issued',device_id)
+    return {'recovery_token':token,'expires_at':expires.isoformat(),
+            'instructions':'Shown once. With the original card offline, place this token in /data/netbridge-recovery.token on the replacement card (root-owned, mode 0600). Successful enrollment rotates the old device credential and preserves Fleet history.'}
+
 def _mount_panel():
     # The built panel has lived at control-plane/panel-dist, but an earlier version only
     # looked for backend/static — and os.path.isdir() failing just SKIPS the mount, so "/"
@@ -2639,7 +2905,7 @@ def _ro_targets(db: Session, ro: Rollout) -> list[RolloutTarget]:
 
 def _update_in_flight(db: Session, device_id: str):
     return db.scalars(select(Command).where(Command.device_id == device_id, Command.type == "update",
-                                            Command.status.in_(("pending", "sent")))
+                                            Command.status.in_(("pending", "waiting", "sent")))
                       .order_by(Command.id.desc()).limit(1)).first()
 
 
@@ -3131,6 +3397,15 @@ def _housekeeping_once():
         busy = select(RolloutTarget.rollout_id).where(RolloutTarget.status.in_(IN_FLIGHT_TARGET))
         for ro in db.scalars(select(Rollout).where(Rollout.id.in_(busy))).all():
             _sync_rollout(db, ro)
+        from .workflow_digest import tick
+        tick(db)
+        try:
+            from .workflow_mesh import refresh
+            refresh(db)
+        except Exception:
+            db.rollback()
+            import logging
+            logging.getLogger("workflow").warning("Mesh expiry inventory unavailable; cached evidence will age out")
     finally:
         db.close()
 

@@ -44,7 +44,7 @@ BOOT="${BRIDGE_OTA_BOOT:-/boot/firmware}"
 STATUS="$STAGE/status.json"
 MIN_FREE_MB=3000
 # The bridge's paths and tools; a test sandbox replaces them.
-MNT="${BRIDGE_OTA_MNT:-/mnt/ota-standby}"
+MNT="${BRIDGE_OTA_MNT:-/run/ota-standby}"
 MKFS="${BRIDGE_OTA_MKFS:-/sbin/mkfs.ext4}"
 FSCK="${BRIDGE_OTA_FSCK:-/sbin/e2fsck}"
 PROC_CMDLINE="${BRIDGE_OTA_PROC_CMDLINE:-/proc/cmdline}"
@@ -332,7 +332,8 @@ pick_standby          # again: the download and the wait may have taken hours
 status writing "standby slot $st"
 log "writing standby slot $st ($dev, PARTUUID=$puuid)"
 
-mkdir -p "$MNT"; umount "$MNT" 2>/dev/null || true
+mkdir -p "$MNT" || die "cannot create standby mountpoint; standby slot left untouched" 6
+umount "$MNT" 2>/dev/null || true
 "$MKFS" -F -q -L "root$st" "$dev" || die "could not format the standby slot ($dev)" 6
 mount "$dev" "$MNT" || die "could not mount the standby slot ($dev)" 6
 MOUNTED=1

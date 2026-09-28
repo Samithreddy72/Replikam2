@@ -4,9 +4,9 @@ LOG(){ logger -t powertrim "$*"; }
 vcgencmd display_power 0 >/dev/null 2>&1 && LOG "hdmi off"
 # 2) activity LED off
 echo mmc0 > /sys/class/leds/ACT/trigger 2>/dev/null   # LED ON: green blinks on SD activity
-# 3) cap CPU to 1.2GHz — kills the big current SPIKES (bridge load is light; decode uses ~5%)
+# 3) Preserve the tested 900 MHz CPU ceiling; this reduces demand, not supply faults.
 for p in /sys/devices/system/cpu/cpufreq/policy*; do echo 900000 > $p/scaling_max_freq 2>/dev/null; done
-LOG "cpu capped 1.2GHz"
+LOG "cpu ceiling requested: 900 MHz (verify scaling_max_freq for actual result)"
 # 3b) eth PHY + PWR LED off
 ip link set eth0 down 2>/dev/null && LOG "eth0 down"
 echo default-on > /sys/class/leds/PWR/trigger 2>/dev/null  # LED ON: red power light solid

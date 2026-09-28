@@ -7,7 +7,18 @@ CONFIGFS="/sys/kernel/config"
 GADGET="$CONFIGFS/usb_gadget"
 VID="0x0525"
 PID="0xa4a2"
-SERIAL="0123456789"
+# Pilot only: an existing laptop caches USB descriptors by this identity.
+# Enable on one idle spare bridge via /etc/bridge/usb-serial-mode = unique.
+bridge_usb_serial() {
+  case "$1:$2" in
+    unique:*) case "$2" in ''|*[!0-9a-fA-F]*) return 1;; esac
+              [ "${#2}" -eq 16 ] || return 1
+              [ "$2" != "0000000000000000" ] || return 1
+              printf '%s' "$2" ;;
+    *) printf '%s' '0123456789' ;;
+  esac
+}
+SERIAL=$(bridge_usb_serial "$(cat /etc/bridge/usb-serial-mode 2>/dev/null || true)" "$(awk '/^Serial[[:space:]]*:/ {print $3}' /proc/cpuinfo)") || { echo 'Invalid unique USB identity; refusing descriptor setup' >&2; exit 1; }
 MANUF=$(hostname)
 PRODUCT="UVC Gadget"
 BOARD=$(strings /proc/device-tree/model)

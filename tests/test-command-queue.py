@@ -71,7 +71,12 @@ class _Actor:
 
 _dev = {"id": "q1"}
 M.app.dependency_overrides[M.auth.require_admin] = lambda: _Actor()
-M.app.dependency_overrides[M.auth.require_device] = lambda: type("D", (), {"id": _dev["id"]})()
+def current_device():
+    with SessionLocal() as session:
+        d = session.get(Device, _dev["id"])
+        session.expunge(d)
+        return d
+M.app.dependency_overrides[M.auth.require_device] = current_device
 
 PIN2 = {"pin_set": True, "required": True, "protocol": 2}
 db = SessionLocal()

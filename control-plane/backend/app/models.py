@@ -59,6 +59,8 @@ class Device(Base):
     mesh_key_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     mesh_autokeys: Mapped[int] = mapped_column(Integer, default=0)
 
+    operations: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     commands: Mapped[list["Command"]] = relationship(back_populates="device")
 
 
@@ -160,6 +162,7 @@ class AlertEvent(Base):
     resolve_notified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # When the alert stopped firing while the episode is still open (None = firing now).
     clear_since: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    handling: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class DiagBundle(Base):
@@ -202,6 +205,7 @@ class Command(Base):
     # reboots. Nullable because it is optional: the in-flight guard in issue_command protects
     # the dangerous types without any client change.
     idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    policy: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     output: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     # When the device actually took it. The gap between created_at and sent_at is queue wait;
@@ -298,3 +302,40 @@ class Session(Base):
     token_hash: Mapped[str] = mapped_column(String, index=True)
     label: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class SupportIncident(Base):
+    __tablename__ = "support_incidents"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    org_id: Mapped[str] = mapped_column(String, index=True)
+    presenter: Mapped[str] = mapped_column(String)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    report: Mapped[dict] = mapped_column(JSON)
+
+
+class ObservedSession(Base):
+    """Telemetry-observed delivery interval, not proof of receiver rendering or identity."""
+    __tablename__ = "observed_sessions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    last_seen: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ended_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    end_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    samples: Mapped[int] = mapped_column(Integer, default=1)
+    warning_samples: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class WorkflowSettings(Base):
+    __tablename__ = "workflow_settings"
+    org_id: Mapped[str] = mapped_column(String, primary_key=True)
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class RecoveryGrant(Base):
+    __tablename__ = "recovery_grants"
+    token_hash: Mapped[str] = mapped_column(String, primary_key=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -74,6 +74,8 @@ function App() {
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [engineError, setEngineError] = useState("");
+  const [supportPreview, setSupportPreview] = useState<{report:Record<string,unknown>;notice:string}|null>(null);
+  const [setupChecks, setSetupChecks] = useState<{label:string;status:string;detail:string}[]>([]);
   const [health, setHealth] = useState(false);
   const [source, setSource] = useState("Camera");
   const [email, setEmail] = useState("");
@@ -383,6 +385,12 @@ function App() {
             "Session started. Waiting for bridge delivery checks.",
     );
   };
+  const checkSetup = async () => {
+    const result = await api<{checks:{label:string;status:string;detail:string}[]}>("/api/preflight", {
+      bridge_id: bridge?.id, camera_name: camera, mic_name: mic,
+    });
+    setSetupChecks(result.checks);
+  };
   const downloadReport = async () => {
     const a = await api<Record<string, unknown>>("/api/audio/diagnostics");
     setAudioDetails(a);
@@ -661,9 +669,26 @@ function App() {
               <Activity size={16} />
               Connection health
             </button>
+            <button className="health-toggle" onClick={() => void action("Checking setup", checkSetup)}>Check my setup</button>
+            <button className="health-toggle" onClick={() => void action("Preparing report", async () => setSupportPreview(await api("/api/support-report",{submit:false})))}>Get help</button>
           </div>
         </header>
         <main>
+          {supportPreview && <section className="card" aria-label="Support report preview">
+            <h2>Send a report to your fleet administrator</h2><p>{supportPreview.notice}</p>
+            <pre>{JSON.stringify(supportPreview.report,null,2)}</pre>
+            <button onClick={() => void action("Sending report", async () => {
+              const r=await api<{reference:string}>("/api/support-report",{submit:true,bridge_id:bridge?.id});
+              setNotice("Sent: "+r.reference);setSupportPreview(null);
+            })}>Send report</button>
+            <button onClick={() => void downloadReport()}>Save local report instead</button>
+            <button onClick={() => setSupportPreview(null)}>Cancel</button>
+          </section>}
+          {setupChecks.length > 0 && <section className="card" aria-label="Setup results" aria-live="polite">
+            <h2>Setup check</h2>
+            {setupChecks.map((c) => <p key={c.label}><strong>{c.label} — {c.status}</strong>: {c.detail}</p>)}
+            <button onClick={() => setSetupChecks([])}>Close setup results</button>
+          </section>}
           <div className="page-heading">
             <div>
               <div className="eyebrow">
@@ -1462,7 +1487,7 @@ function App() {
             { key: "video_arriving", name: "Video delivery", icon: Video },
             { key: "voice_arriving", name: "Voice delivery", icon: Mic },
             { key: "return_audio", name: "Return audio", icon: Headphones },
-            { key: "client_sees_camera", name: "USB camera", icon: Monitor },
+            { key: "client_sees_camera", name: "USB connection", icon: Monitor },
           ].map(({ key, name, icon: Icon }) => {
             const s = deliveryStatus(state, key);
             return (

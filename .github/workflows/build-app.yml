@@ -29,7 +29,12 @@ env:
   PYTHONIOENCODING: "utf-8"
 
 jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+    permissions:
+      contents: read
   build:
+    needs: tests
     strategy:
       fail-fast: false          # a Windows failure must not hide a good macOS build
       matrix:
@@ -54,7 +59,7 @@ jobs:
           go-version: "1.23"
 
       - name: Install PyInstaller
-        run: python -m pip install --upgrade pip pyinstaller certifi
+        run: python -m pip install --upgrade pip pyinstaller certifi -r app/netbridge-source/requirements-build.txt
 
       # GStreamer is the ONLY return-audio player on Windows (ffmpeg has no audio output
       # device there), so it must be present on the runner for build.py to bundle it.

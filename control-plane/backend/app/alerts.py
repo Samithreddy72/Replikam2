@@ -64,6 +64,7 @@ def _num(v):
 # tests/test-fleet-alerts.py fails if any kind this module can raise has no fix, or names a command
 # the server or the bridge would refuse.
 _FIXES = {
+    "mesh_key_expiring": {"command":None,"label":"Schedule mesh credential renewal","steps":["Review the key expiry in the tailnet administrator console.","Renew during an idle maintenance window; do not reset a live mesh connection."]},
     "offline": {"command": None, "label": "How to bring it back", "steps": [
         "Check it has power: the red light on the Pi is on.",
         "Moved to a new place? After a minute without Wi-Fi it opens its setup Wi-Fi {setup_ssid} - join it "

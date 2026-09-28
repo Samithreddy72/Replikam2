@@ -153,7 +153,7 @@ if '@app.delete("/admin/devices/{device_id}/commands/{cmd_id}")' in src:
     ok("a DELETE endpoint exists (it returned 405 during the audit)")
 else:
     no("still no way to cancel anything")
-if 'if c.status == "pending"' in body and '"cancelled"' in body:
+if 'if c.status in ("pending", "waiting")' in body and '"cancelled"' in body:
     ok("pending -> cancelled, which is a real recall: the device never saw it")
 else:
     no("cannot cancel even the case that is safely cancellable")

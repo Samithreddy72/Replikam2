@@ -57,6 +57,7 @@ def fake_run(argv, **kw):
     calls.append(list(argv))
     class P: returncode = 0; stdout = ""; stderr = ""
     return P()
+agent.telemetry = lambda: {"udc":"not attached", "streams":{}}
 agent.subprocess.run = fake_run
 cid, status, out = agent.run_command({"id": "41", "type": "deploy-script",
                                       "args": {"name": "bridge-web.py", "source": "https://f/payloads"}})

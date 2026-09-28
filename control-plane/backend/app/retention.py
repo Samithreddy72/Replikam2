@@ -19,7 +19,7 @@ from sqlalchemy import delete, select
 
 from .config import settings
 from .models import (Telemetry, TelemetryRollup, AuditLog, Command, AlertEvent, RolloutTarget,
-                     User, Session as UserSession, COMMAND_TERMINAL_STATES, utcnow)
+                     RecoveryGrant, ObservedSession, SupportIncident, User, Session as UserSession, COMMAND_TERMINAL_STATES, utcnow)
 from . import rollup as _rollup
 
 log = logging.getLogger("retention")
@@ -96,6 +96,13 @@ def sweep(db) -> dict:
         delete(AlertEvent).where(AlertEvent.resolved_at.is_not(None),
                                  AlertEvent.resolved_at < cutoff),
         execution_options={"synchronize_session": False}).rowcount or 0
+
+    deleted["recovery_grants"] = db.execute(delete(RecoveryGrant).where(
+        RecoveryGrant.expires_at < now - dt.timedelta(days=1))).rowcount or 0
+    deleted["observed_sessions"] = db.execute(delete(ObservedSession).where(
+        ObservedSession.last_seen < now - dt.timedelta(days=90))).rowcount or 0
+    deleted["support_incidents"] = db.execute(delete(SupportIncident).where(
+        SupportIncident.created_at < now - dt.timedelta(days=30))).rowcount or 0
 
     # Sign-in sessions whose user no longer exists. Such a token can never be valid
     # again, and a user's sessions have not always been deleted with the user

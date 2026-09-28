@@ -4,6 +4,9 @@ After=bridge-gadget.service
 Wants=bridge-gadget.service
 StartLimitIntervalSec=0
 [Service]
+# Cache lives on writable /var/cache; read-only /root cannot retain plugin scans.
+CacheDirectory=netbridge/gstreamer-1.0
+Environment=GST_REGISTRY=/var/cache/netbridge/gstreamer-1.0/registry.bin
 ExecStartPre=/usr/local/bin/bridge-wait.sh uac2
 ExecStart=/usr/local/bin/bridge-run.sh bridge-feeder-audio.sh
 Restart=always

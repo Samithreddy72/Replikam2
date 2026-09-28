@@ -50,7 +50,7 @@ dpkg -i restore/kernel/linux-kbuild-*.deb restore/kernel/linux-image-*.deb \
         restore/kernel/linux-headers-*common*.deb restore/kernel/linux-headers-*rpi-v8_*.deb
 mv /tmp/dkms.postinst.bak /etc/kernel/postinst.d/dkms        2>/dev/null || true
 mv /tmp/dkms.header.bak   /etc/kernel/header_postinst.d/dkms 2>/dev/null || true
-dkms autoinstall -k "$KVER" || echo "WARN: dkms autoinstall non-zero (continuing)"
+dkms autoinstall -k "$KVER" || { echo "FATAL: kernel module build failed"; exit 1; }
 update-initramfs -c -k "$KVER"
 # Locate the REAL boot partition = the directory where config.txt actually lives. arm-runner
 # does NOT reliably mount it at /boot/firmware, so the previous builds wrote the pinned kernel
@@ -183,6 +183,9 @@ log "hardware group membership for the pi user"
 for _g in video gpio i2c spi input render; do
   getent group "$_g" >/dev/null 2>&1 && usermod -aG "$_g" pi 2>/dev/null || true
 done
+# Owner key login requires a real shell; retain a locked password.
+usermod -s /bin/bash pi && usermod -p '!' pi || { echo 'FATAL: cannot configure owner login'; exit 1; }
+[ "$(getent passwd pi | cut -d: -f7)" = /bin/bash ] || { echo 'FATAL: owner login shell unavailable'; exit 1; }
 id pi 2>/dev/null || true
 
 # Passwordless sudo for pi. Raspberry Pi OS ships /etc/sudoers.d/010_pi-nopasswd; this CI
@@ -360,7 +363,7 @@ fi
 log "secret sweep clean"
 # ---------------- PREFLIGHT: image contains everything its own code calls ----------
 log "preflight dependency check"
-bash "$REPO/factory/preflight-check.sh"
+bash "$REPO/factory/preflight-check.sh" || { echo "FATAL: image preflight failed"; exit 1; }
 
 # ---------------- Strip the build-time repository copy ----------------
 # The whole checkout is copied to /opt/replikam2 so this script can install from it. Every

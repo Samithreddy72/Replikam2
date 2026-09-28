@@ -55,6 +55,7 @@ ROOTS = tuple(os.path.realpath(r) for r in _ROOTS)
 # defence must not depend on how a path happens to be spelled.
 DENY = tuple(os.path.realpath(p) for p in (
     "/etc/bridge/agent.token",
+    "/data/netbridge-recovery.token",
     "/etc/bridge/setup-wifi-pass",
     "/etc/shadow", "/etc/gshadow", "/etc/sudoers",
 ))

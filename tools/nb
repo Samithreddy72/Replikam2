@@ -3,6 +3,12 @@
 
     nb list                              every bridge: number, state, PIN, OS, uptime, streams, power, updates
     nb show <bridge>                     one bridge in detail
+    nb health <bridge>                   non-disruptive health assessment
+    nb readiness                         all bridges, with unknown checks explicit
+    nb timeline <bridge>                  recent commands, alerts, sessions and reports
+    nb sessions <bridge>                  telemetry-observed media sessions
+    nb schedule <bridge> <type> [JSON]    run when idle; expires in 30 minutes
+    nb cancel <bridge> <command-id>       cancel an undelivered action
     nb alerts [bridge] [--open|--resolved] [--critical|--warning] [--page N] [--rows N]
                                          what needs you now, bridge by bridge (each alert with its fix),
                                          then the alert history a page at a time (newest first)
@@ -43,7 +49,7 @@ OWNER_KEY = pathlib.Path("~/.netbridge/keys/netbridge-owner-ssh").expanduser()
 KNOWN_HOSTS = pathlib.Path("~/.netbridge/known_hosts").expanduser()
 REPO = pathlib.Path(__file__).resolve().parent.parent
 DONE = {"done", "failed", "rejected", "timeout", "expired", "cancelled", "error"}
-CHANGES = {"deploy-script", "revert-script", "unquarantine", "update", "reboot", "restart", "start",
+CHANGES = {"free-space", "deploy-script", "revert-script", "unquarantine", "update", "reboot", "restart", "start",
            "stop", "profile", "set-peer", "reset-clock", "gadget-tune", "gadget-tune-clear",
            "jitter-fix", "jitter-reset", "golden-restore", "set-pin", "clear-lockout", "lock"}
 WAIT_S = {"update": 1800, "deploy-script": 1000, "diagnose": 1000, "revert-script": 700,
@@ -639,7 +645,36 @@ def cmd_run(a):
     return show_result(run(d, a[1], args))
 
 
+def cmd_schedule(a):
+    d=pick(a[0])[0]
+    args=json.loads(a[2]) if len(a)>2 else {}
+    confirm("Schedule %s when idle (expires in 30 minutes)" % a[1],[d])
+    r=run(d,a[1],args,wait=False,extra={"when":"idle","expires_in_s":1800,"confirm":True})
+    print(json.dumps(r,indent=2))
+
+
+def cmd_cancel(a):
+    d=pick(a[0])[0]
+    if not a[1].isdigit(): die("command id must be a number")
+    print(json.dumps(api("DELETE","/admin/devices/%s/commands/%s" % (d["id"],a[1])),indent=2))
+
+
+def cmd_workflow(endpoint):
+    def command(a):
+        if endpoint == "readiness":
+            result = api("GET", "/admin/readiness")
+        else:
+            d = pick(a[0])[0]
+            result = api("GET", "/admin/devices/%s/%s" % (d["id"],endpoint))
+        print(json.dumps(result,indent=2))
+    return command
+
+
 COMMANDS = {
+    "free-space": (cmd_simple("free-space"),1),
+    "schedule":(cmd_schedule,2), "cancel":(cmd_cancel,2),
+    "health": (cmd_workflow("health"),1), "readiness":(cmd_workflow("readiness"),0),
+    "timeline":(cmd_workflow("timeline"),1), "sessions":(cmd_workflow("sessions"),1),
     "list": (cmd_list, 0), "ls": (cmd_list, 0), "show": (cmd_show, 1), "alerts": (cmd_alerts, 0),
     "running": (cmd_simple("running"), 1), "logs": (cmd_logs, 1), "read": (cmd_read, 2),
     "usb": (cmd_usb, 1), "diagnose": (cmd_diagnose, 1), "deploy": (cmd_deploy, 2),

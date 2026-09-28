@@ -111,6 +111,10 @@ restore/binaries/libuvcgadget.so.0.4.0 /usr/local/lib/aarch64-linux-gnu/libuvcga
 MAP
 [ $bad -eq 0 ] && ok "$n configs, keys and camera binaries identical to git" || no "$bad of $n configs/keys/binaries differ"
 
+owner_shell=$(cat_img /etc/passwd | awk -F: '$1=="pi" {print $7}')
+[ "$owner_shell" = /bin/bash ] && cat_img /etc/shells | grep -qxF "$owner_shell" \
+  && ok "owner SSH login shell is enabled" || no "owner SSH login shell is missing or disabled"
+
 echo; echo "--- 2. units that start, where they must, and the ones that must not ---"
 names /etc/systemd/system/multi-user.target.wants > "$T/wants"
 names /etc/systemd/system/timers.target.wants > "$T/timers"

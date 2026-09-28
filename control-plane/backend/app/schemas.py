@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 class EnrollIn(BaseModel):
     bootstrap_token: str
+    recovery_token: Optional[str] = None
     device_id: str
     pairing_code: str
     version: Optional[str] = None
@@ -20,6 +21,7 @@ class EnrollOut(BaseModel):
 class CommandOut(BaseModel):
     id: int
     type: str
+    safety: dict[str, Any] = {}
     args: dict[str, Any] = {}
 
 
@@ -55,6 +57,9 @@ class IssueCommandIn(BaseModel):
     # image on a 2.2 bridge drops it back to PIN protocol 1, which the presenter app refuses and
     # which the fleet can no longer update remotely - a physical reflash (2026-09-28).
     allow_downgrade: bool = False
+    when: str = "now"
+    expires_in_s: int = 1800
+    force_live: bool = False
 
 
 class DeviceUpdateIn(BaseModel):
@@ -70,3 +75,6 @@ class RolloutCreateIn(BaseModel):
     # Include bridges that run a NEWER version than this one (a deliberate fleet downgrade).
     # Without it they are left out and named, for the reason given on IssueCommandIn.
     allow_downgrade: bool = False
+    when: str = "now"
+    expires_in_s: int = 1800
+    force_live: bool = False

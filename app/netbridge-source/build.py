@@ -548,7 +548,7 @@ def main():
     # so without this every https call to the fleet fails CERTIFICATE_VERIFY_FAILED and the
     # bridge list comes back empty. The import lives inside a function, so name it
     # explicitly rather than relying on PyInstaller's static analysis to spot it.
-    cmd += ["--hidden-import", "certifi", "--collect-data", "certifi"]
+    cmd += ["--hidden-import", "certifi", "--collect-data", "certifi", "--collect-all", "cryptography"]
     if args.persistent_audio:
         cmd += ["--hidden-import", "gi.repository.Gst", "--hidden-import", "audio_engine",
                 "--hidden-import", "audio_diagnostics"]

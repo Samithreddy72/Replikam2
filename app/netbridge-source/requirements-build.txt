@@ -1,0 +1,2 @@
+# Cross-platform verification of signed update manifests; bundled by PyInstaller.
+cryptography==50.0.1

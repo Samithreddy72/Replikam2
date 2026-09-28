@@ -69,6 +69,8 @@ export function deliveryStatus(
       label: "Microphone muted",
       detail: "Outgoing microphone capture is intentionally stopped.",
     };
+  if (key === "return_audio" && state.return_on === false)
+    return {tone:"neutral",label:"Playback disabled",detail:"You chose not to play meeting audio on this computer."};
   const age = state.bridge_checks?.age_s;
   const check = state.bridge_checks?.checks?.[key];
   if (
@@ -84,7 +86,7 @@ export function deliveryStatus(
     };
   return {
     tone: check.ok ? "good" : "warn",
-    label: check.ok ? "Confirmed by bridge" : "Needs attention",
-    detail: check.detail || "No details provided",
+    label: check.ok ? (key === "client_sees_camera" ? "USB configured" : "Confirmed by bridge") : "Needs attention",
+    detail: key === "client_sees_camera" ? "USB state only; the meeting app’s displayed picture is not verified." : check.detail || "No details provided",
   };
 }

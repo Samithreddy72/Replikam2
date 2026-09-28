@@ -120,14 +120,26 @@ def _update_pubkey():
 
 
 def _verify_sig(pubkey, sig_path, data_path):
-    """EC/SHA256 verify, same invocation the bridge uses. Absent openssl => unverifiable
-    => refuse (never 'update anyway')."""
-    if not shutil.which("openssl"):
+    """Verify with bundled crypto on Windows/macOS; source runs may use OpenSSL."""
+    try:
+        from cryptography.hazmat.primitives import serialization, hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+    except ImportError:
+        if not shutil.which("openssl"): return False
+        try:
+            r = subprocess.run(["openssl", "dgst", "-sha256", "-verify", str(pubkey),
+                                "-signature", str(sig_path), str(data_path)], timeout=15,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return r.returncode == 0
+        except (OSError, subprocess.TimeoutExpired): return False
+    try:
+        public = serialization.load_pem_public_key(pathlib.Path(pubkey).read_bytes())
+        if not isinstance(public, ec.EllipticCurvePublicKey): return False
+        public.verify(pathlib.Path(sig_path).read_bytes(), pathlib.Path(data_path).read_bytes(),
+                      ec.ECDSA(hashes.SHA256()))
+        return True
+    except Exception:
         return False
-    r = subprocess.run(["openssl", "dgst", "-sha256", "-verify", pubkey,
-                        "-signature", sig_path, data_path],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return r.returncode == 0
 
 
 def _sha256(path):
@@ -139,6 +151,39 @@ def _sha256(path):
     return h.hexdigest()
 
 
+def _update_compatible(fields):
+    # Separate feed prevents older clients from discovering this protocol-2 release.
+    # Missing metadata/fleet evidence is unknown, not permission to migrate.
+    if fields.get('platform') != _plat_tag() or fields.get('bridge_protocol') != '2': return False
+    st = load_state()
+    if not st.get('bridge_id') or not st.get('token'): return False
+    try:
+        bridges = _fleet_bridges(st)
+        return any(b.get('id') == st['bridge_id'] and b.get('online') is True and
+                   b.get('pin_protocol') == 2 for b in bridges if isinstance(b, dict))
+    except Exception:
+        return False
+
+
+def _manifest_fields(path):
+    """Bounded, unambiguous signed metadata. Filenames never escape staging."""
+    try:
+        raw = pathlib.Path(path).read_bytes()
+        if len(raw) > 16384: return None
+        fields = {}
+        for line in raw.decode('utf-8').splitlines():
+            if not line or line.startswith('#'): continue
+            key, value = line.split('=', 1)
+            if key in fields: return None
+            fields[key] = value
+        if not re.fullmatch(r'[0-9a-f]{64}', fields.get('sha256','')): return None
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}',fields.get('file','')): return None
+        if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?',fields.get('version','')): return None
+        return fields
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
 def apply_staged_update():
     """Swap in a previously staged update. Runs FIRST at startup, before any port is
     bound, so the app can replace itself with nothing in flight. Keeps the outgoing
@@ -148,30 +193,45 @@ def apply_staged_update():
     if not exe:
         return
     staged, meta = exe.with_suffix(".new"), exe.with_suffix(".new.json")
+    man, sig = exe.with_suffix(".new.manifest"), exe.with_suffix(".new.sig")
     if not (staged.exists() and meta.exists()):
         return
+    swapped = False
     try:
-        info = json.loads(meta.read_text())
-        # Re-verify at apply time: the file sat on disk since the download.
+        pub = _update_pubkey()
+        if not pub or not man.exists() or not sig.exists() or not _verify_sig(pub, str(sig), str(man)):
+            _update_note = "Staged update could not be authenticated. Keeping the current app."
+            return
+        info = _manifest_fields(man)
+        if not info or not _update_compatible(info):
+            _update_note = "Update waits until compatibility with the selected bridge can be verified."
+            return
+        # Only the signed manifest authorizes bytes, never the editable staging JSON.
         if _sha256(str(staged)) != info.get("sha256"):
             staged.unlink(missing_ok=True); meta.unlink(missing_ok=True)
             return
         old = exe.with_suffix(".old")
         old.unlink(missing_ok=True)
         os.replace(str(exe), str(old))       # atomic; the running image stays mapped
+        swapped = True
         os.replace(str(staged), str(exe))
         os.chmod(str(exe), 0o755)
-        if not IS_WIN:
-            # Ad-hoc re-sign: macOS SIGKILLs a binary whose signature does not match
-            # its contents, which would brick the app on Apple Silicon.
-            subprocess.run(["codesign", "--force", "--sign", "-", str(exe)],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         meta.unlink(missing_ok=True)
         save_state({**load_state(), "updated_to": info.get("version"),
                     "updated_from": APP_VERSION})
-        os.execv(str(exe), [str(exe)] + sys.argv[1:])     # start the new build
+        # A new onefile build must extract its own runtime, not inherit the old _MEIPASS.
+        env = {k:v for k,v in os.environ.items() if not k.startswith("_PYI_") and k != "_MEIPASS2"}
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        os.execve(str(exe), [str(exe)] + sys.argv[1:], env)
     except Exception:
-        # Never let a failed swap stop the app from running the version it already has.
+        # Restore the old executable if rename or launch failed. The old process is still
+        # mapped and can continue; never leave its normal launch path missing or broken.
+        try:
+            if swapped and old.exists():
+                os.replace(str(old), str(exe))
+            _update_note = "Update installation failed; the previous app was restored."
+        except OSError:
+            _update_note = "Update installation failed. Restore the .old backup before the next launch."
         try:
             staged.unlink(missing_ok=True); meta.unlink(missing_ok=True)
         except Exception:
@@ -193,7 +253,7 @@ def check_for_update(base_url):
     pub = _update_pubkey()
     if not (exe and base_url and pub):
         return None                      # dev run, or no pinned key -> updates disabled
-    root = "%s/app/%s" % (base_url.rstrip("/"), _plat_tag())
+    root = "%s/app/pin-v2/%s" % (base_url.rstrip("/"), _plat_tag())
     tmp = pathlib.Path(STATE_DIR) / "update"
     try:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -203,11 +263,11 @@ def check_for_update(base_url):
         urllib.request.urlretrieve("%s/%s.sig" % (root, UPDATE_MANIFEST), sig)
         if not _verify_sig(pub, str(sig), str(man)):
             return None                  # unsigned/tampered manifest: stop here
-        fields = dict(l.split("=", 1) for l in man.read_text().splitlines()
-                      if "=" in l and not l.startswith("#"))
-        ver, want, fname = fields.get("version"), fields.get("sha256"), fields.get("file")
-        if not (ver and want and fname):
+        fields = _manifest_fields(man)
+        if not fields:
             return None
+        if not _update_compatible(fields): return None
+        ver, want, fname = fields['version'], fields['sha256'], fields['file']
 
         # IDENTITY IS THE DIGEST, NOT THE VERSION STRING.
         #
@@ -238,6 +298,8 @@ def check_for_update(base_url):
             return None                  # signed manifest, wrong bytes: refuse
         staged = exe.with_suffix(".new")
         shutil.move(str(blob), str(staged))
+        shutil.copyfile(man, exe.with_suffix(".new.manifest"))
+        shutil.copyfile(sig, exe.with_suffix(".new.sig"))
         exe.with_suffix(".new.json").write_text(
             json.dumps({"version": ver, "sha256": want}))
         _update_note = "Update %s ready — it installs next time you start the app." % ver
@@ -2370,6 +2432,59 @@ def bridge_route(host, st, read_only=False):
     return route
 
 
+def support_report():
+    snapshot = BRIDGEWATCH.snapshot()
+    checks = snapshot.get("checks") or {}
+    fresh = snapshot.get("reachable") is not False and snapshot.get("age_s") is not None and snapshot["age_s"] <= 20
+    return {"app_version":APP_VERSION,"platform":"macOS" if IS_MAC else "Windows",
+            "live":bool(SESSION.live),"wanted":bool(SESSION.wanted),"return_on":bool(SESSION.return_on),
+            "delivery":{k:(checks[k].get("ok") if fresh and isinstance(checks.get(k),dict) else None)
+                        for k in ("video_arriving","voice_arriving","return_audio","client_sees_camera")}}
+
+
+def setup_check(selection):
+    """Inspect prerequisites without starting media, changing a route or recording audio."""
+    st = load_state()
+    devices = av_devices() if not SESSION.live else {"video":[], "audio":[]}
+    rows = []
+    def row(key, label, status, detail):
+        rows.append({"key":key,"label":label,"status":status,"detail":detail})
+    row("signin","Sign-in","pass" if st.get("token") else "fail",
+        "Signed in locally; Fleet access is checked below." if st.get("token") else "Sign in with your work email.")
+    permission = ("System Settings → Privacy & Security → Camera and Microphone. Allow the application used to launch NetBridge."
+                  if IS_MAC else "Settings → Privacy & security → Camera and Microphone. Check access for desktop apps and any organisation restrictions.")
+    for key,label,field in (("video","Camera","camera_name"),("audio","Microphone","mic_name")):
+        names = [d.get("name") for d in devices.get(key,[])]
+        wanted = selection.get(field) or st.get(field)
+        system_mic = key == "audio" and IS_MAC
+        if SESSION.live:
+            row(key,label,"unknown","A session is active; setup does not open or replace its capture devices.")
+        else:
+            found = bool(names) and (system_mic or wanted in names)
+            row(key,label,"pass" if found else "warn",
+                "Selected device is listed. Capture permission and actual delivery are verified when started." if found else
+                "Select an available device. If none appears, check " + permission)
+    bridge_id = selection.get("bridge_id") or st.get("bridge_id")
+    bridges = _fleet_bridges(st) if st.get("token") else []
+    if not isinstance(bridges,list):
+        row("fleet","Fleet connection","unknown","Fleet could not be reached. Check your internet connection and sign-in.")
+    else:
+        bridge=next((b for b in bridges if b.get("id")==bridge_id),None)
+        row("bridge","Selected bridge","pass" if bridge else "fail",
+            "Bridge belongs to your available fleet." if bridge else "Choose a bridge from your organisation.")
+        if bridge:
+            row("availability","Bridge availability","pass" if bridge.get("online") else "unknown",
+                "Fleet has recent telemetry; this does not test the media path." if bridge.get("online") else "Fleet telemetry is stale. Actual mesh reachability is not yet tested.")
+            row("maintenance","Maintenance","warn" if bridge.get("maintenance") else "pass",
+                "Contact your administrator: scheduled maintenance is active." if bridge.get("maintenance") else "No maintenance window reported.")
+            protocol=bridge.get("pin_protocol")
+            if type(protocol) is not int: protocol=None
+            row("compatibility","App / bridge compatibility","pass" if protocol and protocol>=2 else "unknown" if protocol is None else "fail",
+                "Bridge supports this app's PIN protocol." if protocol and protocol>=2 else "This app needs a protocol-2 bridge. Ask the administrator to confirm a compatible release.")
+    row("receiver","Meeting laptop picture","unknown","After starting, ask the room to select NetBridge in its meeting app and confirm the picture. USB status cannot verify the displayed image.")
+    return {"checks":rows,"checked_at":time.time(),"status":"needs_attention" if any(r["status"] in ("warn","fail") for r in rows) else "partially_verified"}
+
+
 # --------------------------------------------------------------------------- server
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer   # noqa: E402
 
@@ -2617,6 +2732,19 @@ class Handler(BaseHTTPRequestHandler):
             MESH.stop()
             return self._send({"ok": True})
 
+        if self.path == "/api/support-report":
+            request = self._body()
+            report = support_report()
+            if not request.get("submit"):
+                return self._send({"report":report,"notice":"Submitting shares these measurements, your account identity and a bridge-health snapshot with your fleet administrator. No recordings or raw logs are uploaded."})
+            st = load_state()
+            if not st.get("token"):
+                return self._send({"_error":"Sign in before submitting a report"},401)
+            result = api("POST",st.get("control_url", "https://fleet.scine.online").rstrip("/")+"/auth/support-reports",token=st["token"],
+                         body={"device_id":request.get("bridge_id") or st.get("bridge_id"),"symptom":request.get("symptom","other"),"report":report})
+            return self._send(result,502 if isinstance(result,dict) and result.get("_error") else 200)
+        if self.path == "/api/preflight":
+            return self._send(setup_check(self._body()))
         if self.path == "/api/remember":
             for k in ("bridge_id", "camera_name", "mic_name"):
                 if b.get(k) is not None:
@@ -2855,7 +2983,7 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
   <span id=livepill></span></span></div>
 
 <div class=card id=signin>
-  <label>Control plane URL</label><input id=curl placeholder="https://fleet.scine.online">
+  <details><summary>Advanced connection settings</summary><label>Fleet address</label><input id=curl value="https://fleet.scine.online" placeholder="https://fleet.scine.online"></details>
   <label>Work email</label><input id=email placeholder="you@company.com">
   <button class=sec onclick=req()>Email me a sign-in code</button>
   <div style=height:11px></div>
@@ -2868,6 +2996,11 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
   <label>Bridge</label><select id=bridge></select>
   <label>Camera</label><select id=cam></select>
   <label>Microphone</label><select id=mic></select>
+  <button class=sec onclick=checkSetup()>Check my setup</button>
+  <div id=setupReport role=status aria-live=polite></div>
+  <details><summary>Get help</summary><p>Share a small status report with your fleet administrator. No recordings or raw logs.</p>
+  <button class=sec onclick=previewSupport()>Preview support report</button><pre id=supportPreview></pre>
+  <button class=sec id=sendSupport hidden onclick=sendSupport()>Send to fleet administrator</button><p id=supportResult role=status></p></details>
   <button id=go onclick=golive()>Go live</button>
   <p class=hint>You enter the bridge PIN every time you go live.</p>
   <div class=msg id=m2></div>
@@ -2889,7 +3022,7 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
   <div class=row><span id=c1>Bridge online</span><span class=lat id=l1></span></div>
   <div class=row><span id=c2>Your video arriving at bridge</span><span class=lat id=l2></span></div>
   <div class=row><span id=c5>Your voice arriving at bridge</span><span class=lat id=l5></span></div>
-  <div class=row><span id=c3>Meeting laptop sees the camera</span><span class=lat id=l3></span></div>
+  <div class=row><span id=c3>USB connection configured</span><span class=lat id=l3></span></div>
   <div class=row><span id=c4>Meeting audio flowing back</span><span class=lat id=l4></span></div>
   <div id=ckfix style="display:none;margin-top:9px;padding:9px 11px;border-radius:8px;
     background:rgba(198,57,44,.09);border:1px solid rgba(198,57,44,.28);
@@ -3044,7 +3177,7 @@ const FIXES={
   online:'Bridge is not answering. Check it has power and its Wi-Fi is up, then try again.',
   video_arriving:'Your camera is not reaching the bridge. Close other apps using the camera (Zoom, Photo Booth), then End session and go live again.',
   voice_arriving:'Your mic is not reaching the bridge. Pick a different microphone above, then End session and go live again.',
-  client_sees_camera:'The meeting laptop cannot see the camera. Re-seat the USB cable at the laptop end, then pick "NetBridge" as the camera in Zoom/Teams.',
+  client_sees_camera:'The bridge has not confirmed a configured USB connection. Re-seat the USB cable at the laptop end, then pick "NetBridge" as the camera in Zoom/Teams.',
   return_audio:'No sound coming back. Play something on the meeting laptop and make sure its output is set to the NetBridge speaker.'};
 // Older bridges judge return audio against a hardcoded ">40000 frames/s", which only 48kHz
 // can ever reach — so a perfectly healthy 32kHz meeting (~34000/s) is reported red while the
@@ -3124,6 +3257,25 @@ async function repairLegs(){
   // from a PIN re-entry mid-session.
   setLive(false);
   await startSession({reconnect:true});
+}
+async function previewSupport(){
+ try{const r=await j('/api/support-report',{method:'POST',body:JSON.stringify({submit:false})});
+ if(r._error)throw Error(r._error);$('supportPreview').textContent=r.notice+'\n'+JSON.stringify(r.report,null,2);$('sendSupport').hidden=false;
+ }catch(e){$('supportResult').textContent=e.message;}
+}
+async function sendSupport(){
+ $('sendSupport').disabled=true;
+ try{const r=await j('/api/support-report',{method:'POST',body:JSON.stringify({submit:true,bridge_id:$('bridge').value})});
+ if(r._error)throw Error(r._error);$('supportResult').textContent='Sent: '+r.reference;
+ }catch(e){$('supportResult').textContent='Could not send. Copy the preview above for support. '+e.message;}
+ finally{$('sendSupport').disabled=false;}
+}
+async function checkSetup(){
+ const out=$('setupReport');out.textContent='Checking setup…';
+ try{const r=await j('/api/preflight',{method:'POST',body:JSON.stringify({bridge_id:$('bridge').value,camera_name:$('cam').value,mic_name:$('mic').value})});
+ if(r._error)throw Error(r._error);out.replaceChildren();
+ for(const c of r.checks){const p=document.createElement('p');p.textContent=c.label+' — '+c.status+': '+c.detail;out.append(p);}}
+ catch(e){out.textContent='Setup could not be checked: '+e.message;}
 }
 function checksUnavailable(message){
   greenSince=null;

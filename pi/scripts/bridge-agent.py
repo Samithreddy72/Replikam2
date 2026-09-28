@@ -46,6 +46,7 @@ DETACHED = {"deploy-script": 900, "revert-script": 600, "unquarantine": 600, "up
 # Map control-plane command types -> argv for the existing bridge CLI. Anything not
 # in this table is refused, so the control plane can never run arbitrary commands.
 ALLOWED = {
+    "free-space": lambda a: ["journalctl", "--vacuum-size=64M"],
     "restart":     lambda a: ["bridge", "restart"],
     "reset-clock": lambda a: ["bridge", "reset-clock"],
     "profile":     lambda a: ["bridge", "profile", _enum(a.get("mode"), ("lan", "wan"))],
@@ -361,7 +362,18 @@ def enroll(base, conf, tel, force=False):
     boot = conf.get("BOOTSTRAP_TOKEN")
     if not boot:
         raise SystemExit("not enrolled and no BOOTSTRAP_TOKEN in %s" % CONF)
+    recovery = None
+    recovery_file = "/data/netbridge-recovery.token"
+    try:
+        import stat
+        info = os.lstat(recovery_file)
+        if stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_mode & 0o077 == 0:
+            with open(recovery_file) as fh: recovery = fh.read(257).strip()
+            if len(recovery)>256: recovery=None
+    except OSError:
+        pass
     resp = http("POST", base + "/v1/enroll", body={
+        "recovery_token": recovery,
         "bootstrap_token": boot,
         "device_id": tel["device_id"],
         "pairing_code": tel["pairing_code"],
@@ -374,6 +386,9 @@ def enroll(base, conf, tel, force=False):
     with open(TOKEN_FILE, "w") as f:
         f.write(token)
     os.chmod(TOKEN_FILE, 0o600)
+    if recovery:
+        try: os.unlink(recovery_file)
+        except OSError: pass
     return token
 
 
@@ -412,6 +427,23 @@ def run_command(cmd):
         argv = builder(args)
     except ValueError as e:
         return cid, "rejected", str(e)
+    # Check again on the device: a laptop may have connected after the fleet heartbeat.
+    disruptive = {"reboot", "restart", "start", "stop", "profile", "reset-clock",
+                  "golden-restore", "jitter-fix", "jitter-reset", "update",
+                  "deploy-script", "revert-script", "unquarantine"}
+    if ctype in disruptive and not (cmd.get("safety") or {}).get("force_live"):
+        try:
+            current = telemetry()
+            streams = current.get("streams") or {}
+            pin = current.get("pin") or {}
+            busy = ("udc" not in current or "streams" not in current
+                    or current.get("udc") in ("configured", "suspended")
+                    or streams.get("video") or streams.get("voice")
+                    or (pin.get("session") or {}).get("active"))
+            if busy:
+                return cid, "rejected", "Meeting guard: device is busy or its status is unknown; schedule again when idle."
+        except Exception:
+            return cid, "rejected", "Meeting guard: could not verify local state; no action executed."
     # A command with a secret on stdin always runs inline: the background runner has no stdin.
     if ctype in DETACHED and ctype not in STDIN and _cid_ok(cid) and os.path.exists(SYSTEMD_RUN) \
             and os.path.exists(CMD_RUN):

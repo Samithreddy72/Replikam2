@@ -27,6 +27,8 @@ test('desktop UI unlocks before streaming, handles mute, and ends session',async
    if(cmd!=='engine_request')return 1;
    w.calls.push({path:args.path,body:args.body});
    switch(args.path){
+    case '/api/preflight':return {checks:[{label:'Camera',status:'pass',detail:'Listed, capture not yet tested.'},{label:'Receiver',status:'unknown',detail:'Displayed picture not verified.'}]};
+    case '/api/support-report':return args.body.submit?{reference:'NB-SUPPORT-42'}:{report:{live:state.live,app_version:'test'},notice:'No recordings or raw logs are uploaded.'};
     case '/api/state':return {...state};
     case '/api/bridges':return [{id:'room',name:'Test room',online:true,tailscale_ip:'100.1.2.3'}];
     case '/api/devices':return {video:[{name:'Test camera',index:'0'}],audio:[{name:'Test mic',index:'0'}]};
@@ -45,6 +47,14 @@ test('desktop UI unlocks before streaming, handles mute, and ends session',async
  await page.getByRole('button',{name:'Go live',exact:true}).click();
  await expect(page.getByText('Wrong PIN',{exact:true})).toBeVisible();
  expect(await page.evaluate(()=>(window as any).calls.some((c:any)=>c.path==='/api/golive'))).toBeFalsy();
+ await page.getByRole('button',{name:'Check my setup',exact:true}).click();
+ await expect(page.getByText('Displayed picture not verified.',{exact:false})).toBeVisible();
+ await page.getByRole('button',{name:'Close setup results'}).click();
+ await page.getByRole('button',{name:'Get help',exact:true}).click();
+ await expect(page.getByRole('heading',{name:'Send a report to your fleet administrator'})).toBeVisible();
+ expect(await page.evaluate(()=>(window as any).calls.some((c:any)=>c.path==='/api/support-report'&&c.body.submit))).toBeFalsy();
+ await page.getByRole('button',{name:'Send report',exact:true}).click();
+ await expect(page.getByText('Sent: NB-SUPPORT-42',{exact:true})).toBeVisible();
  await page.getByPlaceholder('Enter your bridge PIN').fill('123456');
  await page.getByRole('button',{name:'Go live',exact:true}).click();
  await expect(page.getByRole('button',{name:'End session',exact:true})).toBeEnabled();
