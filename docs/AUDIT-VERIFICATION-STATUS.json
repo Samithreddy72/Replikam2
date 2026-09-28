@@ -1,0 +1,843 @@
+{
+  "as_of": "2026-09-29",
+  "scope": "High/medium historical findings after reviewer severity/refutation. Conservative ledger; local implementation does not imply deployment or hardware verification.",
+  "findings": [
+    {
+      "id": "B6",
+      "severity": "medium",
+      "title": "No request-body limit: anyone can crash the 1 GB fleet host with one large POST, because the whole body is read before login is checked",
+      "file": "control-plane/deploy/aws/Caddyfile",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B8",
+      "severity": "medium",
+      "title": "Nothing limits disk use on the 40 GB fleet disk (deploy DB copies, OTA images, container logs); a full disk breaks the fleet and blocks deploys",
+      "file": "control-plane/deploy/aws/deploy.sh",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B20",
+      "severity": "medium",
+      "title": "The drift check says IN SYNC when production runs a commit the local branch does not contain",
+      "file": "tools/control-plane-drift-check.sh",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B24",
+      "severity": "high",
+      "title": "Room (return) audio is never gated by the PIN session: it keeps going to the last presenter after an admin lock, an idle relock, being superseded, Stop, and even after a reboot",
+      "file": "pi/scripts/bridge-pin",
+      "status": "owner-deferred",
+      "evidence": "",
+      "note": "Historical owner decision leaves room audio/PIN relationship unchanged."
+    },
+    {
+      "id": "B26",
+      "severity": "medium",
+      "title": "bridge-web has no connection timeout or thread cap: any device on the venue LAN can pin unlimited handler threads and block go-live",
+      "file": "pi/scripts/bridge-web.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B37",
+      "severity": "medium",
+      "title": "'Diagnose it for me' almost never shows its findings: the bridge cuts command output to 2000 bytes, and the panel parses the cut JSON",
+      "file": "control-plane/panel-dist/index.html",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-agent-result-json.py",
+      "note": "Complete bounded diagnosis JSON; over-limit report fails explicitly."
+    },
+    {
+      "id": "B42",
+      "severity": "medium",
+      "title": "'Choppy for them \u2192 deepen the bridge buffer' (profile:wan) changes nothing on any bridge; it only restarts media",
+      "file": "control-plane/panel-dist/index.html",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B47",
+      "severity": "medium",
+      "title": "After claiming from the drawer, the Actions tab still says 'Only reads work until this bridge is claimed'",
+      "file": "control-plane/panel-dist/index.html",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B60",
+      "severity": "high",
+      "title": "Flashed images give user 'pi' the shell /usr/sbin/nologin, so the owner SSH login that 2.2 adds can never open a shell",
+      "file": "factory/ci-build-image.sh",
+      "status": "implemented; physical acceptance pending",
+      "evidence": "tests/test-image-preflight.py",
+      "note": "Login shell/password-lock checks; actual new image boot remains required."
+    },
+    {
+      "id": "B61",
+      "severity": "high",
+      "title": "GStreamer's plugin cache can never be saved on the read-only root, so every pipeline start rescans all 268 plugins, including the return-audio restart at go-live",
+      "file": "factory/ci-build-image.sh",
+      "status": "implemented; Pi measurement pending",
+      "evidence": "pi/systemd",
+      "note": "Writable registry cache; no measured Pi startup improvement yet."
+    },
+    {
+      "id": "B62",
+      "severity": "medium",
+      "title": "The CI preflight gate can never fail the build: its exit code is ignored, and its read-only-write check crashes on an unset $ROOT and reports a pass",
+      "file": "factory/ci-build-image.sh",
+      "status": "implemented; image build pending",
+      "evidence": "tests/test-image-preflight.py",
+      "note": "Preflight failure propagation and unset variable corrected."
+    },
+    {
+      "id": "B64",
+      "severity": "medium",
+      "title": "The OTA signing key and fleet bootstrap token are repo-wide secrets with no protected environment: any branch's workflow can read them, and a dispatch from any branch can publish a signed release as Latest",
+      "file": ".github/workflows/build-image.yml",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B65",
+      "severity": "medium",
+      "title": "stage-image.sh cannot find any 2.1 or 2.2 release, and its signature check uses the public key downloaded from the same release (known item h, confirmed)",
+      "file": "tools/stage-image.sh",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-stage-image-trust.py",
+      "note": "Pinned local key and release identity validation."
+    },
+    {
+      "id": "B66",
+      "severity": "medium",
+      "title": "machine-id is 'uninitialized' on a read-only root, so every boot gets a new random ID and the persistent journal is unreadable across reboots",
+      "file": "factory/ci-build-image.sh",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B69",
+      "severity": "medium",
+      "title": "Actions pinned by mutable tags, an unverified moving base image, and a write-scoped token visible to the third-party build step",
+      "file": ".github/workflows/build-image.yml",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B79",
+      "severity": "high",
+      "title": "Revert and quarantine silently fail for long-running bash services: umount of a busy bind returns EBUSY, the error is swallowed, and the restart runs the override again",
+      "file": "pi/scripts/bridge-overrides.sh",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-signed-updates.sh",
+      "note": "Failed detach cannot claim rollback; busy mounts handled through policy."
+    },
+    {
+      "id": "B80",
+      "severity": "high",
+      "title": "OTA cannot mount the standby slot on the read-only root: /mnt/ota-standby is never created and mkdir fails, after the slot has already been wiped",
+      "file": "pi/scripts/bridge-update.sh",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-os-update.sh",
+      "note": "Writable /run mountpoint and failure before formatting."
+    },
+    {
+      "id": "B84",
+      "severity": "medium",
+      "title": "Lifeline guard reverts PROVEN lifeline and agent overrides after any 15-minute stretch without the fleet (it never checks whether the fleet was heard from after install)",
+      "file": "pi/scripts/bridge-overrides.sh",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B85",
+      "severity": "medium",
+      "title": "Lifeline guard never fires after a reboot without internet: wall-clock arithmetic on a Pi with no RTC and a clock that cannot be saved",
+      "file": "pi/scripts/bridge-overrides.sh",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B86",
+      "severity": "medium",
+      "title": "(e) CONFIRMED: override signatures cover the bytes only, not the name or version, so any previously signed file can be installed under another name or replayed",
+      "file": "pi/scripts/bridge-deploy-script.sh",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B87",
+      "severity": "medium",
+      "title": "Revoking an owner SSH key through the signed override does not last: revert-script, revert-all, safe mode, or replaying the older signed file all restore it",
+      "file": "pi/configs/updatable.conf",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B88",
+      "severity": "medium",
+      "title": "No anti-rollback for whole-OS updates: any validly signed older image, or a manifest for a different product, is accepted",
+      "file": "pi/scripts/bridge-update.sh",
+      "status": "partially addressed",
+      "evidence": "tests/test-os-update.sh",
+      "note": "Wrong-product manifests refused; general anti-rollback policy still open."
+    },
+    {
+      "id": "B89",
+      "severity": "medium",
+      "title": "`--unquarantine` (and the alert's 'Put the parked update back' button) restores EVERY parked version in lexicographic order, so an older, known-bad version can end up installed",
+      "file": "pi/scripts/bridge-deploy-script.sh",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-signed-updates.sh",
+      "note": "Newest parked version; cannot overwrite a newer installed override."
+    },
+    {
+      "id": "B90",
+      "severity": "medium",
+      "title": "`revert-all` deletes the pending restarts that its own reverts just queued, so services keep running override code while status reports 'built-in'",
+      "file": "pi/scripts/bridge-overrides.sh",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B91",
+      "severity": "medium",
+      "title": "Loader crash-loop trip counts deliberate restarts, so a healthy media override is quarantined after 3 ordinary restarts in 2 minutes",
+      "file": "pi/scripts/bridge-run.sh",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B93",
+      "severity": "medium",
+      "title": "A trial boot that fails before multi-user.target never rolls back (kernel panic without panic=, or emergency mode, which keeps petting the watchdog)",
+      "file": "pi/systemd/bridge-ab-healthcheck.service",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B102",
+      "severity": "high",
+      "title": "A cross-site GET /api/checks tears down the live mesh helper (the CSRF guard only covers POST)",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B106",
+      "severity": "medium",
+      "title": "Signing out during a live session leaves the camera and microphone captured, and the page no longer shows a way to stop them",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B108",
+      "severity": "medium",
+      "title": "The signed update manifest is not bound to a platform or a minimum version: any signed build can be served cross-platform or as a downgrade, and a failed swap is never rolled back",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "partially addressed",
+      "evidence": "tests/test-app-update-auth.py",
+      "note": "Platform/protocol/helper binding implemented; complete downgrade policy remains open."
+    },
+    {
+      "id": "B110",
+      "severity": "medium",
+      "title": "After a transport error the app resends the PIN up to three times, so one wrong PIN can lock the bridge for an hour",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B111",
+      "severity": "medium",
+      "title": "The mesh helper's loopback control proxy (127.0.0.1:18080) lets any web page burn PIN tries under the presenter's mesh identity",
+      "file": "app/netbridge-source/mesh/main.go",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B112",
+      "severity": "medium",
+      "title": "No Host-header check: a DNS-rebinding page can read the app's GET endpoints, including recorded meeting audio",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B113",
+      "severity": "medium",
+      "title": "A page reloaded or reopened during a live session polls with whatever the Bridge dropdown shows, which can switch the live helper to another bridge",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B114",
+      "severity": "medium",
+      "title": "On macOS the start-up orphan sweep misses the GStreamer voice leg, so after a crash the mic stays captured and the next go-live sends a second voice stream",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B115",
+      "severity": "medium",
+      "title": "A dead or absent local return player makes the page tear down and rebuild the whole session, then show a false 'This app stopped sending' message",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B116",
+      "severity": "medium",
+      "title": "The bundled ffmpeg (camera/mic capture on every presenter machine) is downloaded unpinned and without a checksum",
+      "file": "app/netbridge-source/build.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B142",
+      "severity": "high",
+      "title": "nb's confirmation prompt promises that changes wait until the bridge is idle or the laptop is unplugged. Only deploy does that; reboot and restart act at once.",
+      "file": "tools/nb",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B143",
+      "severity": "medium",
+      "title": "run-tests.sh reports a green suite when a file exits non-zero, or when a file prints SKIPPED anywhere in its output",
+      "file": "tools/run-tests.sh",
+      "status": "implemented; required CI",
+      "evidence": "tests/test-suite-verdict.py",
+      "note": "Nonzero process exit cannot be hidden by a success summary."
+    },
+    {
+      "id": "B144",
+      "severity": "medium",
+      "title": "run-tests.sh drops skipped tests from its report, so the recommended --python run silently skips the GStreamer and presenter-voice pipeline checks",
+      "file": "tools/run-tests.sh",
+      "status": "implemented; required CI",
+      "evidence": "tools/run-tests.sh",
+      "note": "Skips block their required platform job."
+    },
+    {
+      "id": "B145",
+      "severity": "medium",
+      "title": "Known-red file (f) #1: test-app-diagnosis.py fails on a correct _quit() because it takes the first .terminate() in the function, which belongs to an unrelated branch",
+      "file": "tests/test-app-diagnosis.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B146",
+      "severity": "medium",
+      "title": "Known-red file (f) #2: test-fleet-drift.py's comment-false-positive check depends on git history, and newer security commits broke it",
+      "file": "tests/test-fleet-drift.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B147",
+      "severity": "medium",
+      "title": "Known-red file (f) #3: test-usb-audio-analysis.py imports numpy at the top of the file and crashes when numpy is missing instead of reporting a skip",
+      "file": "tests/test-usb-audio-analysis.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B160",
+      "severity": "medium",
+      "title": "CI never runs the 1000-test suite, the image build does not depend on it, and the suite only works on macOS (BSD `stat -f`)",
+      "file": ".github/workflows/test-pin-gate.yml",
+      "status": "implemented; CI running",
+      "evidence": ".github/workflows/tests.yml",
+      "note": "Common, Linux media and Mac video are required jobs."
+    },
+    {
+      "id": "B161",
+      "severity": "medium",
+      "title": "nb deploy signs and uploads a file before asking for confirmation, and a bare name becomes a path whenever a file of that name exists in the current directory",
+      "file": "tools/nb",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B162",
+      "severity": "medium",
+      "title": "nb list and nb show crash with a traceback for the whole fleet when one bridge sends malformed telemetry",
+      "file": "tools/nb",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-nb-admin-safety.py",
+      "note": "Malformed nested telemetry cannot crash list/show."
+    },
+    {
+      "id": "B168",
+      "severity": "high",
+      "title": "A parked (quarantined) copy is never cleared when a fixed version is deployed: permanent false alert, and its one-click fix reinstalls the crashing version over the good one",
+      "file": "pi/scripts/bridge-deploy-script.sh",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-signed-updates.sh",
+      "note": "New deployment archives stale quarantines."
+    },
+    {
+      "id": "B170",
+      "severity": "medium",
+      "title": "The post-deploy health check passes for a crash-looping service (only 'is-failed' is checked)",
+      "file": "pi/scripts/bridge-deploy-script.sh",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B171",
+      "severity": "medium",
+      "title": "Camera 'laptop attached' guard treats only udc=configured as attached; a sleeping but plugged-in laptop (suspended) lets a pending camera update restart bridge-uvcd",
+      "file": "pi/scripts/bridge-overrides.sh",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-signed-updates.sh; tests/test-os-update.sh",
+      "note": "Suspended USB hosts remain attached for update/restart guards."
+    },
+    {
+      "id": "B181",
+      "severity": "high",
+      "title": "Fleet-wide bootstrap token lets anyone take over an enrolled bridge: steal its pending PIN and mint a tag:bridge mesh key",
+      "file": "control-plane/backend/app/main.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B185",
+      "severity": "medium",
+      "title": "After claiming in the drawer, the 'No PIN set' alert loses its 'Set a PIN\u2026' button until the page is reloaded",
+      "file": "control-plane/panel-dist/index.html",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B194",
+      "severity": "medium",
+      "title": "A presenter kicked off by someone else's PIN (superseded) is never told; the app shows wrong camera advice, then all green",
+      "file": "pi/scripts/bridge-web.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B195",
+      "severity": "high",
+      "title": "A mesh helper rebuilt mid-session gets a new address but is never rebound, so the gate drops the presenter's video and voice until the 10-minute idle relock",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B197",
+      "severity": "high",
+      "title": "After a bridge reboot and PIN re-entry, the page tears the session down and rebuilds it again (second outage and an extra go-live on a just-rebooted bridge)",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-app-pin-flow.py",
+      "note": "Remember bridge uptime through PIN recovery."
+    },
+    {
+      "id": "B199",
+      "severity": "medium",
+      "title": "A lockout hit while re-entering the PIN mid-session puts the presenter in a loop: the PIN dialog reopens every 4 s and hides the lockout message",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B202",
+      "severity": "medium",
+      "title": "The 'ask the device' probe for bridges the fleet marks offline sends the device ID as a hostname, so stale-heartbeat bridges always show '(offline)'",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B203",
+      "severity": "medium",
+      "title": "The image-2.1 refusal sends presenters to an 'Older versions folder' that does not ship, and auto-update can move 1.4.3 installs onto 1.5.x before bridges are reflashed",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B205",
+      "severity": "medium",
+      "title": "Sign-in errors are wrong or raw: an expired code shows 'invalid or already-used invite', network failures show '<urlopen error \u2026>'",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B206",
+      "severity": "medium",
+      "title": "At go-live a revoked sign-in or an unreachable fleet is reported as 'the control plane would not issue a mesh key for this bridge'",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B207",
+      "severity": "medium",
+      "title": "A second presenter is not warned that someone is live before their PIN silently ends that session",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B216",
+      "severity": "high",
+      "title": "When the bridge stops answering mid-meeting, the page keeps its last green rows and 'Ready to present'; mesh-helper death is never shown",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B217",
+      "severity": "high",
+      "title": "Sign-in fails with no message for a URL without https:// and for invite codes on a fresh install; a mistyped URL says 'code on its way'",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B222",
+      "severity": "medium",
+      "title": "The go-live status line (including 'NO ROOM AUDIO') is overwritten within 4 s by 'direct mesh path \u00b7 <public IP:port>'",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B237",
+      "severity": "medium",
+      "title": "Rollout can never finish: a bridge that was offline during its wave is never dispatched once it returns; the panel hides 'Catch up' exactly when it would help",
+      "file": "control-plane/panel-dist/index.html",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B242",
+      "severity": "medium",
+      "title": "A fresh diagnostics bundle does not appear after 'SUCCEEDED': the agent reports the result before uploading, and the panel reloads the list only once",
+      "file": "control-plane/panel-dist/index.html",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B251",
+      "severity": "medium",
+      "title": "The sign-in email link uses up a presenter's one-time code in the admin panel",
+      "file": "control-plane/backend/app/main.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B253",
+      "severity": "medium",
+      "title": "The presenter app shows 'Ready to present' in the red error box",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B256",
+      "severity": "medium",
+      "title": "The fleet table overflows at common laptop widths and one long name clips 'Last seen'",
+      "file": "control-plane/panel-dist/index.html",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B257",
+      "severity": "medium",
+      "title": "The golden-save dialog's 'Cancel' button saves a baseline",
+      "file": "control-plane/panel-dist/index.html",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B258",
+      "severity": "medium",
+      "title": "Raw command ids appear in confirm buttons, toasts, History and diagnosis buttons",
+      "file": "control-plane/panel-dist/index.html",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B259",
+      "severity": "medium",
+      "title": "2.1 bridges: contradictory PIN status, 'all quiet', and 'Update the bridge' advice that has no remote path",
+      "file": "control-plane/panel-dist/index.html",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B260",
+      "severity": "medium",
+      "title": "An offline bridge shows stale health as current, and uptime reports a 'clean streak' during the outage",
+      "file": "control-plane/panel-dist/index.html",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B261",
+      "severity": "medium",
+      "title": "Alert emails and webhooks use raw kind ids and no fleet number, and the test alert arrives as CRITICAL 'offline'",
+      "file": "control-plane/backend/app/notifier.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B268",
+      "severity": "medium",
+      "title": "Presenter app: the audio diagnostics panel (raw JSON, big red 'Restart return audio' button) shows for every presenter, even on the sign-in screen",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B277",
+      "severity": "high",
+      "title": "After a swap, os.execv hands the new binary the old onefile environment, so it runs on the old build's unpacked runtime",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "implemented; native acceptance pending",
+      "evidence": "tests/test-app-update-auth.py",
+      "note": "Clean PyInstaller environment for replacement executable."
+    },
+    {
+      "id": "B278",
+      "severity": "high",
+      "title": "No rollback: a failed exec leaves the broken build installed, and a failed second rename leaves no executable at all",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "partially addressed",
+      "evidence": "tests/test-app-update-auth.py",
+      "note": "Rename/exec failure restores original; crash after successful launch not rolled back automatically."
+    },
+    {
+      "id": "B279",
+      "severity": "high",
+      "title": "Windows presenters never receive updates: signature check needs an openssl CLI that Windows does not have",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "implemented; Windows acceptance pending",
+      "evidence": "tests/test-app-update-auth.py",
+      "note": "Bundled cryptography verifier; native Windows update still needs execution."
+    },
+    {
+      "id": "B280",
+      "severity": "high",
+      "title": "Updating the app binary never updates the sidecar mesh helper; a pre-1.4.1 helper cannot start under a 1.4.1+ app",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "mitigated; complete installer required",
+      "evidence": "tests/test-app-update-auth.py",
+      "note": "Reject incompatible helper; binary-only OTA does not upgrade helper."
+    },
+    {
+      "id": "B281",
+      "severity": "medium",
+      "title": "Renamed copies (Older versions/NetBridgeSource.v1.4.3, release-named files, Finder duplicates) re-update forever",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B285",
+      "severity": "medium",
+      "title": "In a .app, the swap installs the bare onefile and leaves the bundle with an invalid signature and a changed code identity",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "mitigated; whole-bundle updater pending",
+      "evidence": "tests/test-app-update-auth.py",
+      "note": "Binary swap disabled inside .app bundles to preserve signature identity."
+    },
+    {
+      "id": "B306",
+      "severity": "medium",
+      "title": "A fleet number that doesn't exist silently matches a device-id suffix or a name prefix, so the command runs on the wrong bridge",
+      "file": "tools/nb",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-nb-admin-safety.py",
+      "note": "Missing fleet numbers cannot fall back to another bridge; duplicate names rejected."
+    },
+    {
+      "id": "B308",
+      "severity": "medium",
+      "title": "nb deploy/revert 'all' runs one bridge at a time and waits 1000 s on each offline bridge; commands queued for an offline bridge never expire",
+      "file": "tools/nb",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B309",
+      "severity": "medium",
+      "title": "nb list/show present an offline bridge's last-known PIN session and streams as current",
+      "file": "tools/nb",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-nb-admin-safety.py",
+      "note": "Offline inventory hides current stream claims; detail labels retained evidence historical."
+    },
+    {
+      "id": "B310",
+      "severity": "medium",
+      "title": "UPTIME column drops weeks: a bridge up 17 days shows as 3 days",
+      "file": "tools/nb",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-nb-admin-safety.py",
+      "note": "Weeks are included in displayed uptime."
+    },
+    {
+      "id": "B311",
+      "severity": "medium",
+      "title": "nb pin on a 2.1 bridge warns that the PIN will be written to the bridge log only after the PIN is already queued",
+      "file": "tools/nb",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-nb-admin-safety.py",
+      "note": "Legacy/unverified PIN logging warning appears before confirmation and POST."
+    },
+    {
+      "id": "B313",
+      "severity": "medium",
+      "title": "A dropped connection or read timeout crashes nb with a traceback, even mid-way through a 30-minute wait",
+      "file": "tools/nb",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-nb-admin-safety.py",
+      "note": "Transport failures, including unreadable HTTP error details, fail without blind write retries."
+    },
+    {
+      "id": "B329",
+      "severity": "high",
+      "title": "Go-live reports success and starts media when set-peer never reached the bridge (gate not rebound)",
+      "file": "app/netbridge-source/source_app.py",
+      "status": "implemented; targeted tests",
+      "evidence": "tests/test-app-pin-flow.py",
+      "note": "Positive peer confirmation required before media start/resume."
+    },
+    {
+      "id": "B330",
+      "severity": "high",
+      "title": "wifi-guardian counts any logged-in tailscaled as 'online', so its Wi-Fi recovery never runs on claimed bridges",
+      "file": "pi/scripts/wifi-guardian.sh",
+      "status": "excluded from current implementation",
+      "evidence": "",
+      "note": "User excluded Wi-Fi changes; do not silently close this finding."
+    },
+    {
+      "id": "B331",
+      "severity": "medium",
+      "title": "wifi-guardian restarts NetworkManager and reboots the Pi while the Wi-Fi setup portal is serving",
+      "file": "pi/scripts/wifi-guardian.sh",
+      "status": "excluded from current implementation",
+      "evidence": "",
+      "note": "User excluded Wi-Fi changes; do not silently close this finding."
+    },
+    {
+      "id": "B333",
+      "severity": "medium",
+      "title": "A slow /v1/provision crashes the agent tick (TimeoutError not caught), skipping the command pull",
+      "file": "pi/scripts/bridge-agent.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B334",
+      "severity": "medium",
+      "title": "A claimed bridge with no mesh address shows 'active - ready for a presenter' with no alert",
+      "file": "control-plane/backend/app/main.py",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B336",
+      "severity": "medium",
+      "title": "Panel's 'Re-issue mesh key' sits under 'cannot hear the ROOM - Silent' and says 'nothing is restarted', but re-keying re-logs-in tailscaled",
+      "file": "control-plane/panel-dist/index.html",
+      "status": "open; reconcile current code and prior tests",
+      "evidence": "",
+      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+    },
+    {
+      "id": "B337",
+      "severity": "medium",
+      "title": "Picking a Wi-Fi that associates but has no internet strands the bridge; the setup AP never comes back",
+      "file": "pi/scripts/bridge-wifi-portal.sh",
+      "status": "excluded from current implementation",
+      "evidence": "",
+      "note": "User excluded Wi-Fi changes; do not silently close this finding."
+    },
+    {
+      "id": "B338",
+      "severity": "medium",
+      "title": "Following the deploy README gives a fleet where nobody can go live: env.example has no Tailscale settings, and the source-tag default disagrees with the ACL",
+      "file": "control-plane/deploy/aws/docker-compose.yml",
+      "status": "documentation corrected; deployment acceptance pending",
+      "evidence": "control-plane/deploy/aws/env.example",
+      "note": "Mesh settings explicit; exact existing tag policy must be configured and tested."
+    }
+  ]
+}

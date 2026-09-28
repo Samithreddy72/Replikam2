@@ -87,7 +87,10 @@ def api(method, path, body=None, timeout=30, soft=()):
             ctype = r.headers.get("Content-Type", "")
             return json.loads(data) if "json" in ctype else data
     except urllib.error.HTTPError as e:
-        detail = e.read().decode(errors="replace")[:400]
+        try:
+            detail = e.read().decode(errors="replace")[:400]
+        except (OSError, http.client.HTTPException):
+            die("Fleet refused the request (HTTP %s); error details could not be read." % e.code)
         if e.code in soft:
             try:
                 raise Refused(e.code, json.loads(detail))
@@ -145,10 +148,28 @@ def label(d):
     return "%s%s (%s)" % ((d["label"] + " ") if d.get("label") else "", d.get("name") or "unnamed", d["id"][-8:])
 
 
+def snapshot(d):
+    """Telemetry is untrusted: one malformed bridge must not hide the fleet."""
+    raw = d.get("latest")
+    result = dict(raw) if isinstance(raw,dict) else {}
+    for key in ("streams","power","overrides","ota","pin","usb","mesh_path","clock"):
+        value = result.get(key)
+        result[key] = dict(value) if isinstance(value,dict) else {}
+    for key, child in (("pin","session"),("power","rate")):
+        value = result[key].get(child)
+        result[key][child] = dict(value) if isinstance(value,dict) else {}
+    for key in ("pending","active","superseded"):
+        value = result["overrides"].get(key)
+        result["overrides"][key] = [v for v in value if isinstance(v,str)] if isinstance(value,list) else []
+    value = result.get("quarantined")
+    result["quarantined"] = [v for v in value if isinstance(v,str)] if isinstance(value,list) else []
+    return result
+
+
 def live(d):
-    s = ((d.get("latest") or {}).get("streams") or {})
-    return bool(s.get("video")), bool((d.get("latest") or {}).get("udc") == "configured" or
-                                      "enumerated" in str(((d.get("latest") or {}).get("usb") or {}).get("detail", "")))
+    if d.get("online") is not True: return None, None
+    data = snapshot(d)
+    return data["streams"].get("video") is True, data.get("udc") in ("configured","suspended")
 
 
 def confirm(what, targets):
@@ -157,6 +178,8 @@ def confirm(what, targets):
     names = ", ".join(label(d) for d in targets)
     for d in targets:
         vid, attached = live(d)
+        if vid is None:
+            print("  %s has no current online status; meeting safety is unknown." % label(d))
         if vid:
             print("  ⚠ %s is LIVE (presenter video flowing) — media changes will wait until it is idle." % label(d))
         if attached:
@@ -230,9 +253,9 @@ def cmd_list(_):
     devs = sorted(devices(), key=lambda d: (d.get("number") is None, d.get("number") or 0, d.get("name") or ""))
     print("%-7s %-16s %-9s %-7s %-15s %-9s %-11s %-8s %-6s %s" % ("NO.", "BRIDGE", "STATE", "PIN", "OS", "UPTIME", "V/VOICE/RET", "POWER", "TEMP", "UPDATES"))
     for d in devs:
-        l = d.get("latest") or {}
-        s = l.get("streams") or {}
-        streams = "/".join("✔" if s.get(k) else "·" for k in ("video", "voice", "return"))
+        l = snapshot(d) if d.get("online") is True else snapshot({})
+        s = l["streams"]
+        streams = "/".join("✔" if s.get(k) is True else "·" if s.get(k) is False else "?" for k in ("video", "voice", "return"))
         pw = ((l.get("power") or {}).get("rate") or {}).get("pct")
         ov = l.get("overrides") or {}
         upd = []
@@ -259,13 +282,17 @@ def cmd_list(_):
 def cmd_show(a):
     d = pick(a[0])[0]
     d = api("GET", "/admin/devices/%s" % d["id"])
-    l = d.get("latest") or {}
-    p = l.get("power") or {}
+    l = snapshot(d)
+    p = l["power"]
     print("%s — %s, OS %s, last seen %s" % (label(d), (d.get("state") or ("online" if d.get("online") else "offline")).upper(),
                                               d.get("version"), d.get("last_seen")))
-    pn = l.get("pin") or {}
-    ses = pn.get("session") or {}
-    print("  PIN %s%s | session %s | laptop %s" % (pin_word(l), " (required on every go-live)" if pn.get("protocol", 0) >= 2 else " (old gate: not enforced)",
+    if d.get("online") is not True:
+        print("  Last reported status below; current PIN session, streams and health are UNKNOWN while offline.")
+    pn = l["pin"]
+    ses = pn["session"]
+    protocol = pn.get("protocol")
+    protocol = protocol if isinstance(protocol,int) else 0
+    print("  PIN %s%s | session %s | laptop %s" % (pin_word(l), " (required on every go-live)" if protocol >= 2 else " (old gate: not enforced)",
                                                 ("presenter %s, %s s" % (ses.get("peer"), ses.get("age_s"))) if ses.get("active") else "none",
                                                 {True: "connected", False: "not connected"}.get(d.get("laptop"), "?")))
     print("  uptime %s | temp %s | tailnet %s | mesh %s" % (l.get("uptime"), l.get("temp"), d.get("tailscale_ip") or l.get("tailscale_ip"),
@@ -620,6 +647,9 @@ def cmd_pin(a):
         if not re.fullmatch(r"\d{4,8}", a[1]):
             die("the PIN is 4-8 digits")
         body["pin"] = a[1]
+    protocol = snapshot(d)["pin"].get("protocol", d.get("pin_protocol"))
+    if not isinstance(protocol,int) or protocol < 2:
+        print("  This bridge has an older or unverified PIN gate. Older 2.1 software may write the PIN to its device log. Update and verify the bridge before using a sensitive PIN.")
     confirm("Set a new go-live PIN (on 2.2+ this also ends a session that is live now)", [d])
     r = api("POST", "/admin/devices/%s/pin" % d["id"], body)
     print("  PIN for %s:  %s   ← shown once; the fleet keeps no copy. Hand it to your presenter yourself." % (label(d), r.get("pin")))
