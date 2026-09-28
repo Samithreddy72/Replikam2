@@ -106,6 +106,11 @@ class Settings:
     telemetry_retention_days = _env_int("TELEMETRY_RETENTION_DAYS", 7)
     audit_retention_days = _env_int("AUDIT_RETENTION_DAYS", 365)
     command_retention_days = _env_int("COMMAND_RETENTION_DAYS", 30)
+    # Resolved alert episodes (retention.py): a bridge that flaps opens hundreds a week. The
+    # alert history and a bridge's "last alerted" reach back this far. Never below 7 days: the
+    # Alerts page counts episodes over the last 24 h and 7 days, and an episode opened inside
+    # that window was also resolved inside it, so no count can lose a row (2026-09-28).
+    alert_retention_days = max(7, _env_int("ALERT_RETENTION_DAYS", 90))
 
     # Telemetry rollup (rollup.py, walkthrough "rolled up after 48h"). Raw ticks
     # older than this collapse to one row per (device, hour); the hourly rollups

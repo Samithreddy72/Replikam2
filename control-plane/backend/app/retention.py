@@ -8,15 +8,18 @@ long-offline bridge were never collected at all. And it only ever touched
 telemetry — audit_log and commands grew without any bound.
 
 This runs on a timer instead of on the write path, so retention no longer
-depends on traffic, and every growing table is covered.
+depends on traffic, and every growing table is covered. (Until 2026-09-28 that
+last claim was not true: expired, cancelled and succeeded commands, resolved
+alert episodes and the sign-in sessions of deleted users were never collected.)
 """
 import datetime as dt
 import logging
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from .config import settings
-from .models import Telemetry, TelemetryRollup, AuditLog, Command, utcnow
+from .models import (Telemetry, TelemetryRollup, AuditLog, Command, AlertEvent, RolloutTarget,
+                     User, Session as UserSession, COMMAND_TERMINAL_STATES, utcnow)
 from . import rollup as _rollup
 
 log = logging.getLogger("retention")
@@ -65,10 +68,40 @@ def sweep(db) -> dict:
     # dead/decommissioned device and would otherwise accumulate forever. 'pending'
     # (never delivered) is still kept at any age so a briefly-offline bridge gets
     # it — that one is bounded instead by the device being pruned when truly gone.
+    #
+    # "Finished" is the server's own terminal set (models.COMMAND_TERMINAL_STATES), not
+    # a copy of it. The copy that stood here predated `expired` and `cancelled` (added
+    # 2026-08-25), so a bridge that was often offline piled up expired rows forever.
+    #
+    # A command that a rollout target points at is kept at any age (2026-09-28). The
+    # rollout reads its result to learn how that bridge's update ended; once it was
+    # pruned the target pointed at nothing and showed "updating" forever.
+    # rollout_targets.command_id is also a foreign key: SQLite as deployed does not
+    # enforce it, but a database that does would refuse the delete, and that one row
+    # would fail the whole sweep. The rows kept are one per bridge per rollout, and
+    # rollouts themselves are never pruned.
     cutoff = now - dt.timedelta(days=settings.command_retention_days)
+    in_rollouts = select(RolloutTarget.command_id).where(RolloutTarget.command_id.is_not(None))
     deleted["commands"] = db.execute(
         delete(Command).where(Command.created_at < cutoff,
-                              Command.status.in_(("done", "failed", "rejected", "sent"))),
+                              Command.status.in_(sorted(COMMAND_TERMINAL_STATES | {"sent"})),
+                              Command.id.not_in(in_rollouts)),
+        execution_options={"synchronize_session": False}).rowcount or 0
+
+    # Alert episodes: one row per problem, so a bridge that flaps opens hundreds a
+    # week. Resolved ones go after ALERT_RETENTION_DAYS. An OPEN episode is kept
+    # whatever its age: the alert loop needs it to send "resolved" exactly once.
+    cutoff = now - dt.timedelta(days=settings.alert_retention_days)
+    deleted["alert_events"] = db.execute(
+        delete(AlertEvent).where(AlertEvent.resolved_at.is_not(None),
+                                 AlertEvent.resolved_at < cutoff),
+        execution_options={"synchronize_session": False}).rowcount or 0
+
+    # Sign-in sessions whose user no longer exists. Such a token can never be valid
+    # again, and a user's sessions have not always been deleted with the user
+    # (revoke_user left them behind), so they are swept here.
+    deleted["sessions"] = db.execute(
+        delete(UserSession).where(UserSession.user_id.not_in(select(User.id))),
         execution_options={"synchronize_session": False}).rowcount or 0
 
     db.commit()
