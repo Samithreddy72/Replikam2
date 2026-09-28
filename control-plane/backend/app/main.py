@@ -7,6 +7,7 @@ Two surfaces:
 Single-org for now (admin API key). The backend itself runs as a node on the tailnet so it
 can reach the Pis; only the admin panel is publicly exposed (behind the API key / future SSO).
 """
+import contextlib
 import datetime as dt
 import os
 import re
@@ -344,7 +345,22 @@ def _mesh_heal_due(dev, now) -> bool:
 # NB_API_DOCS=1 turns them back on for local development.
 _DOCS = os.getenv("NB_API_DOCS", "").strip().lower() in ("1", "true", "yes", "on")
 
+@contextlib.asynccontextmanager
+async def _lifespan(_app):
+    """Start the background loops with the app, and stop them with it. `@app.on_event` did the same
+    until 2026-09-28; it is deprecated in the FastAPI this fleet now runs (0.141), and a future
+    release that drops it would leave the app answering while no alert, retention or rollout loop
+    ran - with nothing failing to show it."""
+    tasks = _start_background()
+    try:
+        yield
+    finally:
+        for t in tasks:
+            t.cancel()
+
+
 app = FastAPI(
+    lifespan=_lifespan,
     title="NetBridge Control Plane",
     version="0.1.0",
     docs_url="/docs" if _DOCS else None,
@@ -534,17 +550,16 @@ def _purge_orphan_sessions():
 _purge_orphan_sessions()
 
 
-@app.on_event("startup")
-async def _start_background():
-    """Background loops: hourly retention sweep, the alert evaluator that
+def _start_background() -> list:
+    """Background loops (started by _lifespan): hourly retention sweep, the alert evaluator that
     pushes new/cleared alerts out by email/webhook (walkthrough J4), and the 30 s
     command/rollout housekeeping (expiry, trial verdicts) - see _housekeeping_loop."""
     import asyncio
     from .db import SessionLocal
     from . import retention, alerting
-    asyncio.create_task(retention.sweep_loop(SessionLocal))
-    asyncio.create_task(alerting.evaluate_loop(SessionLocal, settings.alert_eval_interval_s))
-    asyncio.create_task(_housekeeping_loop())
+    return [asyncio.create_task(retention.sweep_loop(SessionLocal)),
+            asyncio.create_task(alerting.evaluate_loop(SessionLocal, settings.alert_eval_interval_s)),
+            asyncio.create_task(_housekeeping_loop())]
 
 
 # WHAT COMMIT IS ACTUALLY LIVE?
