@@ -191,6 +191,7 @@ try:
     check(r.status_code == 400, "a 9-digit PIN is refused by the fleet (the bridge takes 4-8)", r.text)
     r = c.post("/admin/devices/%s/pin" % ids[1], headers=A, json={})
     check(r.status_code == 200 and len(r.json().get("pin", "")) == 6, "…a generated PIN is 6 digits, shown once", r.text)
+    gen_pin_cmd, gen_pin = r.json().get("command_id"), r.json().get("pin") or "none"
     tel(ids[2], pin={"pin_set": True, "lockout": True, "lockout_remaining": 1800, "required": True, "protocol": 2},
         quarantined=["bridge-web.py"])
     fixes = {a["kind"]: (a.get("fix") or {}).get("command")
@@ -201,7 +202,9 @@ try:
                                                    "stage_pct": 100})
     check(r.status_code == 200, "a rollout can be started", r.text)
     ro_id = r.json().get("id")
-    check(r.status_code == 200 and "BRIDGE-0004" in r.json().get("excluded", []),
+    # each left-out bridge is {"name", "reason"} since 2026-09-28 (a bare name before)
+    check(r.status_code == 200 and "BRIDGE-0004" in [e.get("name") if isinstance(e, dict) else e
+                                                     for e in r.json().get("excluded", [])],
           "the rollout leaves out the unclaimed bridge and names it (it cannot be updated remotely)", r.json().get("excluded"))
     from app.models import Command as _Cmd, RolloutTarget as _RT
     db.expire_all()
@@ -235,7 +238,17 @@ try:
           "setting a PIN on older software comes with a warning", r.text)
     # PINs never outlive delivery: expired and cancelled set-pin rows are scrubbed too
     from app.models import Command as _C
+    # A DIFFERENT set-pin while one is still queued is refused, never swapped for the queued one. It
+    # used to hand back the queued command's id - and this very check then cancelled that other row
+    # and "proved" 555555 was scrubbed from a row that never held it (2026-09-28).
+    rb = c.post("/admin/devices/%s/commands" % ids[1], headers=A, json={"type": "set-pin", "args": {"pin": "555555"}})
+    check(rb.status_code == 409 and (rb.json().get("detail") or {}).get("in_flight") == gen_pin_cmd
+          and "555555" not in rb.text and gen_pin not in rb.text,
+          "a second set-pin with another PIN is refused while the first is queued (no PIN in the answer)", rb.text)
+    c.delete("/admin/devices/%s/commands/%s" % (ids[1], gen_pin_cmd), headers=A)
     r1 = c.post("/admin/devices/%s/commands" % ids[1], headers=A, json={"type": "set-pin", "args": {"pin": "555555"}}).json()
+    check(r1.get("id") and r1.get("id") != gen_pin_cmd and not r1.get("deduplicated"),
+          "…and queued as its own command once the first is cancelled", r1)
     c.delete("/admin/devices/%s/commands/%s" % (ids[1], r1["id"]), headers=A)
     r2 = c.post("/admin/devices/%s/commands" % ids[2], headers=A, json={"type": "set-pin", "args": {"pin": "666666"}}).json()
     c.get("/v1/commands", headers=dev_tok[ids[2]])                         # delivered ...
@@ -292,9 +305,13 @@ try:
     # ---- nb: the terminal tool speaks fleet numbers ---------------------------------------------
     (T / "tok").write_text("ADMIN")
     NBENV = dict(os.environ, FLEET_URL=BASE, FLEET_TOKEN_FILE=str(T / "tok"))
-    def nb(*args):
-        r = subprocess.run([sys.executable, str(ROOT / "tools/nb")] + list(args), capture_output=True, text=True,
-                           env=NBENV, timeout=60)
+    def nb(*args, timeout=60):
+        try:
+            r = subprocess.run([sys.executable, str(ROOT / "tools/nb")] + list(args), capture_output=True, text=True,
+                               env=NBENV, timeout=timeout)
+        except subprocess.TimeoutExpired as e:          # still waiting: a failed check, not a crashed test
+            out = b"".join(x for x in (e.stdout, e.stderr) if isinstance(x, bytes))
+            return None, out.decode(errors="replace") + "\n[test: nb still waiting after %ds - stopped]" % timeout
         return r.returncode, r.stdout + r.stderr
     rc, out = nb("list")
     check(rc == 0 and "NB-001" in out and "NB-007" in out and "LIVE" in out, "nb list shows numbers and states", out[-400:])
@@ -307,6 +324,25 @@ try:
     check(rc != 0 and "already" in out, "nb renumber refuses a number in use", out)
     rc, out = nb("renumber", "main hall east", "8", "--yes")
     check(rc == 0 and "NB-008" in out, "nb renumber by name", out)
+    # nb never reports another command's result as this one's (2026-09-28): it used to print
+    # "queued (#<the other one>)" and then that command's "✔ done"
+    ga = c.post("/admin/devices/%s/commands" % ids[0], headers=A,
+                json={"type": "gadget-tune", "args": {"key": "UAC2_C_SYNC", "value": "async"}}).json()
+    rc, out = nb("run", "NB-002", "gadget-tune", '{"key": "UAC2_P_SRATE", "value": "48000"}', "--yes", timeout=20)
+    check(rc not in (0, None) and "NOT queued" in out and "#%s" % ga.get("id") in out and "✔" not in out,
+          "nb: a different gadget-tune while one is in flight is reported NOT queued, naming the one in the way", out)
+    p = subprocess.Popen([sys.executable, str(ROOT / "tools/nb"), "run", "NB-002", "gadget-tune",
+                          '{"value": "async", "key": "UAC2_C_SYNC"}', "--yes"],
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=NBENV)
+    time.sleep(2)
+    for x in c.get("/v1/commands", headers=dev_tok[ids[0]]).json():
+        c.post("/v1/commands/%s/result" % x["id"], headers=dev_tok[ids[0]], json={"status": "done", "output": "written"})
+    try:
+        out = p.communicate(timeout=60)[0]
+    except subprocess.TimeoutExpired:
+        p.kill(); out = p.communicate()[0] + "\n[test: nb still waiting after 60 s - stopped]"
+    check(p.returncode == 0 and "already in flight (#%s)" % ga.get("id") in out and "✔ done" in out,
+          "nb: the SAME command is followed - and nb says it is the one already in flight, not a new one", out)
 
     # ---- live stream -----------------------------------------------------------------------------
     r = httpx.get(BASE + "/admin/stream", headers=P, timeout=5)

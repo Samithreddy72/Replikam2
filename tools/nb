@@ -20,7 +20,11 @@
     nb deploy <bridge|all> <file|name> [--now]   sign + publish (if a path) + install; applies safely
     nb revert <bridge|all> <name>        back to the built-in file
     nb unquarantine <bridge> [name]      restore a file automatic rollback parked
-    nb update <bridge> <version> [--force]   whole-OS update (after tools/publish-ota.sh <version>)
+    nb update <bridge> <version> [--force] [--allow-downgrade]
+                                         whole-OS update (after tools/publish-ota.sh <version>); waits
+                                         for the trial boot's verdict. --force: even with a meeting
+                                         laptop attached or a presenter live. --allow-downgrade: a
+                                         version older than the bridge runs
     nb ota <bridge>                      progress / result of the last OS update
     nb reboot <bridge>
     nb ssh <bridge> [command ...]        owner SSH over the tailnet
@@ -54,7 +58,14 @@ def die(msg, code=1):
     sys.exit(code)
 
 
-def api(method, path, body=None, timeout=30):
+class Refused(Exception):
+    """The fleet answered a status the caller asked to handle itself (see api(soft=...))."""
+    def __init__(self, code, body):
+        super().__init__(code)
+        self.code, self.body = code, body
+
+
+def api(method, path, body=None, timeout=30, soft=()):
     try:
         token = TOKEN_FILE.read_text().strip()
     except OSError:
@@ -70,6 +81,11 @@ def api(method, path, body=None, timeout=30):
             return json.loads(data) if "json" in ctype else data
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:400]
+        if e.code in soft:
+            try:
+                raise Refused(e.code, json.loads(detail))
+            except ValueError:
+                raise Refused(e.code, {"detail": detail})
         die("fleet said %s: %s" % (e.code, detail))
     except urllib.error.URLError as e:
         die("cannot reach the fleet (%s): %s" % (FLEET, e.reason))
@@ -136,13 +152,27 @@ def confirm(what, targets):
         die("cancelled", 0)
 
 
-def run(d, ctype, args=None, wait=True, quiet=False):
+def run(d, ctype, args=None, wait=True, quiet=False, extra=None):
     body = {"type": ctype, "args": args or {}}
+    body.update(extra or {})
     if ctype in CHANGES:
         body["confirm"] = True
-    r = api("POST", "/admin/devices/%s/commands" % d["id"], body)
+    # 409 is answered per bridge, not fatal: `nb deploy all x` goes on to the next bridge. The fleet
+    # refuses a DIFFERENT one of these while another is in flight on that bridge (it used to hand
+    # back the other command, and nb reported ITS result as this one's - 2026-09-28).
+    try:
+        r = api("POST", "/admin/devices/%s/commands" % d["id"], body, soft=(409,))
+    except Refused as e:
+        det = (e.body or {}).get("detail")
+        msg = det.get("detail") or det.get("error") if isinstance(det, dict) else det
+        print("  ✖ %s: %s NOT queued — %s" % (label(d), ctype, msg or "refused (409)"))
+        return None
     cid = r.get("id") or r.get("command_id")
-    if not quiet:
+    if r.get("deduplicated") and not quiet:
+        # the SAME command (same arguments) is already queued or running: follow that one, and say so
+        print("  → %s: the same %s is already in flight (#%s) — following it, not queuing a second one"
+              % (label(d), ctype, cid))
+    elif not quiet:
         print("  → %s: %s queued (#%s)" % (label(d), ctype, cid))
     if not wait or cid is None:
         return None
@@ -416,6 +446,45 @@ def cmd_unquarantine(a):
     return show_result(run(d, "unquarantine", {"name": a[1]} if len(a) > 1 else {}))
 
 
+def _ts(iso):
+    """A fleet timestamp -> seconds since the epoch (the fleet stores UTC; SQLite drops the zone)."""
+    import datetime as dt
+    t = dt.datetime.fromisoformat(iso)
+    return (t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)).timestamp()
+
+
+def follow_trial(d, c, version, limit=20 * 60):
+    """After an OS update STAGED, wait for the trial boot's verdict: bridge-ab writes "committed" or
+    "rolled back" into the bridge's OS update state. Only a heartbeat the fleet received after the
+    command's result counts - the same rule the fleet's rollouts use - so an older state is never
+    read as this attempt's verdict. 0 only when the trial committed this version."""
+    done_at = _ts(c["completed_at"]) if c.get("completed_at") else time.time()
+    t0 = time.time()
+    while time.time() - t0 < limit:
+        time.sleep(10)
+        v = api("GET", "/admin/devices/%s" % d["id"])
+        ota = (v.get("latest") or {}).get("ota") or {}
+        if not v.get("last_seen") or _ts(v["last_seen"]) <= done_at:
+            continue
+        state, ver, detail = ota.get("state"), ota.get("version") or "", ota.get("detail") or ""
+        if state == "committed":
+            if ver in (version, ""):       # no version named: ours - the bridge refused any other manifest
+                print("  ✔ committed — the trial boot came up healthy and %s now runs %s" % (label(d), version))
+                return 0
+            print("  ✖ its trial committed %s, not %s — the manifest it installed names another version" % (ver or "?", version))
+            return 1
+        if state == "rolled back":
+            print("  ✖ rolled back — %s. The bridge is back on its previous OS." % (detail or "the new OS did not come up healthy"))
+            return 1
+        if state == "failed" and ver == version:
+            print("  ✖ failed — %s" % (detail or "no detail"))
+            return 1
+        if int(time.time() - t0) % 60 < 10:
+            print("    … trial boot in progress (%ds)" % (time.time() - t0))
+    print("  ⏳ no verdict from the trial boot after %d min — state UNKNOWN; check: nb ota %s" % (limit // 60, d.get("name")))
+    return 1
+
+
 def cmd_update(a):
     d = pick(a[0])[0]
     v = a[1]
@@ -425,11 +494,17 @@ def cmd_update(a):
     args = {"version": v}
     if "--force" in a:
         args["force"] = True
+    # The fleet refuses a version OLDER than the bridge runs unless asked for on purpose (a 2.1 image
+    # takes a 2.2 bridge off the PIN protocol the presenter app needs - 2026-09-28).
+    extra = {"allow_downgrade": True} if "--allow-downgrade" in a else None
     confirm("Install OS %s (two reboots; automatic rollback if unhealthy)" % v, [d])
-    rc = show_result(run(d, "update", args))
-    if rc == 0:
-        print("  The bridge trial-boots in ~45 s and commits itself only if healthy. Watch: nb ota %s" % (d.get("name")))
-    return rc
+    c = run(d, "update", args, extra=extra)
+    if c and c.get("status") == "done":
+        # "done" is only STAGED: the verdict is the trial boot's, a minute or more later
+        print("  staged — the new OS is in the spare slot. The bridge trial-boots in ~45 s and keeps it "
+              "only if it comes back healthy; waiting for that verdict (Ctrl-C stops waiting, not the update).")
+        return follow_trial(d, c, v)
+    return show_result(c)
 
 
 def cmd_ota(a):

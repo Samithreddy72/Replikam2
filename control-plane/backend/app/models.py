@@ -191,6 +191,10 @@ class Rollout(Base):
     source: Mapped[str] = mapped_column(String)      # base URL/dir handed to bridge-update.sh
     stage_pct: Mapped[int] = mapped_column(Integer, default=10)      # current wave: 10/25/50/100
     status: Mapped[str] = mapped_column(String, default="active")    # active|paused|completed|aborted
+    # Bridges left out when the rollout started (older than 2.2, unclaimed, or already on a newer
+    # version) as [{"name", "reason"}]. Recorded at creation so the card can keep saying who is NOT
+    # covered; before 2026-09-28 only the create response named them and the panel never showed it.
+    excluded: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -204,14 +208,27 @@ class RolloutTarget(Base):
     A target stays `queued` while its device is offline — that is exactly the
     walkthrough's "SF Lab queued until online": the wave does not skip it and
     does not fail it, it simply waits and dispatches when the device reappears.
+    The same while a meeting is on there (laptop attached, presenter live).
     """
     __tablename__ = "rollout_targets"
 
     rollout_id: Mapped[int] = mapped_column(ForeignKey("rollouts.id"), primary_key=True)
     device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), primary_key=True)
-    status: Mapped[str] = mapped_column(String, default="queued")  # queued|dispatched|succeeded|failed
+    # queued | dispatched | staged | succeeded | rolled_back | failed | removed
+    #   staged       the update command finished: the new OS is in the spare slot and the bridge is
+    #                trial-booting it. NOT success yet - the trial's health check decides (2026-09-28:
+    #                "done" used to count as updated, so a trial that rolled back was never seen).
+    #   rolled_back  the trial did not come up healthy and the bridge went back to its old OS
+    #   failed       did not update for any other reason (see `reason`)
+    #   removed      the device no longer exists; it no longer counts toward the rollout
+    status: Mapped[str] = mapped_column(String, default="queued")
     command_id: Mapped[int | None] = mapped_column(ForeignKey("commands.id"), nullable=True)
     wave: Mapped[int | None] = mapped_column(Integer, nullable=True)   # stage_pct it went out in
+    # Why the target is where it is, in words an operator can act on: why it failed, or why a
+    # queued one was sent back (the bridge refused because a meeting was on).
+    reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    # For a staged target: the last moment the fleet saw it busy (offline, rebooting, a meeting
+    # on). The trial window runs from here, so a trial that waits for a meeting is not failed.
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     rollout: Mapped[Rollout] = relationship(back_populates="targets")
