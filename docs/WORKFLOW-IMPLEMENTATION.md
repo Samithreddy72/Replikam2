@@ -142,3 +142,7 @@ CI 36478934149 for 6b0ebe8 passed 1687 common checks but failed the extracted-Ja
 ### Owner SSH revocation (29 September continuation)
 
 The strict image policy now uses an AuthorizedKeysCommand backed by the durable accepted signed owner-key snapshot. Static AuthorizedKeysFile lookup is disabled. Signature verification and revision checks occur on each new authentication; missing snapshots and corrupt acceptance records fail closed. Seven real-signature tests and 23 SSH tests pass locally, including real sshd configuration validation. Both old OS slots and existing authenticated sessions require separate migration handling; B87 remains partial. This does not change the live bridge.
+
+### Presenter sign-in and stale-heartbeat lookup
+
+Sign-in now normalizes bare HTTPS Fleet addresses and reports failed requests instead of claiming email was sent. Fresh-install invite redemption uses the URL entered in the form. Expired codes retain actionable guidance; outages do not cause a second invite-redemption attempt. Mesh-key failures distinguish invalid credentials and network/server failure. Device IDs resolve cached network addresses for the diagnostic probe. Seven executed handler regressions pass locally; full branch CI remains required.

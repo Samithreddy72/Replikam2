@@ -493,9 +493,9 @@
       "severity": "medium",
       "title": "The 'ask the device' probe for bridges the fleet marks offline sends the device ID as a hostname, so stale-heartbeat bridges always show '(offline)'",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted regression passed, full CI pending",
+      "evidence": "tests/test-presenter-signin.py",
+      "note": "Device IDs resolve cached addresses. Sign-in normalizes Fleet URLs, uses the entered URL for fresh-install invites, distinguishes failed requests, and preserves expired-code guidance. An outage never triggers invite redemption."
     },
     {
       "id": "B203",
@@ -511,18 +511,18 @@
       "severity": "medium",
       "title": "Sign-in errors are wrong or raw: an expired code shows 'invalid or already-used invite', network failures show '<urlopen error \u2026>'",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted regression passed, full CI pending",
+      "evidence": "tests/test-presenter-signin.py",
+      "note": "Device IDs resolve cached addresses. Sign-in normalizes Fleet URLs, uses the entered URL for fresh-install invites, distinguishes failed requests, and preserves expired-code guidance. An outage never triggers invite redemption."
     },
     {
       "id": "B206",
       "severity": "medium",
       "title": "At go-live a revoked sign-in or an unreachable fleet is reported as 'the control plane would not issue a mesh key for this bridge'",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; full CI pending",
+      "evidence": "tests/test-presenter-signin.py; tests/test-mesh-helper-health.py",
+      "note": "Mesh key creation retains a user-facing distinction between revoked credentials, connectivity failures, throttling and server failure; no LAN fallback."
     },
     {
       "id": "B207",
@@ -547,9 +547,9 @@
       "severity": "high",
       "title": "Sign-in fails with no message for a URL without https:// and for invite codes on a fresh install; a mistyped URL says 'code on its way'",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted regression passed, full CI pending",
+      "evidence": "tests/test-presenter-signin.py",
+      "note": "Device IDs resolve cached addresses. Sign-in normalizes Fleet URLs, uses the entered URL for fresh-install invites, distinguishes failed requests, and preserves expired-code guidance. An outage never triggers invite redemption."
     },
     {
       "id": "B222",

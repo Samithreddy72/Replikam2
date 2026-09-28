@@ -21,7 +21,7 @@ Deliberately NOT in this app: any admin capability. It signs in as a viewer, so 
 control plane refuses fleet mutations even if the UI asked for them.
 """
 import json, os, pathlib, re, shutil, socket, subprocess, sys, threading, time
-import urllib.request, urllib.error
+import urllib.request, urllib.error, urllib.parse
 
 
 def _ensure_ca_bundle():
@@ -346,6 +346,47 @@ def api(method, url, token=None, body=None, timeout=10):
             return {"_error": str(e), "_code": e.code}
     except Exception as e:
         return {"_error": str(e)}
+
+
+def _signin_url(value):
+    """Normalize a Fleet address before using or saving it."""
+    value = str(value or "").strip().rstrip("/")
+    if not value:
+        raise ValueError("Enter your Fleet address.")
+    if "://" not in value:
+        value = "https://" + value
+    parsed = urllib.parse.urlsplit(value)
+    if (parsed.scheme not in ("https", "http") or not parsed.hostname
+            or parsed.username or parsed.password or parsed.query or parsed.fragment):
+        raise ValueError("Enter a valid Fleet address, such as https://fleet.example.com.")
+    if parsed.scheme == "http" and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+        raise ValueError("Use HTTPS for your Fleet address.")
+    try:
+        parsed.port
+    except ValueError:
+        raise ValueError("The Fleet address has an invalid port.")
+    return value
+
+
+def _signin_error(result, redeem=False):
+    code = (result or {}).get("_code")
+    if code in (401, 403):
+        return ("This code is invalid, expired or already used. Request a new code."
+                if redeem else "Your sign-in is no longer valid. Sign out and sign in again.")
+    if code == 429:
+        return "Too many attempts. Wait a moment before trying again."
+    if code is None:
+        return "Cannot reach Fleet. Check your internet connection and Fleet address, then try again."
+    return "Fleet could not complete this request. Try again or contact your fleet admin."
+
+
+def _redeem_signin(url, code):
+    result = api("POST", url + "/auth/magic-redeem", body={"code": code})
+    # Only a rejected code can be an invite. An outage must not trigger a second
+    # redemption attempt or hide its cause behind an invite error.
+    if not (result or {}).get("token") and (result or {}).get("_code") == 401:
+        result = api("POST", url + "/auth/redeem", body={"invite": code})
+    return result
 
 
 # --------------------------------------------------------------------------- platform
@@ -1387,14 +1428,17 @@ class MeshManager:
         self.bridge_id = None
         self.tailnet_ip = None      # OUR mesh IP; the bridge returns audio here
         self.control_port = None
+        self.key_error = None
         self.bridge_lan_ip = None   # the bridge's LAN IP, if it's on our network
 
     def _mint_key(self, st):
+        self.key_error = None
         r = api("POST", st["control_url"].rstrip("/") + "/auth/mesh-key",
                 token=st.get("token"), timeout=25)
         if isinstance(r, dict) and not r.get("_error"):
             # the endpoint returns the key as "authkey" (not "key")
             return r.get("authkey"), r.get("login_server") or ""
+        self.key_error = _signin_error(r)
         return None, ""
 
     def route(self, rec, st):
@@ -1435,7 +1479,7 @@ class MeshManager:
             # would not issue one (TS_API_KEY missing, tag policy, expiry) — a real fault
             # worth surfacing, not something to paper over with a path we do not support.
             return {"via": "none",
-                    "error": "the control plane would not issue a mesh key for this bridge"}
+                    "error": self.key_error or "Fleet could not create a secure connection. Contact your fleet admin."}
 
         # The key goes in the environment, not argv: argv is readable by every process on
         # the machine (ps), and this key admits a node to the tailnet.
@@ -2415,7 +2459,7 @@ def _bridge_rec(host, st):
         if isinstance(r, list):
             lst = _BRIDGES["list"] = r
     for d in lst:
-        if host in (d.get("tailscale_ip"), (d.get("latest") or {}).get("ip"), d.get("ip")):
+        if host in (d.get("id"), d.get("tailscale_ip"), (d.get("latest") or {}).get("ip"), d.get("ip")):
             return {"id": d.get("id"), "tailscale_ip": d.get("tailscale_ip"),
                     "ip": (d.get("latest") or {}).get("ip") or d.get("ip")}
     return {"id": None, "tailscale_ip": None, "ip": host}
@@ -2716,31 +2760,33 @@ class Handler(BaseHTTPRequestHandler):
         st, b = load_state(), self._body()
 
         if self.path == "/api/signin-request":
-            url = (b.get("control_url") or "").rstrip("/")
+            try:
+                url = _signin_url(b.get("control_url"))
+            except ValueError as exc:
+                return self._send({"_error": str(exc)}, 400)
             email = (b.get("email") or "").strip()
-            if not url or not email:
-                return self._send({"_error": "control_url and email required"}, 400)
+            if not email:
+                return self._send({"_error": "Enter your work email address."}, 400)
+            r = api("POST", url + "/auth/magic-link", body={"email": email})
+            if not isinstance(r, dict) or r.get("_error") or r.get("ok") is not True:
+                return self._send({"_error": _signin_error(r if isinstance(r,dict) else {})}, 502)
             st["control_url"] = url
             save_state(st)
-            r = api("POST", url + "/auth/magic-link", body={"email": email})
-            # The endpoint answers identically whether or not the user exists, so this
-            # app must not imply the address was recognised.
-            return self._send({"ok": True, "note": "if that address has an account, a "
-                                                   "sign-in code is on its way", "raw": r})
+            return self._send({"ok": True, "note": "If that address has an account, a sign-in code is on its way."})
 
         if self.path == "/api/signin-redeem":
-            url = st.get("control_url", "").rstrip("/")
+            try:
+                url = _signin_url(b.get("control_url") or st.get("control_url"))
+            except ValueError as exc:
+                return self._send({"_error": str(exc)}, 400)
             code = (b.get("code") or "").strip()
-            # Two ways in, and the presenter should not have to know which they were given:
-            # a one-time INVITE (their very first sign-in, issued when an admin adds them)
-            # or a magic-link CODE (every sign-in after that). Try the magic link first,
-            # then fall back to the invite, so one box accepts either.
-            r = api("POST", url + "/auth/magic-redeem", body={"code": code})
-            if not (r or {}).get("token"):
-                r = api("POST", url + "/auth/redeem", body={"invite": code})
+            if not code:
+                return self._send({"_error": "Enter your sign-in or invite code."}, 400)
+            r = _redeem_signin(url, code)
             tok = (r or {}).get("token")
             if not tok:
-                return self._send({"_error": (r or {}).get("_error") or "invalid or expired code"}, 401)
+                return self._send({"_error": _signin_error(r, redeem=True)}, 401 if (r or {}).get("_code") in (401,403) else 502)
+            st["control_url"] = url
             st["token"] = tok
             # /auth/redeem already tells us who we are; whoami is a fallback so the header
             # never shows a blank identity after a successful sign-in.
@@ -3133,7 +3179,7 @@ async function req(){const r=await j('/api/signin-request',{method:'POST',
   body:JSON.stringify({control_url:$('curl').value,email:$('email').value})});
   $('m1').textContent=r._error||r.note||''}
 async function redeem(){const r=await j('/api/signin-redeem',{method:'POST',
-  headers:{'Content-Type':'application/json'},body:JSON.stringify({code:$('code').value})});
+  headers:{'Content-Type':'application/json'},body:JSON.stringify({code:$('code').value,control_url:$('curl').value})});
   if(r._error){$('m1').textContent=r._error;return} location.reload()}
 async function load(s){
   const b=await j('/api/bridges');
