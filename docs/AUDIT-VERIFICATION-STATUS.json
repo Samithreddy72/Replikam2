@@ -241,18 +241,18 @@
       "severity": "high",
       "title": "A cross-site GET /api/checks tears down the live mesh helper (the CSRF guard only covers POST)",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-readonly-checks.py",
+      "note": "Checks use read-only routes, never rebuilding the live mesh; cross-site checks refused."
     },
     {
       "id": "B106",
       "severity": "medium",
       "title": "Signing out during a live session leaves the camera and microphone captured, and the page no longer shows a way to stop them",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-presenter-session-boundaries.py; tests/test-app-pin-flow.py; tests/test-desktop-engine.py",
+      "note": "Shared sign-out stops capture before dropping identity; duplicate Studio cleanup removed."
     },
     {
       "id": "B108",
@@ -268,9 +268,9 @@
       "severity": "medium",
       "title": "After a transport error the app resends the PIN up to three times, so one wrong PIN can lock the bridge for an hour",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-presenter-session-boundaries.py; tests/test-app-pin-flow.py; tests/test-desktop-engine.py",
+      "note": "Retry only the read-only protocol probe. Once PIN POST is sent, an ambiguous response returns without automatic retry or helper rebuild."
     },
     {
       "id": "B111",

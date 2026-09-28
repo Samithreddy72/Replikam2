@@ -1642,10 +1642,9 @@ def _bridge_pin_protocol(route):
 def _unlock_bridge(host, st, pin):
     """Verify the PIN ON THE BRIDGE and keep its ticket. -> dict for the page (never the ticket).
 
-    SELF-HEAL, kept from the old unlock: the mesh helper is often younger than the path it
-    needs, so TRANSPORT failures are retried and the helper rebuilt once. A real verdict from
-    the bridge (wrong PIN, locked out, no PIN set) returns at once - a wrong PIN can never burn
-    the three tries the bridge allows."""
+    Read-only protocol probes may retry while the mesh comes up. Once a PIN POST
+    is sent, a lost response is ambiguous: the bridge may already have counted it.
+    Never resend a PIN automatically or rebuild the helper after that POST."""
     if not re.fullmatch(r"[0-9]{4,8}", pin or ""):
         return {"ok": False, "reason": "bad_format", "need_pin": True,
                 "message": PIN_MESSAGES["bad_format"]}
@@ -1661,8 +1660,10 @@ def _unlock_bridge(host, st, pin):
                 return {"ok": False, "reason": "old_bridge", "message": PIN_MESSAGES["old_bridge"]}
             # protocol 2: this app keeps the ticket in memory. Older apps get no ticket back.
             last = api("POST", route["base"] + "/api/unlock", body={"pin": pin, "protocol": PIN_PROTOCOL}, timeout=15)
-            if not last.get("_error"):
-                break
+            if not isinstance(last,dict) or last.get("_error"):
+                return {"ok": False, "reason": "unconfirmed", "attempts": 1,
+                        "message": "The PIN result could not be confirmed. It was not retried automatically. Check the bridge connection before trying again."}
+            break
         if attempt == 0:
             MESH.stop()                             # rebuild a helper that cannot route
             _kill_orphan_mesh()
@@ -2748,6 +2749,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send({"ok": True, "email": st["email"]})
 
         if self.path == "/api/signout":
+            # Signing out releases camera/microphone and cancels media recovery before
+            # the page loses its controls. Closing the mesh alone leaves capture alive.
+            SESSION.stop()
             # Drop the identity, keep control_url and the remembered devices: a forced
             # sign-out should not make the presenter re-pick their camera and mic.
             for k in ("token", "email"):

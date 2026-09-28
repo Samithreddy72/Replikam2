@@ -60,9 +60,7 @@ class DesktopHandler(engine.Handler):
             state['control_url'] = url
             engine.save_state(state)
             return self._send({'ok': True})
-        # Signing out must release live media BEFORE dropping mesh credentials.
-        if self.path == '/api/signout' and self._csrf_ok():
-            engine.SESSION.stop()
+        # Shared handler owns sign-out cleanup for both Source and Studio.
         return super().do_POST()
 
 
