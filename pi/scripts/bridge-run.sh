@@ -61,6 +61,18 @@ OVR="$DIR/$NAME"
 SIG="$DIR/$NAME.sig"
 [ -f "$OVR" ] || exec_baked "$@"
 
+# Installed on another OS (2026-09-28). /data survives an OS update, and a script written for the
+# old OS must not run on top of the new one: the new OS's built-in runs. Back on the old OS (a
+# rollback) it runs again; deploying it again adopts it. bridge-overrides.sh (read-only root,
+# like this loader) decides, so the loader and the boot-time binds always agree - asked here at
+# every start rather than read from a list its boot run writes, which a failed boot run would
+# leave empty. The voice and return-audio scripts carry across as they always have.
+OVERRIDES="${BRIDGE_RUN_OVERRIDES:-/usr/local/bin/bridge-overrides.sh}"
+if "$OVERRIDES" superseded "$NAME" 2>/dev/null; then
+  log "override was installed on another OS version — running the built-in script"
+  exec_baked "$@"
+fi
+
 if [ ! -f "$PUBKEY" ]; then
   log "override present but no pubkey at $PUBKEY — running baked-in"
   exec_baked "$@"

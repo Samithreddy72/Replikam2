@@ -86,8 +86,11 @@ TIMEOUT_S = {
     "reboot": 420, "reset-clock": 300,
     # script deployment restarts a service and may auto-rollback
     "deploy-script": 420, "revert-script": 300, "unquarantine": 300,
-    # a whole image over whatever uplink the venue has
-    "update": 3600,
+    # a whole image over whatever uplink the venue has, a wait for a live meeting to end, and the
+    # slot write: the agent's 3-hour limit for the job (bridge-agent.py DETACHED, 10800) plus 10
+    # minutes to report. One hour covered download AND write, and slow venues expired mid-write
+    # (2026-09-28).
+    "update": 11400,
 }
 DEFAULT_TIMEOUT_S = 240
 
@@ -2375,7 +2378,22 @@ def _dispatch_rollout(db: Session, ro: Rollout) -> int:
         dev = db.get(Device, t.device_id)
         if not dev or not is_online(dev):
             continue                      # "queued until online"
-        # timeout_s: an OS update may take an hour over a venue uplink. Without it the command
+        # An update already on its way to this bridge (an admin's "Install on…", 2026-09-28).
+        # Queuing a second one ran two OS updates at once on the bridge. The same version is
+        # adopted as this target's command; another version is left to finish first, and this
+        # target stays queued for a later dispatch.
+        inflight = db.scalars(
+            select(Command).where(Command.device_id == dev.id, Command.type == "update",
+                                  Command.status.in_(("pending", "sent")))
+            .order_by(Command.id.desc()).limit(1)).first()
+        if inflight is not None:
+            a = inflight.args if isinstance(inflight.args, dict) else {}
+            if a.get("version") == ro.version or (a.get("source") or a.get("url")) == ro.source:
+                t.command_id, t.status, t.wave, t.updated_at = inflight.id, "dispatched", ro.stage_pct, utcnow()
+                room -= 1
+                sent += 1
+            continue
+        # timeout_s: an OS update may take hours over a venue uplink. Without it the command
         # took the column default (120 s), was marked EXPIRED mid-download, the bridge's later
         # "done" was refused, and the rollout sat "updating" forever and could never widen.
         c = Command(device_id=dev.id, type="update", args={"source": ro.source},

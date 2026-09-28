@@ -11,8 +11,15 @@ import http.server, socketserver, subprocess, os, time, socket, json, hashlib, r
 import importlib.util, threading, copy
 
 PORT = 8080
-VERSION_FILE = "/etc/bridge/version"
-RELEASE_FILE = "/etc/bridge/release.json"
+# The version and build record of the slot that is RUNNING, first (2026-09-28). /etc/bridge is
+# bind-mounted from /data, which both A/B slots share: its copy is the version the card was
+# FLASHED with and never changed after an OS update, so a bridge on 2.2.1 kept reporting 2.2.0 -
+# the panel and `nb ota` were wrong, and a rollout re-targeted bridges already on its version.
+# /etc/netbridge-image-version is on the slot's own root (build-disk-image.sh at flash,
+# bridge-update.sh for the slot it installs), so it is right after a commit and a rollback alike.
+# The /etc/bridge copies stay as the fallback for images that lack the per-slot files.
+VERSION_FILES = ("/etc/netbridge-image-version", "/etc/bridge/version")
+RELEASE_FILES = ("/etc/netbridge-release.json", "/etc/bridge/release.json")
 SERVICES = ["bridge-gadget", "bridge-feeder-net", "bridge-uvcd",
             "bridge-feeder-audio", "bridge-return-audio"]
 
@@ -709,6 +716,14 @@ def read(path):
     except Exception:
         return ""
 
+def first_read(paths):
+    """The first of `paths` that exists and is not empty ("" if none)."""
+    for p in paths:
+        v = read(p)
+        if v:
+            return v
+    return ""
+
 def wifi_dbm():
     try:
         lines = read("/proc/net/wireless").splitlines()
@@ -879,12 +894,12 @@ def _gather_uncached():
     serial = cpu_serial()
     d["device_id"] = serial
     d["pairing_code"] = pairing_code(serial)
-    d["version"] = read(VERSION_FILE) or "dev"
+    d["version"] = first_read(VERSION_FILES) or "dev"
     # Full provenance, so the fleet can answer "what EXACTLY is this device running?" without
     # a human recognising a 7-character prefix. Images built before 2026-08-26 have no such
     # record, hence the tolerant default: a missing record reports as unknown, never invented.
     try:
-        d["build"] = json.loads(read(RELEASE_FILE) or "{}") or {"version": d["version"]}
+        d["build"] = json.loads(first_read(RELEASE_FILES) or "{}") or {"version": d["version"]}
     except Exception:
         d["build"] = {"version": d["version"], "note": "release.json unreadable"}
     d["tailscale_ip"] = tailscale_ip4()

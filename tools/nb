@@ -200,6 +200,8 @@ def cmd_list(_):
             upd.append("parked: " + ",".join(l["quarantined"]))
         if ov.get("active"):
             upd.append("%d updated" % len(ov["active"]))
+        if ov.get("superseded"):          # installed on another OS version; this OS runs its own copy
+            upd.append("%d not in use" % len(ov["superseded"]))
         ota = l.get("ota") or {}
         if ota.get("state") and ota.get("state") not in ("committed",):
             upd.append("OS %s: %s" % (ota.get("version", ""), ota["state"]))
@@ -437,7 +439,8 @@ def cmd_update(a):
     confirm("Install OS %s (two reboots; automatic rollback if unhealthy)" % v, [d])
     rc = show_result(run(d, "update", args))
     if rc == 0:
-        print("  The bridge trial-boots in ~45 s and commits itself only if healthy. Watch: nb ota %s" % (d.get("name")))
+        print("  The bridge trial-boots about 45 s after the new OS is written (later if a meeting is in progress) "
+              "and commits itself only if healthy. Watch: nb ota %s" % (d.get("name")))
     return rc
 
 

@@ -104,6 +104,29 @@ check(by.get("45", {}).get("status") == "failed" and "interrupted" in by["45"]["
 left = sorted(p.name for p in (T / "results").iterdir())
 check(left == ["44.meta"], "reported jobs are cleaned up, the running one is kept (%s)" % left)
 
+# An OS update may run for hours (download, a wait for a meeting to end, the slot write): one
+# still running at 2.5 h is NOT reported as interrupted (2026-09-28: the 2-hour cut-off was shorter
+# than the job's own limit).
+posts.clear(); agent.http = fake_http
+(T / "results" / "47.meta").write_text(json.dumps({"type": "update", "t": int(time.time()) - int(2.5 * 3600)}))
+agent.collect_results("https://fleet", "tok")
+check(not any("/47/" in u for u, _ in posts) and (T / "results" / "47.meta").exists(),
+      "an OS update still running after 2.5 h is left to finish, not reported as interrupted")
+(T / "results" / "47.meta").write_text(json.dumps({"type": "update", "t": int(time.time()) - agent.DETACHED["update"] - 700}))
+agent.collect_results("https://fleet", "tok")
+check(any("/47/" in u and b.get("status") == "failed" for u, b in posts), "...but one past its own time limit is")
+# The updater's own time budget and the agent's limit for the job are one number.
+import re as _re
+_m = _re.search(r'^BUDGET_S="\$\{BRIDGE_OTA_BUDGET_S:-(\d+)\}"', (REPO / "pi/scripts/bridge-update.sh").read_text(), _re.M)
+check(_m is not None and int(_m.group(1)) == agent.DETACHED["update"],
+      "bridge-update.sh budget == the agent's time limit for an update (%s vs %s)" % (_m and _m.group(1), agent.DETACHED["update"]))
+check(agent.DETACHED["update"] >= 3 * 3600, "an update has hours, not one hour, for download + slot write")
+for _f in ("47.meta", "47.rc", "47.out"):
+    try:
+        (T / "results" / _f).unlink()
+    except OSError:
+        pass
+
 (T / "results" / "46.meta").write_text(json.dumps({"type": "deploy-script", "t": int(time.time())}))
 (T / "results" / "46.rc").write_text("0\n"); (T / "results" / "46.out").write_text("ok\n")
 def offline(*a, **k): raise urllib.error.URLError("offline")

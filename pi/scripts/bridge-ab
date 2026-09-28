@@ -8,14 +8,21 @@ BOOT=/boot/firmware
 CMDLINE="$BOOT/cmdline.txt"
 TRYCMD="$BOOT/cmdline.tryboot"
 TRYBOOTTXT="$BOOT/tryboot.txt"   # read INSTEAD of config.txt during a tryboot trial
+STAGE=/data/ota-staging          # OTA progress for the fleet (status.json) + what is staged
+PROC_CMDLINE=/proc/cmdline
+BOOT_ID=/proc/sys/kernel/random/boot_id
 A_UUID="0d18cc81-02"   # rootA = p2
 B_UUID="0d18cc81-03"   # rootB = p3
 
 slot_of_uuid(){ case "$1" in "$A_UUID") echo A;; "$B_UUID") echo B;; *) echo "?";; esac; }
 uuid_of_slot(){ case "$1" in A|a) echo "$A_UUID";; B|b) echo "$B_UUID";; *) echo "";; esac; }
-running_uuid(){ sed -n 's/.*root=PARTUUID=\([0-9a-fA-F-]*\).*/\1/p' /proc/cmdline; }
+running_uuid(){ sed -n 's/.*root=PARTUUID=\([0-9a-fA-F-]*\).*/\1/p' "$PROC_CMDLINE"; }
 committed_uuid(){ sed -n 's/.*root=PARTUUID=\([0-9a-fA-F-]*\).*/\1/p' "$CMDLINE"; }
-is_trial(){ grep -q 'bridge_tryboot=1' /proc/cmdline; }
+is_trial(){ grep -q 'bridge_tryboot=1' "$PROC_CMDLINE"; }
+# The boot partition is vfat mounted with plain `defaults`: a write sits in the page cache for
+# up to ~30 s, and these bridges brown out and reset. Every change to it is synced before the
+# next step relies on it (2026-09-28).
+sync_boot(){ sync -f "$BOOT" 2>/dev/null || sync; }
 
 # A trial slot is healthy when the bridge is a working bridge AND can still be managed:
 #   media services up, the USB gadget bound, the tailnet up, and the fleet agent has completed
@@ -33,11 +40,22 @@ health_ok(){
   [ -f /run/bridge-agent/last-ok ] || return 1
   return 0
 }
-ota_status(){   # the result lands where the fleet can read it: /data/ota-staging/status.json
-  mkdir -p /data/ota-staging 2>/dev/null || return 0
-  printf '{"state":"%s","version":"%s","detail":"%s","ts":%s}\n' "$1" \
-    "$(cat /data/ota-staging/trial-version 2>/dev/null)" "$2" "$(date +%s)" \
-    > /data/ota-staging/status.json 2>/dev/null || true
+this_boot(){ cat "$BOOT_ID" 2>/dev/null; }
+# The result lands where the fleet can read it: /data/ota-staging/status.json. "boot" says which
+# boot wrote it, so a later boot can tell an update that is still running from one a restart cut
+# short (bridge-update.sh writes the same field).
+ota_field(){ sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" "$STAGE/status.json" 2>/dev/null; }
+ota_status(){
+  local v
+  mkdir -p "$STAGE" 2>/dev/null || return 0
+  v="$(cat "$STAGE/trial-version" 2>/dev/null)"; [ -n "$v" ] || v="$(ota_field version)"
+  printf '{"state":"%s","version":"%s","detail":"%s","ts":%s,"boot":"%s"}\n' "$1" "$v" "$2" "$(date +%s)" "$(this_boot)" \
+    > "$STAGE/status.json.tmp" 2>/dev/null && mv -f "$STAGE/status.json.tmp" "$STAGE/status.json" 2>/dev/null || true
+}
+# Forget a staged OS update: nothing may auto-commit a later, unrelated trial boot.
+disarm(){
+  rm -f "$BOOT/.ota-autocommit" "$TRYCMD" "$TRYBOOTTXT" "$STAGE/trial-version"
+  sync_boot
 }
 
 case "${1:-status}" in
@@ -53,38 +71,101 @@ case "${1:-status}" in
     exit 0   # status must never report failure just because no trial file exists
     ;;
   tryboot)
-    tgt="${2:?usage: bridge-ab tryboot <A|B>}"
+    tgt="$(printf '%s' "${2:?usage: bridge-ab tryboot <A|B>}" | tr ab AB)"
     tu=$(uuid_of_slot "$tgt"); [ -n "$tu" ] || { echo "bad slot '$tgt'"; exit 1; }
     # Build trial cmdline from the committed cmdline (which never carries the marker),
     # swap root=, append the trial marker.
-    sed "s/root=PARTUUID=[0-9a-fA-F-]*/root=PARTUUID=$tu/" "$CMDLINE" > /tmp/.cmdline.tryboot
-    sed -i 's/[[:space:]]*$/ bridge_tryboot=1/' /tmp/.cmdline.tryboot
-    cp /tmp/.cmdline.tryboot "$TRYCMD"; rm -f /tmp/.cmdline.tryboot
-    echo "trial cmdline -> slot ${tgt^^} (PARTUUID=$tu):"; cat "$TRYCMD"
+    # panic=10 on the TRIAL only (2026-09-28): without it a trial kernel that panics, or an
+    # initramfs that cannot mount the new root (initramfs-tools reboots from panic() only when
+    # panic= is set), hangs before systemd arms the hardware watchdog - and the one-shot fall
+    # back to the committed slot needs a reboot. With it the Pi reboots after 10 s and the
+    # firmware boots the committed slot, instead of a remote bridge waiting for a power-cycle.
+    sed -e "s/root=PARTUUID=[0-9a-fA-F-]*/root=PARTUUID=$tu/" \
+        -e 's/[[:space:]]*panic=[0-9-]*//g' \
+        -e 's/[[:space:]]*$/ panic=10 bridge_tryboot=1/' "$CMDLINE" > "$TRYCMD"
+    grep -q "root=PARTUUID=$tu .*bridge_tryboot=1" "$TRYCMD" 2>/dev/null \
+      || { rm -f "$TRYCMD"; echo "could not write $TRYCMD — not rebooting"; exit 1; }
+    echo "trial cmdline -> slot $tgt (PARTUUID=$tu):"; cat "$TRYCMD"
     # This firmware ignores the [tryboot] cmdline filter in config.txt, so regenerate a full
     # tryboot.txt (read INSTEAD of config.txt during a trial) from the LIVE config.txt so it
     # never goes stale, pointing the cmdline at cmdline.tryboot.
     { grep -v '^cmdline=' "$BOOT/config.txt"; printf '\n[all]\ncmdline=cmdline.tryboot\n'; } > "$TRYBOOTTXT"
     echo "regenerated $TRYBOOTTXT from live config.txt"
+    sync_boot
+    # An OS update's trial: say so where the fleet looks, so a trial that never finishes (power
+    # cut, reset) is told apart from one that never started (see healthcheck).
+    [ -s "$STAGE/trial-version" ] && ota_status rebooting "trial boot of slot $tgt"
     echo ">>> rebooting into TRYBOOT now (one-shot; a power-cycle rolls back to committed slot)"
     # systemd 257 ignores the positional `reboot "0 tryboot"` arg — must use --reboot-argument
     systemctl reboot --reboot-argument="0 tryboot"
     ;;
   commit)
     ru=$(running_uuid)
+    [ -n "$ru" ] || { echo "cannot read the running root from $PROC_CMDLINE — not committing"; exit 1; }
     is_trial || echo "note: not in a trial boot; committing the running slot anyway."
-    sed -i "s/root=PARTUUID=[0-9a-fA-F-]*/root=PARTUUID=$ru/; s/[[:space:]]*bridge_tryboot=1//g" "$CMDLINE"
+    # cmdline.txt is the ONLY kernel command line the committed slot has. It used to be edited
+    # in place with `sed -i` and never synced (2026-09-28): a reset inside the writeback window
+    # could leave it truncated, the kernel with no root=, and the bridge dead until the card was
+    # repaired by hand. Write a complete new file, put its data on the card, then move it over
+    # the old name and sync again - the old or the new file is on the card, never half of one.
+    sed -e "s/root=PARTUUID=[0-9a-fA-F-]*/root=PARTUUID=$ru/" -e 's/[[:space:]]*bridge_tryboot=1//g' \
+        "$CMDLINE" > "$CMDLINE.new" 2>/dev/null
+    if ! grep -q "root=PARTUUID=$ru" "$CMDLINE.new" 2>/dev/null; then
+      rm -f "$CMDLINE.new"; echo "could not write a new $CMDLINE — nothing committed"; exit 1
+    fi
+    sync_boot
+    mv -f "$CMDLINE.new" "$CMDLINE" || { rm -f "$CMDLINE.new"; echo "could not replace $CMDLINE — nothing committed"; exit 1; }
+    sync_boot
     rm -f "$TRYCMD" "$TRYBOOTTXT"
+    sync_boot
     echo "COMMITTED running slot $(slot_of_uuid "$ru") (PARTUUID=$ru) as permanent."
     echo "cmdline.txt now:"; cat "$CMDLINE"
+    # The OS update this trial came from is finished: say so, then forget it (a trial-version
+    # left behind used to make the next unrelated status carry an old version).
+    if is_trial && { [ -s "$STAGE/trial-version" ] || [ "${2:-}" = --ota ]; }; then
+      ota_status committed "slot $(slot_of_uuid "$ru") is now the permanent slot"
+      rm -f "$STAGE/trial-version"
+    fi
     ;;
   rollback)
     rm -f "$TRYCMD"
+    # A staged OS update ends here too: say so where the fleet looks, and forget it, so nothing
+    # auto-commits a later, unrelated trial boot (2026-09-28).
+    if [ -s "$STAGE/trial-version" ]; then
+      ota_status "rolled back" "rolled back by hand (bridge-ab rollback); the bridge restarts on slot $(slot_of_uuid "$(committed_uuid)")"
+    fi
+    disarm
     echo "rolling back: rebooting to committed slot $(slot_of_uuid "$(committed_uuid)")..."
     reboot
     ;;
   healthcheck)
-    if ! is_trial; then echo "normal boot — no trial to evaluate."; exit 0; fi
+    if ! is_trial; then
+      echo "normal boot — no trial to evaluate."
+      # An OS update this boot did not start, and that never reached its end (2026-09-28). A
+      # power cut in the seconds before the trial, or during it, lands here on the committed slot
+      # - and nothing used to say so: status.json stayed "staged" for good, so no alert fired,
+      # and the armed auto-commit waited to commit the next, unrelated trial boot. A status
+      # written in an EARLIER boot that is not a final state is over: report what happened, and
+      # disarm.
+      if [ "$(ota_field boot)" != "$(this_boot)" ]; then
+        here=$(slot_of_uuid "$(running_uuid)")
+        case "$(ota_field state)" in
+          rebooting)
+            ota_status "rolled back" "the trial boot never finished (power cut or reset); still on slot $here"
+            logger -t bridge-ab "OTA trial never finished — still on slot $here" ;;
+          staged|waiting|fetching|downloading|writing)
+            if [ -s "$STAGE/trial-version" ]; then why="restarted before the trial boot"
+            else why="restarted while the update was being installed"; fi
+            ota_status failed "the bridge $why; still on slot $here — install the update again"
+            logger -t bridge-ab "OTA: the bridge $why — still on slot $here" ;;
+        esac
+        if [ -e "$STAGE/trial-version" ] || [ -e "$BOOT/.ota-autocommit" ]; then
+          disarm
+          echo "a staged OS update never completed its trial — disarmed; still on slot $here."
+        fi
+      fi
+      exit 0
+    fi
     echo "TRYBOOT TRIAL on slot $(slot_of_uuid "$(running_uuid)") — health-checking up to 300s..."
     for i in $(seq 1 60); do
       if health_ok; then
@@ -93,8 +174,12 @@ case "${1:-status}" in
           rm -f "$BOOT/.ota-autocommit"
           logger -t bridge-ab "TRIAL HEALTHY + auto-commit armed — committing slot $(running_uuid)"
           echo "TRIAL HEALTHY — auto-committing (OTA)."
-          "$0" commit
-          ota_status committed "slot $(slot_of_uuid "$(running_uuid)") is now the permanent slot"
+          if ! "$0" commit --ota; then
+            # Not committed: the next restart boots the previous slot. Say so rather than
+            # leaving "rebooting" behind.
+            ota_status failed "slot $(slot_of_uuid "$(running_uuid)") was healthy but could not be made permanent (boot partition write failed); the next restart returns to the previous slot"
+            rm -f "$STAGE/trial-version"
+          fi
         else
           logger -t bridge-ab "TRIAL HEALTHY on $(running_uuid) — awaiting manual 'bridge-ab commit'"
           echo "TRIAL HEALTHY — run 'sudo bridge-ab commit' to persist, or power-cycle to roll back."
@@ -103,8 +188,8 @@ case "${1:-status}" in
       fi
       sleep 5
     done
-    rm -f "$BOOT/.ota-autocommit"
     ota_status "rolled back" "the new slot did not become healthy within 300 s; back on the previous slot"
+    disarm
     logger -t bridge-ab "TRIAL FAILED health-check — auto-rolling back (reboot)"
     echo "TRIAL FAILED — auto-rolling back."
     reboot

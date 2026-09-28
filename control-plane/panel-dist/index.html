@@ -850,6 +850,7 @@ function swCell(d){
   if (q.length) out.push(pill("warn", q.length + " rolled back", "Parked: " + q.join(", ")));
   if ((ov.active || []).length) out.push(pill("info", (ov.active || []).length + " update" + (ov.active.length === 1 ? "" : "s"), (ov.active || []).join(", ")));
   if ((ov.pending || []).length) out.push(pill("idle", (ov.pending || []).length + " waiting", "Applies at a safe moment: " + (ov.pending || []).join(", ")));
+  if ((ov.superseded || []).length) out.push(pill("idle", ov.superseded.length + " not in use", "Installed on another OS version, so this OS runs its own copy: " + ov.superseded.join(", ") + ". Deploy again to use one here."));
   if (ota.state && !["committed", "done", "idle", ""].includes(ota.state) && Date.now() - (parseTs(ota.ts) || 0) < 86400000)
     out.push(pill(/fail|rolled/.test(ota.state) ? "bad" : "info", "OS " + ota.state, (ota.version || "") + " " + (ota.detail || "")));
   return [h("div", {class: "cell"}, h("span", {class: "mono small", style: "white-space:nowrap"}, d.version || "?"), out.length ? h("div", {class: "pills"}, out) : null)];
@@ -1115,6 +1116,8 @@ function paintUpdatesTab(d){
     h("dt", {}, "Installed files"), h("dd", {}, !Array.isArray(ov.active) ? "not reported by this bridge's software (older image) — use “What code is it running?” below"
       : ov.active.length ? ov.active.join(", ") : "none — built-in files only"),
     h("dt", {}, "Waiting to apply"), h("dd", {}, !Array.isArray(ov.pending) ? "not reported" : ov.pending.length ? ov.pending.join(", ") : "nothing"),
+    h("dt", {}, "Not in use"), h("dd", {}, !Array.isArray(ov.superseded) ? "not reported" : ov.superseded.length
+      ? ov.superseded.join(", ") + " — installed on another OS version; this OS runs its own copy (deploy again to use one here)" : "nothing"),
     h("dt", {}, "Rolled back"), h("dd", {class: (t.quarantined || []).length ? "bad" : ""}, (t.quarantined || []).length ? t.quarantined.join(", ") : "nothing"),
     h("dt", {}, "Safe mode"), h("dd", {class: ov.safe_mode ? "bad" : ""}, ov.safe_mode ? "ON — every update is off this boot (" + (ov.boot_attempts || 0) + " unhealthy boots)"
       : Array.isArray(ov.active) ? "off" : "not reported"),
@@ -1476,7 +1479,8 @@ async function osUpdateDialog(preselected, presetVersion){
     body: [h("label", {class: "fl"}, "Version"), sel, h("label", {class: "fl"}, "On which bridges"), pick.el,
       old.length ? h("div", {class: "warnline", style: "margin-top:10px"}, old.map(devLabel).join(", ") + (old.length === 1 ? " runs" : " run")
         + " software older than 2.2, which cannot install an OS version remotely — flash " + (old.length === 1 ? "its card" : "their cards") + " with the 2.2 image instead.") : null,
-      h("p", {}, "The bridge downloads the OS into its spare slot, reboots into it (~1 min offline) and keeps it only if it comes back healthy and reaches the fleet — otherwise it switches back to the current OS by itself."),
+      h("p", {}, "The bridge downloads the OS into its spare slot and reboots into it once no meeting is in progress (~1 min offline). It keeps the new OS only if it comes back healthy and reaches the fleet — otherwise it switches back to the current OS by itself."),
+      h("p", {class: "hint"}, "Files updated on a bridge stay with its current OS: the new OS runs its own copies, except the voice and return-audio updates and the owner SSH key, which carry over. Deploy a file again afterwards if the new OS still needs it."),
       h("label", {class: "check"}, force, "Install even if a presenter is live (normally refused)")],
     ok: "Install and reboot", okClass: "danger",
     onOk: async () => {

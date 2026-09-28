@@ -19,6 +19,8 @@ echo "[build] snapshotting running root ($(findmnt -no PARTUUID /)) -> tar ..."
 # --one-file-system keeps us inside rootfs (skips /data, /boot/firmware, binds, virtual FS).
 # Explicitly exclude virtual/mount dirs too (quiets 'file changed' noise on /sys etc.).
 # Exclude the live version file so we can inject the new one; exclude machine-specific cruft.
+# The CI build record is left out too: a snapshot is not that build, and bridge-web would report
+# the running image's provenance for it (2026-09-28).
 # tar exits 1 on benign 'file changed as we read it'; tolerate <=1, fail on >=2 (real error).
 tar --one-file-system --numeric-owner --acls --xattrs \
     --warning=no-file-changed --warning=no-file-removed \
@@ -27,6 +29,7 @@ tar --one-file-system --numeric-owner --acls --xattrs \
     --exclude='./data' --exclude='./boot/firmware/*' \
     --exclude='./etc/NetworkManager/system-connections/*' \
     --exclude="./$VERFILE_REL" \
+    --exclude='./etc/netbridge-release.json' \
     --exclude='./lost+found' \
     --exclude='./var/cache/apt/archives/*.deb' \
     --exclude='./var/log/*' \
