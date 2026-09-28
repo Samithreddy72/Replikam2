@@ -189,17 +189,26 @@ check(hk is not None and row(r3["id"])[0] == "expired", "the 30 s housekeeping t
 print("\n  ---- a disruptive command queued for an offline bridge goes stale ----")
 old = issue("q3", "reboot", confirm=True).json()
 set_row(old["id"], created_at=ago(3 * 24 * 3600))       # queued on Friday, bridge back on Monday
+lk = issue("q3", "lock", confirm=True).json()
+set_row(lk["id"], created_at=ago(3 * 24 * 3600))        # an admin lock queued as long ago
 rd = issue("q3", "running").json()
 set_row(rd["id"], created_at=ago(3 * 24 * 3600))        # a read waits for its bridge, as before
 got = pull("q3")
 ids = [c["id"] for c in got]
 check(old["id"] not in ids, "the bridge coming back is NOT handed Friday's reboot", got)
 check(rd["id"] in ids, "…but a read queued as long ago is still delivered (queue-until-online stays)", ids)
+check(lk["id"] in ids and row(lk["id"])[0] == "sent",
+      "…and so is an admin lock: arriving late it still keeps people out, so it never goes stale", (ids, row(lk["id"])))
 st = row(old["id"])
 check(st[0] == "expired" and "never collected" in st[3], "…the reboot is expired, and says why", st)
 fresh = issue("q3", "restart").json()
 check(fresh["id"] in [c["id"] for c in pull("q3")], "a restart queued minutes ago is delivered normally")
 set_row(fresh["id"], status="done")
+late = issue("q3", "restart").json()
+set_row(late["id"], created_at=ago(2 * 3600))           # nothing sweeps between this and the poll:
+got3 = [c["id"] for c in pull("q3")]                    # a bridge back after a weekend polls first
+check(late["id"] not in got3 and row(late["id"])[0] == "expired",
+      "…and one gone stale is refused by the bridge's poll itself, before any sweep has run", (got3, row(late["id"])))
 uf = issue("q2", "update", {"version": "2.2.2-bbbbbbb", "force": True}, confirm=True).json()
 set_row(uf["id"], created_at=ago(2 * 3600))
 M._sweep_expired(SessionLocal())

@@ -127,17 +127,19 @@ TERMINAL_STATES = {"done", "succeeded", "failed", "rejected", "cancelled", "expi
 DEVICE_RESULT_STATES = ("done", "failed", "rejected")
 
 # Commands that interrupt a meeting the moment they run: media restarts (with the meeting laptop
-# attached those have rebooted under-powered bridges), a reboot, and a lock that ends the live
-# session. Two rules use this list (2026-09-28):
+# attached those have rebooted under-powered bridges) and a reboot. Two rules use this list
+# (2026-09-28):
 #   * one queued for a bridge that is offline goes STALE: it expires if the bridge has not
 #     collected it within STALE_UNCOLLECTED_S. Queue-until-online stays for everything else, but
 #     a reboot queued on a Friday ran on the Monday, on the bridge's first heartbeat - just as
 #     someone plugged the laptop in for a meeting.
-#   * a broadcast skips bridges with a meeting laptop attached or a presenter live (lock
-#     excepted: ending live sessions is what a broadcast lock is for).
+#   * a broadcast skips bridges with a meeting laptop attached or a presenter live.
+# A lock is deliberately NOT here: ending live sessions is what it is for, and one that reaches its
+# bridge late still does what the admin asked - keeps people out - so it neither goes stale nor
+# skips a busy bridge. Expiring it would quietly leave a bridge open that an admin locked.
 # A forced OS update counts too (_goes_stale): it skips the bridge's own "not during a meeting" check.
 INTERRUPTS_MEETING = {"reboot", "restart", "start", "stop", "profile", "reset-clock",
-                      "golden-restore", "jitter-fix", "jitter-reset", "lock"}
+                      "golden-restore", "jitter-fix", "jitter-reset"}
 STALE_UNCOLLECTED_S = 30 * 60
 
 
@@ -1379,8 +1381,7 @@ def broadcast_command(body: IssueCommandIn, actor=Depends(auth.require_admin),
     _sweep_expired(db)
     ids, skipped = [], []
     want = (body.args or {}).get("version") if body.type == "update" else None
-    # lock excepted: ending the live sessions is what a broadcast lock is for
-    interrupts = body.type != "lock" and _goes_stale(body.type, body.args)
+    interrupts = _goes_stale(body.type, body.args)      # a lock is not among them (INTERRUPTS_MEETING)
     for dev in db.scalars(select(Device).where(Device.org_id == actor.org)).all():
         name = bridge_title(dev)
         if dev.claimed_at is None:
