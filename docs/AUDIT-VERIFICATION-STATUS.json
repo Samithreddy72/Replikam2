@@ -7,9 +7,9 @@
       "severity": "medium",
       "title": "No request-body limit: anyone can crash the 1 GB fleet host with one large POST, because the whole body is read before login is checked",
       "file": "control-plane/deploy/aws/Caddyfile",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; full CI passed at 38980c0",
       "evidence": "tests/test-fleet-request-limits.py",
-      "note": "Bound JSON/upload bytes before parsing, including streamed/false-length bodies; total body deadline; proxy cap awaits actual Caddy validation."
+      "note": "Bound JSON/upload bytes before parsing, including streamed/false-length bodies; total body deadline; actual Caddy configuration validation passed in CI."
     },
     {
       "id": "B8",
@@ -43,7 +43,7 @@
       "severity": "medium",
       "title": "bridge-web has no connection timeout or thread cap: any device on the venue LAN can pin unlimited handler threads and block go-live",
       "file": "pi/scripts/bridge-web.py",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; full CI passed at 38980c0",
       "evidence": "tests/test-bridge-http-limits.py",
       "note": "Sixteen bridge handler slots, ten-second socket timeout and 16 KiB body limit; overload returns 503."
     },
@@ -241,7 +241,7 @@
       "severity": "high",
       "title": "A cross-site GET /api/checks tears down the live mesh helper (the CSRF guard only covers POST)",
       "file": "app/netbridge-source/source_app.py",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; full CI passed at 38980c0",
       "evidence": "tests/test-readonly-checks.py",
       "note": "Checks use read-only routes, never rebuilding the live mesh; cross-site checks refused."
     },
@@ -250,7 +250,7 @@
       "severity": "medium",
       "title": "Signing out during a live session leaves the camera and microphone captured, and the page no longer shows a way to stop them",
       "file": "app/netbridge-source/source_app.py",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; full CI passed at 38980c0",
       "evidence": "tests/test-presenter-session-boundaries.py; tests/test-app-pin-flow.py; tests/test-desktop-engine.py",
       "note": "Shared sign-out stops capture before dropping identity; duplicate Studio cleanup removed."
     },
@@ -268,7 +268,7 @@
       "severity": "medium",
       "title": "After a transport error the app resends the PIN up to three times, so one wrong PIN can lock the bridge for an hour",
       "file": "app/netbridge-source/source_app.py",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; full CI passed at 38980c0",
       "evidence": "tests/test-presenter-session-boundaries.py; tests/test-app-pin-flow.py; tests/test-desktop-engine.py",
       "note": "Retry only the read-only protocol probe. Once PIN POST is sent, an ambiguous response returns without automatic retry or helper rebuild."
     },
@@ -277,16 +277,16 @@
       "severity": "medium",
       "title": "The mesh helper's loopback control proxy (127.0.0.1:18080) lets any web page burn PIN tries under the presenter's mesh identity",
       "file": "app/netbridge-source/mesh/main.go",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; native CI pending",
+      "evidence": "app/netbridge-source/mesh/control_proxy_test.go",
+      "note": "Replace raw TCP forwarding with guarded HTTP. Reject browser metadata, untrusted Host, simple form writes and oversized bodies before mesh dial. Preserve native JSON calls without retrying lost PIN responses."
     },
     {
       "id": "B112",
       "severity": "medium",
       "title": "No Host-header check: a DNS-rebinding page can read the app's GET endpoints, including recorded meeting audio",
       "file": "app/netbridge-source/source_app.py",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; full CI passed at 38980c0",
       "evidence": "tests/test-readonly-checks.py",
       "note": "All local app GET/POST requests require a loopback Host; DNS-rebinding hostnames rejected before reading recordings or invoking handlers."
     },

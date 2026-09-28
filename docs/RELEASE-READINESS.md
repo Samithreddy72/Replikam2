@@ -16,7 +16,7 @@ No live commands, restarts, power changes, image flashes, Fleet deploys or app-c
 
 ## Automated evidence
 
-Checkpoint `f873976` passed [CI run 36470772365](https://github.com/Samithreddy72/Replikam2/actions/runs/36470772365): common suite 1657 checks, Linux media 11, Mac video encoder 9, desktop unit checks 3, and desktop build. These are separate jobs, not hardware certification. Later HTTP/security and power-guidance changes require their own complete CI result.
+Checkpoint `38980c0` passed [CI run 36473398285](https://github.com/Samithreddy72/Replikam2/actions/runs/36473398285): common suite 1673 checks, Linux media 11, Mac video encoder 9, desktop unit checks 3, desktop build and actual Caddy configuration validation. No skipped checks or missing results. These are separate jobs, not hardware certification. Subsequent mesh control hardening adds required native Go checks on Linux, Mac and Windows; its CI result must also pass before promotion.
 
 Targeted checks cover signed update tampering and recovery, wrong-product OS manifests, sleeping-laptop guards, fresh/complete idle evidence, bounded HTTP bodies and worker threads, DNS-rebinding refusal, CLI target selection, stale/malformed telemetry, and preserved PIN/audio controls. See WORKFLOW-IMPLEMENTATION.md for exact checkpoints. AUDIT-VERIFICATION-STATUS.json conservatively tracks all 93 high/medium historical findings after reviewer severity/refutation; an open entry is not silently marked fixed by a passing unrelated suite.
 

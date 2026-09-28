@@ -27,8 +27,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -324,34 +324,25 @@ func returnLeg(s *tsnet.Server, tsip string, port int) error {
 	return nil
 }
 
-// controlLeg accepts local TCP connections (the app's HTTP calls to the bridge) and
-// splices each to a fresh mesh connection to the bridge's control port. A new backend
-// conn per client keeps requests independent, which matters for the app's short,
-// sequential control calls.
+// controlLeg exposes only guarded HTTP; browser requests must never become
+// authenticated bridge requests merely because the presenter helper is running.
 func controlLeg(s *tsnet.Server, localPort, remotePort, bridge string) error {
 	ln, err := net.Listen("tcp", "127.0.0.1:"+localPort)
 	if err != nil {
 		return fmt.Errorf("local listen: %w", err)
 	}
+	server := &http.Server{
+		Handler:           controlProxy(localPort, net.JoinHostPort(bridge, remotePort), s.Dial),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       10 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
 	go func() {
 		defer ln.Close()
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(client net.Conn) {
-				defer client.Close()
-				back, err := s.Dial(context.Background(), "tcp", net.JoinHostPort(bridge, remotePort))
-				if err != nil {
-					return
-				}
-				defer back.Close()
-				done := make(chan struct{}, 2)
-				go func() { io.Copy(back, client); done <- struct{}{} }()
-				go func() { io.Copy(client, back); done <- struct{}{} }()
-				<-done
-			}(c)
+		if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
+			dbg("control server: %v", err)
 		}
 	}()
 	return nil

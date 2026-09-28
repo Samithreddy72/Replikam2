@@ -7,6 +7,24 @@ on:
 permissions:
   contents: read
 jobs:
+  mesh-control:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: app/netbridge-source/mesh/go.mod
+          cache-dependency-path: app/netbridge-source/mesh/go.sum
+      - name: Test native mesh control boundary
+        working-directory: app/netbridge-source/mesh
+        run: go test -race ./...
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

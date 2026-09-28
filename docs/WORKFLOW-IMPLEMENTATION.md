@@ -105,3 +105,12 @@ Fresh read-only live check (2026-09-28 19:26:52 UTC): NB-002 remains live on 2.1
 
 
 HTTP checkpoint dfde734 passed all CI jobs in run 36472001929: common 1670, Linux media 11, Mac encoder 9, desktop unit 3, desktop build and actual Caddy configuration validation. Presenter audit B106/B110 subsequently fixed: shared sign-out capture cleanup and no automatic retry of an ambiguous PIN POST. Two new boundary tests, 66 PIN-flow checks and 5 desktop boundary tests cover this change; these require the next full gate.
+
+
+## 29 September — mesh control browser boundary
+
+Checkpoint 38980c0 passed full CI: common 1673, Linux media 11, Mac encoder 9, desktop 3 plus build and Caddy validation. Logs are retained locally.
+
+B111: the helper previously forwarded arbitrary TCP from loopback to the bridge. It now parses HTTP, requires the exact local Host, rejects browser Origin/Referer/Fetch Metadata and upgrades, permits only native GET/JSON POST, bounds request bytes and deadlines, and dials only its configured bridge. Transport keep-alive is disabled so ambiguous PIN writes are not replayed. Tests cover hostile browser requests, legitimate responses and lost-response behavior; required Go race tests run on Mac, Windows and Linux. Full installer and live mesh acceptance remain separate. No live restart or deployment occurred.
+
+Implementation references: [Go ReverseProxy](https://pkg.go.dev/net/http/httputil#ReverseProxy) and [HTTP Server timeouts](https://pkg.go.dev/net/http#Server).
