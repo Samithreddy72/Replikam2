@@ -361,6 +361,44 @@ try:
     fin = [g for g in got if g[0] == "command" and g[1]["id"] == cid and g[1]["status"] == "done"]
     check(bool(fin) and fin[-1][1]["output"] == "all built-in", "…and its result and output arrive live too")
     stop.set()
+
+    # ---- one crafted Range header must not stall the server (CVE-2025-62727, 2026-09-28) ------------
+    # starlette 0.41.3 parsed this header in quadratic time on the only event loop, so every bridge
+    # heartbeat, sign-in and panel request waited behind a single anonymous request: the panel at
+    # "/" needs no login. Measured here: /healthz answers while the crafted request is in flight.
+    # 40 KB took ~5 s on 0.41.3; the cost grows with the square of the length.
+    import re, starlette
+    req = (BACKEND / "requirements.txt").read_text()
+    pins = dict(re.findall(r"^([A-Za-z0-9_.-]+)(?:\[[a-z,]+\])?==([0-9.]+)\s*$", req, re.M))
+    ver = lambda v: tuple(int(x) for x in v.split("."))
+    check(ver(pins.get("starlette", "0")) >= (1, 3, 1),
+          "starlette is pinned in its own right, at 1.3.1 or later (the last advisory's fix)", pins.get("starlette"))
+    check(ver(pins.get("python-multipart", "0")) >= (0, 0, 31),
+          "python-multipart is pinned at 0.0.31 or later (the last advisory's fix)", pins.get("python-multipart"))
+    check(starlette.__version__ == pins.get("starlette"),
+          "the server under test runs the pinned starlette (if not, rebuild the test venv from requirements.txt)",
+          (starlette.__version__, pins.get("starlette")))
+    evil = "bytes=" + "1" * 40000 + "x"
+    res = {}
+    def attack():
+        t0 = time.monotonic()
+        try:
+            r = httpx.get(BASE + "/", headers={"Range": evil}, timeout=120)
+            res["code"], res["body"] = r.status_code, r.text[:80]
+        except httpx.HTTPError as e:
+            res["code"] = repr(e)
+        res["took"] = time.monotonic() - t0
+    th3 = threading.Thread(target=attack, daemon=True); th3.start()
+    time.sleep(0.3)
+    t0 = time.monotonic(); hz = httpx.get(BASE + "/healthz", timeout=120); hz_took = time.monotonic() - t0
+    th3.join(120)
+    # The header must have reached the file server and been refused THERE (400, naming the Range
+    # header): a refusal by the HTTP parser in front of it would make the timing prove nothing.
+    check(res.get("code") == 400 and "range" in res.get("body", "").lower(),
+          "the crafted header reaches the app's file server, which refuses it", res)
+    check(hz.status_code == 200 and hz_took < 1.5 and res.get("took", 99) < 2.5,
+          "a 40 KB crafted Range header does not stall the server (healthz %.2f s, the request %.2f s, starlette %s)"
+          % (hz_took, res.get("took", -1), starlette.__version__), res)
 finally:
     srv.terminate()
     try:

@@ -111,7 +111,7 @@ NO_DOUBLE_EXECUTE = {"reboot", "restart", "update", "deploy-script", "revert-scr
 # A command in one of these has finished as far as the control plane is concerned. Nothing a
 # device says afterwards may overwrite it -- see command_result(). `pending` and `sent` are the
 # only states from which a result is accepted.
-TERMINAL_STATES = {"done", "succeeded", "failed", "rejected", "cancelled", "expired"}
+TERMINAL_STATES = models.COMMAND_TERMINAL_STATES   # one set, shared with the retention sweep
 
 
 def _refuse_by_policy(body) -> None:
@@ -585,8 +585,12 @@ def upload_diagnostics(body: dict, dev: Device = Depends(auth.require_device),
     if not data or len(data) > 5 * 1024 * 1024:
         raise HTTPException(400, "bundle empty or over 5MB")
     db.add(DiagBundle(device_id=dev.id, filename=filename, size=len(data), data=data))
+    # Flush first. The session runs with autoflush=False, so the query below could not see the
+    # row just added: "the newest 3" were the 3 newest OLD bundles, the new one was inserted on
+    # commit, and every device kept 4 (up to 20 MB inline in SQLite) instead of 3 (2026-09-28).
+    db.flush()
     keep = db.scalars(select(DiagBundle.id).where(DiagBundle.device_id == dev.id)
-                      .order_by(desc(DiagBundle.created_at)).limit(3)).all()
+                      .order_by(desc(DiagBundle.created_at), desc(DiagBundle.id)).limit(3)).all()
     db.query(DiagBundle).filter(DiagBundle.device_id == dev.id,
                                 ~DiagBundle.id.in_(keep)).delete(synchronize_session=False)
     db.commit()

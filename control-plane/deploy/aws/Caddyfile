@@ -1,7 +1,29 @@
+# Nothing this fleet serves needs a large request header: bearer and device tokens are well under
+# 1 KB. Go's default lets 1 MB through, and a header that size was the whole attack in
+# CVE-2025-62727 (a 60 KB Range header froze the app for 10 s). The app's own fix is the starlette
+# upgrade in backend/requirements.txt; this is the second wall (2026-09-28). A request with more
+# header than this is refused with 431 before it reaches the app.
+{
+	servers {
+		max_header_size 32KB
+	}
+}
+
 # Automatic HTTPS. Caddy obtains and renews the certificate from Let's Encrypt on its own,
 # which is why port 80 must stay open (the ACME challenge uses it) even though everything
 # real happens on 443.
 {$FLEET_DOMAIN} {
+	# A Range header reaches the app only in the one shape anything here sends: a single
+	# `bytes=N-` or `bytes=N-M` (curl -C - in bridge-update.sh resumes an OTA download with the
+	# first). Any other Range is removed, so the client gets the whole file with a 200, which every
+	# client handles. Defence in depth for the same CVE (2026-09-28). The pattern is written
+	# without {m,n} counts to keep braces, which mark blocks and placeholders here, out of it.
+	@badrange {
+		header Range *
+		not header_regexp Range ^bytes=[0-9]+-[0-9]*$
+	}
+	request_header @badrange -Range
+
 	# Compress everything EXCEPT the panel's live stream: a compressor holds bytes back until it
 	# has a block worth compressing, which turns "pushed within a second" into "whenever".
 	@compressible not path /admin/stream

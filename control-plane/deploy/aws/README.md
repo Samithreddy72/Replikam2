@@ -24,9 +24,12 @@ A bridge that cannot reach the old URL cannot be told about the new one.
    Port 80 must stay open — Caddy's certificate renewal uses it.
 2. DNS: `fleet.<yourdomain>` A record → the static IP.
 3. On the host: `sudo bash provision.sh`
-4. From the Mac: `./deploy.sh fleet.<yourdomain>`
-5. On the host: create `/opt/netbridge/.env` from `env.example` (chmod 600), then
-   `cd /opt/netbridge && docker compose up -d`
+4. On the host: create `/opt/netbridge/.env` from `env.example` (chmod 600).
+   It comes BEFORE the first deploy: without it every setting in the compose file is empty,
+   so deploy.sh refuses to run (Caddy would start with no site address).
+5. From the Mac: `DOMAIN=fleet.<yourdomain> ./deploy.sh fleet.<yourdomain>` - it builds, starts
+   both containers and checks what is live. DOMAIN is the name those checks ask; it defaults
+   to `fleet.scine.online`.
 
 ## After it is up
 
@@ -39,8 +42,38 @@ A bridge that cannot reach the old URL cannot be told about the new one.
 
 ## Updating later
 
-`./deploy.sh fleet.<yourdomain>` — builds locally, streams the image over ssh, restarts.
-No registry, no CI dependency.
+`./deploy.sh fleet.<yourdomain>` — sends this commit's source, builds the image ON THE HOST,
+switches to it and proves what is live. No registry, no CI dependency. In order:
+
+1. Refuses a dirty tree, a host without `.env`, and a commit that does not contain what
+   production runs, so an old worktree cannot silently undo later fixes. "What production
+   runs" is read from the fleet container over ssh, so it is known even while the app is down.
+   `ROLLBACK=1` deploys an older commit on purpose.
+2. Builds `netbridge-fleet:<commit>` from a fresh copy of the source.
+3. Backs up the database to `/data/bridge.db.pre-<commit>-<time>` - from the running app, or,
+   when the app is down or crash-looping, with a one-off container of the image just built.
+4. Validates the new compose file and Caddyfile, uploaded as `*.new` next to the live ones.
+   A failure at any step up to here changes nothing that is live.
+5. Only then switches: the build it replaces becomes `netbridge-fleet:previous` (when it was
+   serving), the new one becomes `latest`, Caddy reloads, and the live commit, panel and
+   `/admin/stream` are checked. If the app does not come up, the host's logs are printed.
+   Older `netbridge-fleet:<commit>` tags are then removed, so only the two builds that latest
+   and previous name stay on the host's disk.
+
+## Rolling back
+
+`./deploy.sh --rollback fleet.<yourdomain>` puts `netbridge-fleet:previous` back - the build
+that was serving before the last deploy - without building anything or checking anything out.
+A build that never served is never recorded as previous, so two failed deploys in a row still
+roll back to the last good one.
+
+To restore a database backup as well (the fleet is stopped while it is copied, and the database
+it replaces is kept as `/data/bridge.db.pre-restore-<time>`):
+
+    RESTORE_DB=bridge.db.pre-3f20cfa-20260925120000 ./deploy.sh --rollback fleet.<yourdomain>
+
+The rollback leaves the compose file and Caddyfile alone; `/opt/netbridge/Caddyfile.prev` holds
+the one from before the last deploy.
 
 ## Live deployment (2026-08-04)
 

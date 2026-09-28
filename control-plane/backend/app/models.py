@@ -137,6 +137,12 @@ class DiagBundle(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+# Command states from which nothing moves any more (main.command_result refuses to overwrite
+# them). The retention sweep reads the same set, so a state added here is pruned too: before
+# 2026-09-28 it listed its own four and kept `expired`, `cancelled` and `succeeded` rows forever.
+COMMAND_TERMINAL_STATES = {"done", "succeeded", "failed", "rejected", "cancelled", "expired"}
+
+
 class Command(Base):
     __tablename__ = "commands"
 
