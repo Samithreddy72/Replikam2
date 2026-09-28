@@ -27,3 +27,21 @@ test('Fleet health stays read-only and maintenance saves explicit choices',async
  expect(writes).toEqual([{path:'/admin/devices/a/operations',body:{site:'Conference room',notes:'Left USB port',maintenance_minutes:30,reason:'Planned inspection'}}]);
  expect(errors).toEqual([]);
 });
+
+test('Cancelling a baseline dialog never saves a baseline',async({page})=>{
+ const writes:string[]=[];
+ await page.route('http://fleet.test/**',async route=>{
+  const req=route.request();
+  if(new URL(req.url()).pathname==='/')return route.fulfill({contentType:'text/html',body:html});
+  if(req.method()==='POST')writes.push(req.url());
+  return route.fulfill({json:{}});
+ });
+ await page.goto('http://fleet.test/');
+ await page.evaluate(()=> (window as any).goldenSaveDialog({id:'a',name:'Room A'}));
+ const dialog=page.getByRole('dialog');
+ await expect(dialog.getByRole('button',{name:'Save verified baseline',exact:true})).toBeVisible();
+ await expect(dialog.getByRole('button',{name:'Save unconfirmed',exact:true})).toBeVisible();
+ await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+ await expect(dialog).toHaveCount(0);
+ expect(writes).toEqual([]);
+});

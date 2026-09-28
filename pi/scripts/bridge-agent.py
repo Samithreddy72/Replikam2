@@ -13,6 +13,7 @@ Config lives in /etc/default/bridge-agent:
     CONTROL_URL=https://control.example.ts.net   # control plane base URL (on the tailnet)
     BOOTSTRAP_TOKEN=...                           # one-time enroll token (injected at flash)
 """
+from http.client import HTTPException
 import json, os, re, ssl, subprocess, time, urllib.request, urllib.error, importlib.util
 
 CONF = "/etc/default/bridge-agent"
@@ -572,10 +573,10 @@ def apply_provision(base, token):
     keys are logged and ignored. Never raises into the tick."""
     try:
         resp = http("GET", base + "/v1/provision", token=token)
-    except urllib.error.URLError:
+    except (OSError, ValueError, HTTPException):
         return
-    payload = (resp or {}).get("provision")
-    if not payload:
+    payload = resp.get("provision") if isinstance(resp, dict) else None
+    if not isinstance(payload, dict) or not payload:
         return
     syslog("provision received: keys=%s" % ",".join(sorted(payload.keys())))
     # Accept BOTH spellings. The docs/schema/claim examples all say
@@ -583,14 +584,14 @@ def apply_provision(base, token):
     # `tailscale_authkey` — so a claim that followed the docs silently did
     # nothing and the bridge never joined the mesh. Take either, canonical first.
     key = payload.get("tailscale_auth_key") or payload.get("tailscale_authkey")
-    if key:
+    if isinstance(key, str) and key:
         # --timeout (2026-09-28): `tailscale up` otherwise blocks until the node is Running. When
         # the tailnet's control server is unreachable (a venue or ISP that blocks it) that is
         # forever, and the old 60 s cap outlived the unit's TimeoutStartSec=45, so systemd killed
         # every tick here. tailscaled keeps joining with the key after the CLI gives up waiting.
         argv = ["tailscale", "up", "--authkey", key, "--reset", "--timeout=%ds" % TAILSCALE_UP_WAIT_S]
         host = payload.get("tailscale_hostname") or payload.get("tailscale_host")
-        if host:
+        if isinstance(host, str) and host:
             argv += ["--hostname", host]
         try:
             p = subprocess.run(argv, capture_output=True, text=True, timeout=TAILSCALE_UP_WAIT_S + 10)

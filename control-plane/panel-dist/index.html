@@ -1696,7 +1696,7 @@ function goldenSaveDialog(d){
   // accident and the fleet then showed "known-good" for a state nobody had heard; everything
   // downstream (drift, golden-restore) is measured against that record. The device refuses to
   // overwrite a confirmed baseline with an unconfirmed one; this asks the one thing no device
-  // can check for itself. Declining is not blocked: it saves, recorded as UNCONFIRMED.
+  // can check for itself. An explicit separate action can save an unconfirmed snapshot; Cancel never saves.
   const cur = cfgState(d);
   const note = h("input", {type: "text", maxlength: "120", value: new Date().toISOString().slice(0, 10) + " "});
   const save = heard => {
@@ -1709,8 +1709,8 @@ function goldenSaveDialog(d){
       h("p", {}, "Confirm you have JUST verified this session:"),
       h("ul", {}, h("li", {}, "video is arriving"), h("li", {}, "the room can hear the presenter"), h("li", {}, "the presenter can hear the room"), h("li", {}, "no clicks, bursts or jitter you can hear")),
       h("label", {class: "fl"}, "Label — what you verified, and how"), note,
-      h("p", {class: "hint"}, "OK = yes, I verified it — save as a CONFIRMED baseline. Cancel = save it unconfirmed (recorded as such). × = don't save.")],
-    ok: "OK — verified", alt: "Cancel — save unconfirmed", cancel: null,
+      h("p", {class: "hint"}, "Save verified baseline only after checking all four items. Save unconfirmed records a snapshot without claiming it was tested. Cancel makes no change.")],
+    ok: "Save verified baseline", alt: "Save unconfirmed", cancel: "Cancel",
     onOk: () => save(true), onAlt: () => save(false)});
 }
 async function runDiagnosis(d){

@@ -25,9 +25,9 @@
       "severity": "medium",
       "title": "The drift check says IN SYNC when production runs a commit the local branch does not contain",
       "file": "tools/control-plane-drift-check.sh",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; full CI passed at 38980c0",
+      "evidence": "tests/test-drift-history.py",
+      "note": "Actual git histories verify that ahead/divergent or dirty deployed identities cannot be called IN SYNC."
     },
     {
       "id": "B24",
@@ -277,7 +277,7 @@
       "severity": "medium",
       "title": "The mesh helper's loopback control proxy (127.0.0.1:18080) lets any web page burn PIN tries under the presenter's mesh identity",
       "file": "app/netbridge-source/mesh/main.go",
-      "status": "implemented; native CI pending",
+      "status": "implemented; Mac/Windows/Linux race tests passed; full CI pending",
       "evidence": "app/netbridge-source/mesh/control_proxy_test.go",
       "note": "Replace raw TCP forwarding with guarded HTTP. Reject browser metadata, untrusted Host, simple form writes and oversized bodies before mesh dial. Preserve native JSON calls without retrying lost PIN responses."
     },
@@ -610,9 +610,9 @@
       "severity": "medium",
       "title": "The golden-save dialog's 'Cancel' button saves a baseline",
       "file": "control-plane/panel-dist/index.html",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; browser tests passed; full CI pending",
+      "evidence": "app/netbridge-desktop/tests/fleet-workflow.spec.ts",
+      "note": "Cancel closes without sending any command. Unconfirmed save has its own explicit label."
     },
     {
       "id": "B258",
@@ -799,9 +799,9 @@
       "severity": "medium",
       "title": "A slow /v1/provision crashes the agent tick (TimeoutError not caught), skipping the command pull",
       "file": "pi/scripts/bridge-agent.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-agent-provision-errors.py; tests/test-agent-background.py",
+      "note": "Commands already precede provisioning. Timeout, socket, truncated response and JSON failures now remain nonfatal; malformed payloads never invoke tailscale."
     },
     {
       "id": "B334",

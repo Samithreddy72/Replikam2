@@ -114,3 +114,8 @@ Checkpoint 38980c0 passed full CI: common 1673, Linux media 11, Mac encoder 9, d
 B111: the helper previously forwarded arbitrary TCP from loopback to the bridge. It now parses HTTP, requires the exact local Host, rejects browser Origin/Referer/Fetch Metadata and upgrades, permits only native GET/JSON POST, bounds request bytes and deadlines, and dials only its configured bridge. Transport keep-alive is disabled so ambiguous PIN writes are not replayed. Tests cover hostile browser requests, legitimate responses and lost-response behavior; required Go race tests run on Mac, Windows and Linux. Full installer and live mesh acceptance remain separate. No live restart or deployment occurred.
 
 Implementation references: [Go ReverseProxy](https://pkg.go.dev/net/http/httputil#ReverseProxy) and [HTTP Server timeouts](https://pkg.go.dev/net/http#Server).
+
+
+## 29 September — honest cancellation and provisioning failures
+
+B257: Fleet baseline Cancel now closes without a command; saving unconfirmed has a separate explicit button. Two local Chromium workflow tests pass, including no writes on Cancel; both are required in CI. B333: provisioning remains after command delivery and now tolerates socket timeout/reset, incomplete HTTP response and invalid JSON, and ignores malformed payloads. Three new isolated tests pass. No live provisioning or baseline command was issued. B20 was reconciled against its existing passing real-Git-history test.
