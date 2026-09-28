@@ -159,6 +159,24 @@ signature, and PIN lockout.
 
 An alert clears itself when the condition does.
 
+**When an alert is emailed** (2026-09-28). Every alert is recorded in the history the moment it
+appears; the email is what is held back, so one bridge cannot flood the inbox:
+
+- an alert is emailed once it has lasted a minute; offline once the bridge has been silent for
+  about 90 s, so a reboot is not an outage;
+- the same alert on the same bridge is emailed at most once per 15 minutes; a late one says it
+  keeps coming back;
+- RESOLVED is sent once the alert has stayed clear for a minute. Heat and USB misses clear below
+  72 °C and 12 per second, not the moment they dip under 75 °C and 15;
+- more than three messages at once arrive as one email. When no bridge is reporting at all it
+  says to check the venue's internet and the fleet's own address first;
+- while a bridge is offline its other alerts stay open: the fleet cannot see them, which is not
+  the same as fixed;
+- an unclaimed bridge is not emailed about, except once as "New bridge enrolled".
+
+The Alerts page says where alerts go (email, webhook, or nowhere yet) and warns when a channel is
+failing; the thresholds are env settings, listed in `control-plane/backend/.env.example`.
+
 > ⚠️ **Do not judge power health from the `throttled` field.** It reports the *instantaneous*
 > value and reads `0x0` even on a bridge that has been browning out all day. Only
 > `power.txt` and `flight.txt` inside a diagnostics bundle carry the sticky bits.

@@ -699,6 +699,9 @@ def golden_state():
         return {"state": "unknown", "error": str(e)[:120]}
 
 
+BOOT_ID_FILE = "/proc/sys/kernel/random/boot_id"
+
+
 def read(path):
     try:
         with open(path) as f:
@@ -855,6 +858,11 @@ def _gather_uncached():
     d["power"] = power_state(d["throttled"])
     d["wifi"] = wifi_dbm()
     d["uptime"] = _cached("uptime", 30, lambda: sh("uptime -p")).replace("up ", "")
+    # Which boot this is. The fleet counted reboots only from the restart counters falling, and a
+    # healthy bridge's counters read 0 before and after every brownout reset - so a bridge
+    # resetting every minute never raised its restart_storm alert (audit, 2026-09-28). The
+    # kernel's boot_id changes on every boot. One small file read, no program launched.
+    d["boot_id"] = _cached("boot_id", 3600, lambda: read(BOOT_ID_FILE))
     peer = ""
     for ln in read("/etc/default/bridge-return-audio").splitlines():
         if ln.startswith("RETURN_DEST_IP"):

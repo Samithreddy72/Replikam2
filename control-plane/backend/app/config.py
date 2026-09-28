@@ -85,12 +85,35 @@ class Settings:
     usb_miss_alert_per_s = _env_float("USB_MISS_ALERT_PER_S", 15)
     # Free space on the bridge's /data (overrides, logs, OTA staging, flight recorder).
     disk_low_mb = _env_int("DISK_LOW_MB", 500)
+    # Hysteresis: an OPEN usb_misses / temp_high alert only clears below these, not the moment
+    # the reading dips under the firing threshold. 15/s sits inside the measured freeze band
+    # (14-16/s), so a bridge in a meeting crossed it every tick and emailed FIRING/RESOLVED
+    # 9 times in 5 minutes (audit, 2026-09-28).
+    usb_miss_clear_per_s = _env_float("USB_MISS_CLEAR_PER_S", 12)
+    temp_clear_c = _env_float("TEMP_CLEAR_C", 72)
 
     # ── Alert delivery (notifier.py). All optional; unset = that channel off.
     # With NOTHING set, alerts are still detected and shown in the panel — they
     # just aren't pushed. This is the walkthrough's "page you by email or webhook".
     alert_eval_interval_s = _env_int("ALERT_EVAL_INTERVAL_S", 30)
+    # Storm control (alerting.py, 2026-09-28). An alert is recorded the moment it appears, but
+    # only emailed once it has lasted ALERT_NOTIFY_AFTER_S, and its episode only closes once it has
+    # stayed clear ALERT_CLEAR_AFTER_S - a reading that flickers across a threshold is one episode
+    # and one email, not one per tick. Offline is emailed once the bridge has been silent
+    # OFFLINE_AFTER_S + ALERT_OFFLINE_CONFIRM_S: a brownout reboot is silent for about a minute
+    # (boot, Wi-Fi, the agent's first tick 40 s after boot) and must not page. The same alert on
+    # the same bridge is emailed at most once per ALERT_REPEAT_S, and a pass with more than
+    # ALERT_DIGEST_OVER messages sends them as ONE digest (a fleet-wide outage is one email).
+    alert_notify_after_s = _env_int("ALERT_NOTIFY_AFTER_S", 60)
+    alert_offline_confirm_s = _env_int("ALERT_OFFLINE_CONFIRM_S", 30)
+    alert_clear_after_s = _env_int("ALERT_CLEAR_AFTER_S", 60)
+    alert_repeat_s = _env_int("ALERT_REPEAT_S", 900)
+    alert_digest_over = _env_int("ALERT_DIGEST_OVER", 3)
     alert_webhook_url = _env("ALERT_WEBHOOK_URL", "")   # POST JSON here (Slack/Discord/n8n/…)
+    # The organisation that runs this fleet. The alert channels (SMTP_*, ALERT_WEBHOOK_URL) are
+    # fleet-wide settings of that operator; other organisations' admins see only that alerts are
+    # delivered, never where to or why a channel is failing (2026-09-28).
+    operator_org = _env("OPERATOR_ORG", "default").strip() or "default"
     alert_webhook_format = _env("ALERT_WEBHOOK_FORMAT", "raw")  # slack | discord | raw
     smtp_host = _env("SMTP_HOST", "")
     smtp_port = _env_int("SMTP_PORT", 587)

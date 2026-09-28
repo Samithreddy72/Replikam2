@@ -352,10 +352,11 @@
       <div class="pagehead">
         <div>
           <h1>Alerts</h1>
-          <p class="lede">What needs you now, bridge by bridge, each with its fix, and every alert episode, a page at a time. Alerts are also emailed.</p>
+          <p class="lede" id="alLede">What needs you now, bridge by bridge, each with its fix, and every alert episode, a page at a time.</p>
         </div>
         <button class="btn ghost sm" id="testAlertBtn" type="button">Send a test alert</button>
       </div>
+      <div class="dangerline" id="alChanWarn" role="status" hidden></div>
       <div class="stats" id="alStats" aria-live="polite"></div>
       <div class="alayout">
         <aside class="card alist" aria-label="Alerts by bridge">
@@ -377,7 +378,7 @@
           </div>
           <div class="newbar" id="alNew" hidden><span id="alNewTxt"></span><button class="linkbtn" id="alNewBtn" type="button">Show the latest</button></div>
           <div class="card tablecard">
-            <table class="grid" id="alTable"><thead><tr><th class="c-bridge">Bridge</th><th>Alert</th><th>Detail</th><th>Started</th><th>Lasted</th><th>Emailed</th></tr></thead>
+            <table class="grid" id="alTable"><thead><tr><th class="c-bridge">Bridge</th><th>Alert</th><th>Detail</th><th>Started</th><th>Lasted</th><th>Notified</th></tr></thead>
               <tbody id="alRows"></tbody></table>
             <div id="alMsg" class="skeleton">Loading…</div>
           </div>
@@ -825,15 +826,19 @@ function pinCell(d){
   if (p.gate === "unavailable") out.push(pill("warn", "gate off", "The media gate could not be armed"));
   return [h("div", {class: "pills"}, out.length ? out : [h("span", {class: "faint"}, "—")])];
 }
+// Whether the fleet raised this alert on this bridge. The panel colours readings by the server's
+// alerts instead of its own copies of the thresholds (15/s, 75 °C, 500 MB), which are env
+// settings on the fleet and had already drifted from what the email said (2026-09-28).
+function hasAlert(d, kind){ return (d.alerts || []).some(a => a.kind === kind); }
 function healthCell(d){
   const t = T(d), pw = t.power || {}, out = [];
   if (d.state === "offline" || d.state === "new") return [h("span", {class: "faint"}, d.state === "new" ? "joined, not claimed" : "—")];
   if (pw.live) out.push(pill("bad", "⚡ browning out", pw.summary));
   else if (pw.ok === false) out.push(pill("warn", "⚡ has browned out", pw.summary));
   const um = t.usb_misses_per_s;
-  if (typeof um === "number") out.push(pill(um >= 15 ? "warn" : "idle", "USB " + um + "/s", "Missed USB video transfers per second (smooth video measured at 1–10/s)"));
+  if (typeof um === "number") out.push(pill(hasAlert(d, "usb_misses") ? "warn" : "idle", "USB " + um + "/s", "Missed USB video transfers per second (smooth video measured at 1–10/s)"));
   const temp = String(t.temp || "").replace("'C", "").replace("C", "");
-  if (temp) out.push(pill(parseFloat(temp) >= 75 ? "warn" : "idle", Math.round(parseFloat(temp)) + "°C"));
+  if (temp) out.push(pill(hasAlert(d, "temp_high") ? "warn" : "idle", Math.round(parseFloat(temp)) + "°C", hasAlert(d, "temp_high") ? "Running hot" : null));
   if (t.wifi) out.push(pill(parseInt(t.wifi, 10) < -75 ? "warn" : "idle", t.wifi + " dBm", "Wi-Fi signal"));
   const n = (d.alerts || []).length;
   if (n) out.push(pill("warn", n + " alert" + (n === 1 ? "" : "s")));
@@ -1001,10 +1006,10 @@ function paintDrawer(){
   kvSet("path", mp.via ? (mp.via === "direct" ? "Direct over the secure mesh" : mp.via === "relay" ? "Relayed (slower) over the secure mesh" : mp.via) + (mp.detail || mp.note ? " · " + (mp.detail || mp.note) : "") : (d.tailscale_ip ? "Mesh address " + d.tailscale_ip : "—"));
   kvSet("seen", d.online ? "Now (heartbeat every ~15 s)" : rel(parseTs(d.last_seen)) + (d.last_seen ? " · " + clock(parseTs(d.last_seen)) : ""));
   kvSet("power", pw.live ? "Browning out NOW — " + (pw.summary || "") : pw.ok === false ? "Has browned out — " + (pw.summary || "") : pw.ok ? "OK" : (t.throttled || "—"), pw.live ? "bad" : "");
-  kvSet("usb", typeof t.usb_misses_per_s === "number" ? t.usb_misses_per_s + " missed transfers/s " + (t.usb_misses_per_s >= 15 ? "— video freezes likely" : "(smooth is 1–10/s)") : "—");
-  kvSet("temp", t.temp ? String(t.temp).replace("'C", " °C") : "—");
+  kvSet("usb", typeof t.usb_misses_per_s === "number" ? t.usb_misses_per_s + " missed transfers/s " + (hasAlert(d, "usb_misses") ? "— video freezes likely" : "(smooth is 1–10/s)") : "—");
+  kvSet("temp", t.temp ? String(t.temp).replace("'C", " °C") + (hasAlert(d, "temp_high") ? " — running hot" : "") : "—", hasAlert(d, "temp_high") ? "bad" : "");
   kvSet("wifi", t.wifi ? t.wifi + " dBm" : "—");
-  kvSet("disk", typeof t.data_free_mb === "number" ? t.data_free_mb + " MB" : "—", typeof t.data_free_mb === "number" && t.data_free_mb < 500 ? "bad" : "");
+  kvSet("disk", typeof t.data_free_mb === "number" ? t.data_free_mb + " MB" : "—", hasAlert(d, "disk_low") ? "bad" : "");
   kvSet("upfor", t.uptime || "—");
   kvSet("services", (t.services || []).map(([n, s]) => n.replace("bridge-", "") + " " + s).join(" · ") || "—");
   kvSet("version", d.version || "?");
@@ -1700,7 +1705,8 @@ function paintAlertRows(){
       h("td", {}, h("span", {class: "sev " + (e.severity || "warning")}, h("span", {class: "dot"}), e.title || ALERT_LABEL[e.kind] || e.kind)),
       h("td", {class: "small c-detail"}, e.detail || "—"),
       h("td", {class: "small muted c-when", title: e.opened_at ? new Date(parseTs(e.opened_at)).toString() : null}, clock(parseTs(e.opened_at))),
-      h("td", {}, open ? pill(e.severity === "critical" ? "bad" : "warn", "open · " + dur(secs))
+      h("td", {}, e.severity === "info" ? h("span", {class: "small muted"}, "—")          // a record (a bridge joined), not a problem
+        : open ? pill(e.severity === "critical" ? "bad" : "warn", "open · " + dur(secs))
         : h("span", {class: "small muted", title: "resolved " + clock(parseTs(e.resolved_at))}, dur(secs))),
       h("td", {class: "small"}, e.notified ? "yes" : "—"));
   }));
@@ -1736,13 +1742,38 @@ async function loadAlertPage(scroll){
   AL.loading = false; paintAlertRows();
   if (scroll){ const y = $("alHistTitle").getBoundingClientRect().top + window.scrollY - 76; if (window.scrollY > y) window.scrollTo({top: y, behavior: "smooth"}); }
 }
+// Where alerts go, from the fleet itself (2026-09-28): the lede promised "Alerts are also emailed"
+// on a fleet with no channel at all, and nothing said when email was failing.
+async function loadAlertChannels(){
+  try { AL.ch = await api("/admin/alerts/channels"); } catch (e) { if (e.message === "auth") return; AL.ch = null; }
+  paintAlertChannels();
+}
+function paintAlertChannels(){
+  const c = AL.ch;
+  let where = "", warn = "";
+  if (c){
+    const e = c.email || {}, w = c.webhook || {};
+    const to = [e.configured ? "emailed to " + (e.target || "the alert address") : null,
+                w.configured ? "sent to your webhook" + (w.target ? " (" + w.target + ")" : "") : null].filter(Boolean);
+    where = c.managed ? (c.any ? " Alerts are also delivered through the fleet operator's alert channels." : "")
+      : to.length ? " Alerts are also " + to.join(" and ") + "."
+      : " No alert channel is set up, so alerts show only here: set SMTP_* or ALERT_WEBHOOK_URL on the fleet, then send a test alert.";
+    const bad = [["Alert email", e], ["The alert webhook", w]].filter(([, x]) => x.configured && (x.failing || x.warning));
+    warn = bad.map(([n, x]) => n + (x.failing ? (x.failing_since ? " has been failing since " + clock(parseTs(x.failing_since)) : " is failing")
+        + (x.last_error ? ": " + x.last_error : "") + (x.next_try_at ? " (next try " + clock(parseTs(x.next_try_at)) + ")" : "")
+        : ": " + x.warning) + ".").join(" ");
+    if (warn) warn += " Alerts are kept and sent once it works again.";
+  }
+  setText($("alLede"), "What needs you now, bridge by bridge, each with its fix, and every alert episode, a page at a time." + where);
+  $("alChanWarn").hidden = !warn; setText($("alChanWarn"), warn);
+}
 function openAlerts(bridge){                         // route: #/alerts or #/alerts/<device id>
   bridge = bridge || null;
   const changed = AL.bridge !== bridge;
   AL.bridge = bridge;
   if (changed){ AL.page = 1; AL.data = null; AL.fresh = 0; }
   paintAlertSummary(); paintAlertRows();
-  loadAlertSummary();
+  loadAlertSummary(); loadAlertChannels();
   if (changed || AL.stale || !AL.data){ AL.stale = false; loadAlertPage(); }
 }
 // Stream hooks
@@ -1771,11 +1802,12 @@ $("alSize").addEventListener("change", (e) => { AL.size = parseInt(e.target.valu
 $("alPrev").addEventListener("click", () => { if (AL.page > 1){ AL.page--; loadAlertPage(true); } });
 $("alNext").addEventListener("click", () => { if (AL.data && AL.data.has_next){ AL.page++; loadAlertPage(true); } });
 $("alNewBtn").addEventListener("click", () => { AL.page = 1; loadAlertPage(true); });
-setInterval(() => { if (ADMIN && PAGE === "alerts" && !document.hidden){ loadAlertSummary(); paintAlertRows(); } }, 60000);
+setInterval(() => { if (ADMIN && PAGE === "alerts" && !document.hidden){ loadAlertSummary(); loadAlertChannels(); paintAlertRows(); } }, 60000);
 $("testAlertBtn").addEventListener("click", async () => {
   try { const r = await api("/admin/alerts/test", {method: "POST"});
     const sent = Object.entries(r.sent || {}).map(([k, v]) => k + (v ? " ✓" : " ✗")).join(", ");
     toast(r.ok ? "Test alert sent: " + sent : "No channel delivered it: " + (sent || "none configured"), r.ok ? "ok" : "bad");
+    if (r.channels){ AL.ch = r.channels; paintAlertChannels(); }
   } catch (e) { if (e.message !== "auth") toast("Test failed: " + e.message, "bad"); }
 });
 

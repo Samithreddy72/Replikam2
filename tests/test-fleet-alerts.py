@@ -71,7 +71,8 @@ TIE = NOW - dt.timedelta(hours=30)
 for _ in range(3):                                # three B episodes opened at the same instant (id breaks the tie)
     SEED.append(("dev-b", "disk_low", TIE, TIE + dt.timedelta(minutes=1)))
 SEED.append(("dev-a", "pin_not_set", NOW - dt.timedelta(hours=3), None))   # still open (A is firing pin_not_set)
-SEED.append(("dev-c", "offline", NOW - dt.timedelta(hours=5), None))       # still open
+# An unclaimed bridge is not watched (2026-09-28): the alert loop keeps no open episode for it.
+SEED.append(("dev-c", "offline", NOW - dt.timedelta(hours=5), NOW - dt.timedelta(hours=4)))
 SEED.append(("dev-b", "usb_misses", NOW - dt.timedelta(hours=2), None))    # still open (B is firing usb_misses)
 # Every alert that is firing has its open episode seeded, so the server's own alert loop (it runs once
 # at start-up) finds nothing new to open or resolve and the counts below stay exact.
@@ -155,10 +156,10 @@ try:
     check(ra["total"] == len(a_all) and {i["device_id"] for i in ra["items"]} == {"dev-a"},
           "one bridge: only its episodes (%d)" % len(a_all), ra["total"])
     ro = ep(status="open", page_size=100)
-    check(ro["total"] == 3 and {(i["device_id"], i["kind"]) for i in ro["items"]} == {("dev-a", "pin_not_set"), ("dev-c", "offline"), ("dev-b", "usb_misses")},
-          "open: exactly the three unresolved episodes", [(i["device_id"], i["kind"]) for i in ro["items"]])
+    check(ro["total"] == 2 and {(i["device_id"], i["kind"]) for i in ro["items"]} == {("dev-a", "pin_not_set"), ("dev-b", "usb_misses")},
+          "open: exactly the two unresolved episodes", [(i["device_id"], i["kind"]) for i in ro["items"]])
     rr = ep(status="resolved")
-    check(rr["total"] == len(MINE) - 3 and rr["counts"] == {"open": 3, "resolved": len(MINE) - 3, "all": len(MINE)},
+    check(rr["total"] == len(MINE) - 2 and rr["counts"] == {"open": 2, "resolved": len(MINE) - 2, "all": len(MINE)},
           "resolved: the rest, and the counts for the segmented control add up", rr["counts"])
     crit = ep(severity="critical", page_size=100)
     check(crit["total"] == sum(1 for s in MINE if s[1] in notifier.CRITICAL_KINDS) and all(i["severity"] == "critical" and i["kind"] in notifier.CRITICAL_KINDS for i in crit["items"]),
@@ -179,7 +180,7 @@ try:
           "a resolved episode: exact duration, times in UTC with an offset", newest_a)
     op = [i for i in ro["items"] if i["device_id"] == "dev-a"][0]
     check(abs(op["duration_s"] - 3 * 3600) < 120 and op["resolved_at"] is None, "an open episode: duration so far, no resolved time", op)
-    check(op["device"] == "NB-001 · Hall" and [i for i in ro["items"] if i["device_id"] == "dev-c"][0]["device"] == "BRIDGE-CCCC",
+    check(op["device"] == "NB-001 · Hall" and ep(device_id="dev-c")["items"][0]["device"] == "BRIDGE-CCCC",
           "the bridge is named the way the panel names it (NB-001 · Hall; an unclaimed one by its code)")
     check(newest_a["notified"] is True, "emailed or not is carried through")
 
@@ -262,8 +263,9 @@ try:
     notifier._send_email(notifier.build_message(AL.bridge_title(D_), D_.id, "offline", "no heartbeat", "resolved", None))
     body = sent[0].get_content() if sent else ""
     check(len(sent) == 2 and sent[0]["Subject"] == "[NetBridge CRITICAL] NB-001 · Hall — No PIN set"
-          and sent[1]["Subject"] == "[NetBridge CRITICAL] NB-001 · Hall — Offline (resolved)",
-          "email subjects: severity, NB-001 · Hall, the readable title, (resolved)", [m["Subject"] for m in sent])
+          and sent[1]["Subject"] == "[NetBridge RESOLVED] NB-001 · Hall — Offline",
+          "email subjects: severity, NB-001 · Hall, the readable title; a recovery leads with RESOLVED, no severity",
+          [m["Subject"] for m in sent])
     check("Fix    : Set a PIN…  (one click in the fleet panel)" in body and "1. Every bridge needs a PIN" in body,
           "the email carries the fix and its numbered steps", body[-300:])
 

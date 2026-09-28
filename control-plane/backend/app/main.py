@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import Base, engine, get_db
 from . import auth, models, notifier
-from .alerts import device_alerts, is_online, alert_fix, bridge_title
+from .alerts import device_alerts, is_online, HISTORY_KINDS, history_alert, unreadable_alert
 from .models import (Device, Telemetry, Command, DiagBundle, User, AuditLog,
                      Rollout, RolloutTarget, utcnow)
 from .schemas import (EnrollIn, EnrollOut, CommandOut, CommandResultIn,
@@ -367,6 +367,14 @@ def _migrate():
                 conn.execute(_text("ALTER TABLE commands ADD COLUMN timeout_s INTEGER DEFAULT 120"))
             if "fail_reason" not in ccols:
                 conn.execute(_text("ALTER TABLE commands ADD COLUMN fail_reason VARCHAR"))
+        # Alert storm control (2026-09-28): an episode closes only once its alert has stayed
+        # clear for a while. Nullable, so every existing episode reads as "firing" / resolved.
+        if "alert_events" in insp.get_table_names():
+            if "clear_since" not in cols("alert_events"):
+                conn.execute(_text("ALTER TABLE alert_events ADD COLUMN clear_since DATETIME"))
+            # A bridge's open episodes, read every second by the panel's stream (models.AlertEvent).
+            conn.execute(_text("CREATE INDEX IF NOT EXISTS ix_alert_events_device_resolved "
+                               "ON alert_events (device_id, resolved_at)"))
 _migrate()
 
 
@@ -519,32 +527,31 @@ def enroll(body: EnrollIn, db: Session = Depends(get_db)):
     db.commit()
     # A brand-new device_id = a new SD card contacting the fleet for the first time.
     # That is not a "fault" the level-triggered alert loop would ever catch (a healthy
-    # card firing nothing), so page it here, once, as its own edge event.
+    # card firing nothing), so record it here, once, as its own edge event.
     if is_new:
-        _notify_new_device(db, dev)
+        _record_new_device(db, dev)
     return EnrollOut(device_id=dev.id, device_token=token)
 
 
-def _notify_new_device(db, dev):
-    """Email/webhook a one-time 'new SD card enrolled' alert. Best-effort: a delivery
-    failure must never break enrollment (the card still gets its token)."""
+def _record_new_device(db, dev):
+    """Record a one-time 'new SD card enrolled' event; the alert loop emails it (within one
+    ALERT_EVAL_INTERVAL_S, as one digest when a factory run enrols many at once).
+
+    It used to be emailed right here, between the INSERT and the COMMIT: SQLite held its write
+    lock for the whole send (up to 8 s webhook + 10 s SMTP), so every other bridge's heartbeat and
+    command pull in that window failed with "database is locked" after 5 s (audit, 2026-09-28).
+    And it was stored OPEN, so the loop "resolved" it on its next pass and emailed a RESOLVED for
+    a card that had simply joined. It is a record, not a problem: born resolved. Best-effort: a
+    failure here must never break enrollment (the card still gets its token)."""
     import logging
     from .models import AlertEvent
-    log = logging.getLogger("main")
     try:
-        detail = "new SD card enrolled: %s (v%s)" % (dev.hostname or dev.id, dev.version or "?")
-        ev = AlertEvent(device_id=dev.id, kind="new_device", detail=detail)
-        db.add(ev)
-        db.flush()
-        if notifier.any_channel_configured():
-            payload = notifier.build_message(
-                bridge_title(dev), dev.id,
-                "new_device", detail, "firing", alert_fix("new_device", dev))
-            if any(notifier.deliver(payload).values()):
-                ev.notified_at = utcnow()
+        now = utcnow()
+        db.add(AlertEvent(device_id=dev.id, kind="new_device", opened_at=now, resolved_at=now,
+                          detail="new SD card enrolled: %s (v%s)" % (dev.hostname or dev.id, dev.version or "?")))
         db.commit()
     except Exception:
-        log.exception("new-device alert failed for %s", getattr(dev, "id", "?"))
+        logging.getLogger("main").exception("new-device record failed for %s", getattr(dev, "id", "?"))
         db.rollback()
 
 
@@ -778,20 +785,53 @@ def _device_state(dev: Device, online: bool, alerts: list) -> str:
     return "degraded" if alerts else "active"
 
 
-def _safe_alerts(dev: Device) -> list:
+def _open_episodes(db, ids) -> dict:
+    """{device_id: {kind: its open, still-firing AlertEvent}} in one query. The panel reads two
+    things from it, both exactly as the alert loop sees them (2026-09-28):
+      - which alerts are held open by hysteresis: at 73 °C an open "Running hot" stays open until
+        the bridge is under 72 °C, so the panel must not call it fine at 73 while the email has
+        not said RESOLVED;
+      - the alerts only the loop can compute (restart_storm, from telemetry history): it was
+        emailed CRITICAL while the panel said "Active" and "Nothing needs you right now"."""
+    from .models import AlertEvent
+    out = {}
+    if ids:
+        for e in db.scalars(select(AlertEvent).where(AlertEvent.device_id.in_(list(ids)),
+                                                     AlertEvent.resolved_at.is_(None),
+                                                     AlertEvent.clear_since.is_(None))
+                            .order_by(AlertEvent.id)).all():
+            out.setdefault(e.device_id, {}).setdefault(e.kind, e)
+    return out
+
+
+def _safe_alerts(dev: Device, eps=None) -> list:
+    """Everything wrong with a bridge now: its snapshot alerts (with the loop's hysteresis), plus a
+    restart storm the alert loop has open for it. `eps` = the _open_episodes() map when the caller
+    fetched it for many bridges at once; otherwise this bridge's is looked up here."""
+    if eps is None:
+        from sqlalchemy.orm import object_session
+        db = object_session(dev)
+        eps = _open_episodes(db, [dev.id]) if db is not None else {}
+    mine = eps.get(dev.id, {})
     try:
-        return device_alerts(dev)
+        alerts = device_alerts(dev, sticky=frozenset(mine))
     except Exception as e:                  # malformed telemetry from one bridge
         print("[alerts] could not evaluate %s: %r" % (dev.id, e))
-        return [{"kind": "telemetry_unreadable", "title": notifier.alert_title("telemetry_unreadable"),
-                 "severity": notifier._severity("telemetry_unreadable"),
-                 "detail": "this bridge sent telemetry the fleet could not read",
-                 "fix": alert_fix("telemetry_unreadable", dev)}]
+        alerts = [unreadable_alert(dev)]
+    # Offline shows only offline, as device_alerts does.
+    if any(a["kind"] == "offline" for a in alerts):
+        return alerts
+    have = {a["kind"] for a in alerts}
+    for kind, e in mine.items():
+        if kind in HISTORY_KINDS and kind not in have:
+            alerts.append(history_alert(dev, e))
+            have.add(kind)
+    return alerts
 
 
-def _device_view(dev: Device) -> dict:
+def _device_view(dev: Device, eps=None) -> dict:
     online = is_online(dev)
-    alerts = _safe_alerts(dev)
+    alerts = _safe_alerts(dev, eps)
     t = dev.latest if isinstance(dev.latest, dict) else {}
     return {
         "id": dev.id,
@@ -817,7 +857,8 @@ def _device_view(dev: Device) -> dict:
 def list_devices(actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
     devs = db.scalars(select(Device).where(Device.org_id == actor.org)
                       .order_by(Device.name.is_(None), Device.name)).all()
-    return [_device_view(d) for d in devs]
+    eps = _open_episodes(db, [d.id for d in devs])
+    return [_device_view(d, eps) for d in devs]
 
 
 @app.get("/admin/devices/{device_id}")
@@ -1451,8 +1492,10 @@ def broadcast_command(body: IssueCommandIn, actor=Depends(auth.require_admin),
 @app.get("/admin/alerts")
 def all_alerts(actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
     out = []
-    for dev in db.scalars(select(Device).where(Device.org_id == actor.org)).all():
-        for a in _safe_alerts(dev):
+    devs = db.scalars(select(Device).where(Device.org_id == actor.org)).all()
+    eps = _open_episodes(db, [d.id for d in devs])
+    for dev in devs:
+        for a in _safe_alerts(dev, eps):
             out.append({"device_id": dev.id, "name": dev.name, **a})
     return out
 
@@ -1889,7 +1932,7 @@ def alerts_history(actor=Depends(auth.require_admin), db: Session = Depends(get_
 #   /admin/alerts/episodes  the full history, a page at a time, by bridge / state / severity / kind
 # The live stream still pushes each episode as it opens or resolves; the panel uses those as the
 # signal to refresh the page it is showing.
-INFO_KINDS = frozenset(("new_device",))          # a record, not a problem
+INFO_KINDS = notifier.INFO_KINDS                 # records, not problems: the same list the email uses
 
 
 def _alert_severity(kind: str) -> str:
@@ -1937,9 +1980,10 @@ def alerts_by_bridge(actor=Depends(auth.require_admin), db: Session = Depends(ge
                                     .group_by(AlertEvent.device_id)).all():
             last[dev_id] = t
     rows = []
+    eps = _open_episodes(db, ids)
     for d in devs:
         online = is_online(d)
-        alerts = _safe_alerts(d)
+        alerts = _safe_alerts(d, eps)
         firing = [{"kind": a["kind"], "title": notifier.alert_title(a["kind"]), "severity": _alert_severity(a["kind"]),
                    "detail": a.get("detail"),
                    "fix": a.get("fix"), "since": _iso(since.get((d.id, a["kind"])))} for a in alerts]
@@ -2014,18 +2058,32 @@ def alert_episodes(device_id: str | None = Query(None, max_length=128),
 
 @app.post("/admin/alerts/test")
 def alerts_test(who=Depends(auth.require_admin)):
-    """Send a synthetic alert through every configured channel, so an admin can
+    """Send a test message through every configured channel, so an admin can
     confirm their webhook/email is wired WITHOUT unplugging a bridge to trigger a
-    real one. Reports exactly which channels fired."""
+    real one. Reports exactly which channels fired.
+
+    Its own kind and severity, "[NetBridge TEST] Alert channel check from <admin>": it used to be
+    a CRITICAL "offline" page for a bridge called test-bridge (audit, 2026-09-28). It is tried even
+    on a channel that is backing off after failures - the admin is asking whether it works now."""
     from . import notifier
     if not notifier.any_channel_configured():
         raise HTTPException(400, "no alert channel configured — set ALERT_WEBHOOK_URL or SMTP_*")
-    payload = notifier.build_message(
-        "test-bridge", "TEST", "offline",
-        "this is a NetBridge test alert sent by %s" % who, "firing",
-        {"command": "none", "label": "no action — test only"})
-    results = notifier.deliver(payload)
-    return {"sent": results, "ok": any(results.values())}
+    results = notifier.deliver(notifier.build_test_message(getattr(who, "email", None) or str(who)), force=True)
+    return {"sent": results, "ok": any(results.values()), "channels": notifier.channel_status()}
+
+
+@app.get("/admin/alerts/channels")
+def alerts_channels(actor=Depends(auth.require_admin)):
+    """Where alerts go and whether that works: email / webhook configured, failing since when,
+    the last error and the next attempt. The panel said "Alerts are also emailed" when nothing was
+    configured, and nothing anywhere said that email was failing (audit, 2026-09-28). No secrets:
+    the webhook shows only its host, the recipient is masked. The channels belong to the fleet's
+    operator (OPERATOR_ORG): another organisation's admin learns only whether alerts are delivered."""
+    st = notifier.channel_status()
+    if actor.org != settings.operator_org:
+        return {"any": st["any"], "managed": True,
+                "email": {"configured": st["email"]["configured"]}, "webhook": {"configured": st["webhook"]["configured"]}}
+    return st
 
 
 # ----------------------------- live stream for the panel -----------------------------
@@ -2068,7 +2126,8 @@ async def admin_stream(request: Request, actor=Depends(auth.require_admin)):
             devs = db.scalars(select(Device).where(Device.org_id == org)).all()
             names = {d.id: " ".join(x for x in (fleet_label(d.number), d.name or d.pairing_code or d.id) if x)
                      for d in devs}
-            dviews = {d.id: _device_view(d) for d in devs}
+            eps = _open_episodes(db, [d.id for d in devs])
+            dviews = {d.id: _device_view(d, eps) for d in devs}
             ids = list(dviews)
             cviews, aviews = {}, {}
             if ids:

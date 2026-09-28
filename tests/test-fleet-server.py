@@ -287,9 +287,12 @@ try:
 
     # ---- a slow mail server must not lock the database for everyone else ----------------------------
     from app import alerting as AL, notifier as NT
+    from app.config import settings as ST
+    from app.models import AlertEvent as _AE
     tel(ids[1], temp="91.0'C")                                  # a fresh alert for the loop to email
-    orig = (NT.any_channel_configured, NT.deliver)
+    orig = (NT.any_channel_configured, NT.deliver, getattr(ST, "alert_notify_after_s", 0))
     NT.any_channel_configured = lambda: True
+    ST.alert_notify_after_s = 0                                 # email it on this pass (no hold)
     NT.deliver = lambda payload: (time.sleep(6), {"email": True})[1]     # 6 s > SQLite's 5 s lock wait
     done = {}
     def run_eval():
@@ -302,10 +305,13 @@ try:
     time.sleep(1.0)                                             # the loop is now inside the "email"
     t0 = time.monotonic(); r = tel(ids[0]); took = time.monotonic() - t0
     th2.join(30)
-    NT.any_channel_configured, NT.deliver = orig
+    NT.any_channel_configured, NT.deliver, ST.alert_notify_after_s = orig
     check(r.status_code == 200 and took < 3, "a bridge's heartbeat is saved at once while an alert email is being sent (%.1f s)" % took,
           (r.status_code, r.text[:120]))
-    check(done.get("stats", {}).get("notified", 0) >= 1, "…and the alert was still emailed and recorded", done)
+    db.expire_all()
+    hot = db.query(_AE).filter(_AE.device_id == ids[1], _AE.kind == "temp_high").first()
+    check(done.get("stats", {}).get("notified", 0) >= 1 and hot is not None and hot.notified_at is not None,
+          "…and the alert was still emailed and recorded", (done, hot and hot.notified_at))
     tel(ids[1], streams={"video": True, "voice": True, "return": True}, udc="configured")   # live again
 
     # ---- nb: the terminal tool speaks fleet numbers ---------------------------------------------
