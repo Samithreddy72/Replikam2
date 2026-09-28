@@ -37,6 +37,24 @@ def activity(dev, now=None):
             'The meeting laptop is attached.' if laptop else
             'USB/session status is unavailable.' if unknown else 'Bridge is idle.'}
 
+def power_detail(power):
+    """Electrical evidence never proves audibility or prescribes audio tuning."""
+    import math
+    if not isinstance(power,dict): return 'Power measurement unavailable.'
+    parts=[]
+    if power.get('live') is True: parts.append('Undervoltage or throttling is reported now.')
+    rate=power.get('rate') if isinstance(power.get('rate'),dict) else {}
+    pct=rate.get('pct');samples=rate.get('samples')
+    if isinstance(pct,(int,float)) and not isinstance(pct,bool) and math.isfinite(pct) and 0<=pct<=100:
+        text='Undervoltage in %.1f%% of recent samples' % pct
+        if isinstance(samples,int) and not isinstance(samples,bool) and samples>0: text+=' (%d samples)' % samples
+        parts.append(text+'.')
+    if power.get('live') is True or power.get('ok') is False:
+        parts.append('Inspect the power path during maintenance; firmware flags do not verify audio quality.')
+    elif power.get('ok') is True: parts.append('No current power warning is reported.')
+    return ' '.join(parts) or 'Power measurement unavailable.'
+
+
 def health(dev, alerts=(), now=None):
     now = now or utcnow()
     t = dev.latest if isinstance(dev.latest,dict) else {}
@@ -54,7 +72,7 @@ def health(dev, alerts=(), now=None):
         'Bridge reports a mesh address; this is not an end-to-end connection test.' if dev.tailscale_ip else 'No mesh address reported.')
     power=t.get('power') if isinstance(t.get('power'),dict) else {}
     row('power','Power','unknown' if not fresh or not isinstance(power.get('ok'),bool) else 'pass' if power.get('ok') is True else 'warn',
-        power.get('summary','Power measurement unavailable.'))
+        power_detail(power))
     row('usb','USB connection','unknown' if not fresh or 'udc' not in t else 'pass' if t['udc']=='configured' else 'warn',
         'USB configured; displayed picture is not verified.' if t.get('udc')=='configured' else 'Check the meeting laptop USB connection.')
     misses=t.get('usb_misses_per_s')

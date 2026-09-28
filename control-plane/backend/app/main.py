@@ -967,16 +967,9 @@ def _open_episodes(db, ids) -> dict:
 
 
 def _busy_reason(dev: Device) -> str | None:
-    """Why this bridge must not be interrupted right now, from its last heartbeat - or None.
-    The same two conditions bridge-update.sh refuses on (a presenter live, the meeting laptop
-    attached); with the laptop attached a media restart has rebooted under-powered bridges."""
-    t = dev.latest if isinstance(dev.latest, dict) else {}
-    streams = t.get("streams") if isinstance(t.get("streams"), dict) else {}
-    if streams.get("video"):
-        return "a presenter is live"
-    if t.get("udc") == "configured":
-        return "the meeting laptop is attached"
-    return None
+    """Rollouts share the same fresh, complete meeting evidence as direct commands."""
+    state = workflow.activity(dev)
+    return state['reason'] if state['busy'] else None
 
 
 def _safe_alerts(dev: Device, eps=None) -> list:
@@ -1008,6 +1001,10 @@ def _device_view(dev: Device, eps=None) -> dict:
     online = is_online(dev)
     alerts = _safe_alerts(dev, eps)
     t = dev.latest if isinstance(dev.latest, dict) else {}
+    # Keep raw telemetry in storage, but do not repeat unsafe advice from old images.
+    presented = dict(t)
+    if isinstance(t.get("power"),dict):
+        presented["power"] = dict(t["power"],summary=workflow.power_detail(t["power"]))
     return {
         "id": dev.id,
         "number": dev.number,
@@ -1022,11 +1019,11 @@ def _device_view(dev: Device, eps=None) -> dict:
         "online": online,
         "state": _device_state(dev, online, alerts),
         # the meeting laptop is plugged in and has enumerated the USB camera/mic/speaker
-        "laptop": (t.get("udc") == "configured") if online else None,
+        "laptop": (t.get("udc") in ("configured", "suspended")) if online else None,
         "maintenance": workflow.maintenance(dev),
         "site": (dev.operations or {}).get("site", ""),
         "notes": (dev.operations or {}).get("notes", ""),
-        "latest": dev.latest,
+        "latest": presented,
         "alerts": alerts,
     }
 

@@ -37,6 +37,15 @@ class Workflow(unittest.TestCase):
    with SessionLocal() as db:
     d=db.get(Device,'a');d.latest={'udc':'not attached','streams':streams};db.commit()
    self.assertEqual(c.post('/admin/devices/a/commands',json={'type':'reboot','confirm':True}).status_code,409)
+ def test_rollout_guard_and_old_power_advice_are_normalized_without_rewriting_evidence(self):
+  raw={'live':True,'ok':False,'summary':'raise the return buffer; enough to be audible','rate':{'pct':100.0,'samples':500}}
+  with SessionLocal() as db:
+   d=db.get(Device,'a');d.latest={'udc':'suspended','streams':{'video':False,'voice':False},'power':raw};db.commit()
+   self.assertIsNotNone(main._busy_reason(d))
+   view=main._device_view(d,{})
+   self.assertTrue(view['laptop']);self.assertIn('500 samples',view['latest']['power']['summary'])
+   self.assertNotIn('return buffer',view['latest']['power']['summary'])
+   self.assertEqual(d.latest['power']['summary'],raw['summary'])
  def test_cancel_and_expire_waiting(self):
   c=self.client;r=c.post('/admin/devices/a/commands',json={'type':'reboot','confirm':True,'when':'idle'}).json()
   self.assertEqual(c.delete('/admin/devices/a/commands/'+str(r['id'])).status_code,200)

@@ -72,8 +72,8 @@ _FIXES = {
         "Still missing? Unplug the meeting laptop, then power-cycle the bridge.",
         "It shows up here again within a minute of coming back."]},
     "throttled": {"command": None, "label": "Fix the power", "steps": [
-        "It is browning out (under-voltage): audio stutters and it can reboot in the middle of a meeting.",
-        "Check the power cable and its connection to the Pi - reseat it; avoid long or thin cables.",
+        "Under-voltage can disrupt media or reboot the bridge; flags alone do not confirm an audible fault.",
+        "During maintenance, end the session before inspecting or reseating the power cable; avoid long or thin cables.",
         "This is electrical: restarting services will not fix it."]},
     "service_down": {"command": "restart", "args": {}, "label": "Restart media services", "steps": [
         "Unplug the meeting laptop first - restarting the camera with it attached can reboot the bridge.",
@@ -301,7 +301,7 @@ def device_alerts(dev: Device, db=None, now: dt.datetime | None = None, sticky=(
     # reporting that value honestly instead of a misleading 0x0.
     #
     # Prefer the decoded verdict: alert while it is ACTUALLY browning out, or when the
-    # measured rate is high enough to be audible (2%+; 0.5% was confirmed clean by ear).
+    # recent sampling warrants inspection (2%+). Sampling does not establish audible quality.
     # Fall back to the raw word only for older bridges that do not send `power` yet.
     pw = D("power")
     rate = _num((pw.get("rate") if isinstance(pw.get("rate"), dict) else {}).get("pct"))
@@ -310,7 +310,7 @@ def device_alerts(dev: Device, db=None, now: dt.datetime | None = None, sticky=(
             out.append({"kind": "throttled", "detail": "browning out now (%s)" % pw.get("raw")})
         elif rate is not None and rate >= 2.0:
             out.append({"kind": "throttled",
-                        "detail": "browning out %.1f%% of recent seconds" % rate})
+                        "detail": "under-voltage in %.1f%% of recent samples" % rate})
     else:
         thr = str(t.get("throttled") or "").strip()
         if thr and thr not in ("0x0", "throttled=0x0", ""):
