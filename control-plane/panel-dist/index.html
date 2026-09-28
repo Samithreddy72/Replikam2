@@ -1755,10 +1755,11 @@ function paintAlertChannels(){
     const e = c.email || {}, w = c.webhook || {};
     const to = [e.configured ? "emailed to " + (e.target || "the alert address") : null,
                 w.configured ? "sent to your webhook" + (w.target ? " (" + w.target + ")" : "") : null].filter(Boolean);
-    where = to.length ? " Alerts are also " + to.join(" and ") + "."
+    where = c.managed ? (c.any ? " Alerts are also delivered through the fleet operator's alert channels." : "")
+      : to.length ? " Alerts are also " + to.join(" and ") + "."
       : " No alert channel is set up, so alerts show only here: set SMTP_* or ALERT_WEBHOOK_URL on the fleet, then send a test alert.";
     const bad = [["Alert email", e], ["The alert webhook", w]].filter(([, x]) => x.configured && (x.failing || x.warning));
-    warn = bad.map(([n, x]) => n + (x.failing ? " is failing" + (x.failing_since ? " since " + clock(parseTs(x.failing_since)) : "")
+    warn = bad.map(([n, x]) => n + (x.failing ? (x.failing_since ? " has been failing since " + clock(parseTs(x.failing_since)) : " is failing")
         + (x.last_error ? ": " + x.last_error : "") + (x.next_try_at ? " (next try " + clock(parseTs(x.next_try_at)) + ")" : "")
         : ": " + x.warning) + ".").join(" ");
     if (warn) warn += " Alerts are kept and sent once it works again.";

@@ -16,6 +16,11 @@ And what the first round of fixes still got wrong: the panel calling a bridge fi
 was held open by hysteresis; one odd reading (a string, NaN, Infinity) or unreadable telemetry
 silencing a bridge in the loop; a bridge forgotten mid-send making the next pass re-send a digest;
 channel errors quoting the recipient or the app password; the upgrade of an older database.
+And what the review of those fixes found: a digest email showing every bridge the FIRST bridge's
+steps; a digest too long for Discord failing on every pass; a channel left dark for an hour after
+four failures; a bridge back online with unreadable telemetry never closing its offline episode;
+the clear window and a long outage with no test that failed without them; another organisation's
+admin seeing where the operator's alerts go.
 Starts the real control plane (uvicorn) on a throwaway SQLite database with a local webhook, and
 runs the alert loop in-process with a clock it moves. Needs FastAPI (~/netbridge/fleet-test-venv)."""
 import os, pathlib, sys
@@ -29,7 +34,7 @@ except ImportError:
     print("  SKIP  FastAPI not installed (make ~/netbridge/fleet-test-venv to run this)")
     sys.exit(0)
 
-import datetime as dt, http.server, importlib.util, json, smtplib, socket, subprocess, tempfile, threading, time
+import datetime as dt, http.server, importlib.util, json, re, smtplib, socket, subprocess, tempfile, threading, time, types
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BACKEND = ROOT / "control-plane/backend"
@@ -239,7 +244,8 @@ try:
           "Lab: No PIN set and Running hot are emailed once", ek(msgs(n0, "dev-lab")))
     before = {e.kind: e.id for e in events("dev-lab") if e.resolved_at is None}
     n0 = len(HOOK["got"])
-    setdev("dev-lab", seen=120); tick(); tick()               # it drops off the Wi-Fi (seen offline on two passes)
+    for _ in range(5):
+        setdev("dev-lab", seen=120); tick()                   # off the Wi-Fi for 2.5 min: longer than the clear window
     check(ek(msgs(n0, "dev-lab")) == [("firing", "offline")],
           "it goes offline: ONE email (offline), no 'RESOLVED' for the PIN or the heat", ek(msgs(n0, "dev-lab")))
     check((msgs(n0, "dev-lab") or [{}])[0].get("note") is None,
@@ -247,6 +253,9 @@ try:
     still = {e.kind: e.id for e in events("dev-lab") if e.resolved_at is None}
     check(still.get("pin_not_set") == before.get("pin_not_set") and still.get("temp_high") == before.get("temp_high"),
           "…and their episodes stay open (unknown is not resolved)", (before, still))
+    check(all(e.clear_since is None for e in events("dev-lab") if e.kind in ("pin_not_set", "temp_high")),
+          "…and not even counting down to a RESOLVED: an outage longer than a minute must not look like a fix",
+          [(e.kind, e.clear_since) for e in events("dev-lab")])
     n0 = len(HOOK["got"])
     for _ in range(4):
         setdev("dev-lab"); tick()                             # back, same problems
@@ -295,6 +304,37 @@ try:
     check(len(late) == 2 and late[1].get("repeats", 0) >= 1,
           "still hot after the 15 minutes: emailed then, saying it keeps coming back", [(m.get("event"), m.get("repeats")) for m in late])
     drop("dev-studio", "dev-board", "dev-hot")
+
+    print("\nThe clear window: a one-pass gap is the same episode, RESOLVED waits a minute")
+    print("=============================================================================")
+    HOT, COOL = {"temp": "80.0'C", "pin": PIN_OK}, {"temp": "60.0'C", "pin": PIN_OK}
+    bridge("dev-gap", 15, "Gap", latest=HOT)
+    n0 = len(HOOK["got"])
+    for _ in range(4):
+        setdev("dev-gap", latest=HOT); tick()
+    check(ek(msgs(n0, "dev-gap")) == [("firing", "temp_high")], "hot: emailed once", ek(msgs(n0, "dev-gap")))
+    setdev("dev-gap", latest=COOL); tick()                        # cool for ONE pass (30 s)
+    e1 = events("dev-gap", "temp_high")
+    check(len(e1) == 1 and e1[0].resolved_at is None and e1[0].clear_since is not None
+          and ek(msgs(n0, "dev-gap")) == [("firing", "temp_high")],
+          "cool for 30 s: still open (counting down), no RESOLVED yet", [(e.resolved_at, e.clear_since) for e in e1])
+    setdev("dev-gap", latest=HOT); tick()                         # hot again
+    e2 = events("dev-gap", "temp_high")
+    check(len(e2) == 1 and e2[0].resolved_at is None and e2[0].clear_since is None
+          and ek(msgs(n0, "dev-gap")) == [("firing", "temp_high")],
+          "hot again 30 s later: the SAME episode carries on - no RESOLVED, no second FIRING",
+          (len(e2), ek(msgs(n0, "dev-gap"))))
+    setdev("dev-gap", latest=COOL); tick()
+    cleared = CLOCK[0]
+    setdev("dev-gap", latest=COOL); tick()                        # clear for 30 s
+    check(ek(msgs(n0, "dev-gap")) == [("firing", "temp_high")] and events("dev-gap", "temp_high")[0].resolved_at is None,
+          "clear for 30 s: RESOLVED has not gone out yet", ek(msgs(n0, "dev-gap")))
+    setdev("dev-gap", latest=COOL); tick()                        # clear for 60 s
+    r_ = events("dev-gap", "temp_high")[0].resolved_at
+    r_ = r_ and (r_ if r_.tzinfo else r_.replace(tzinfo=UTC))
+    check(ek(msgs(n0, "dev-gap")) == [("firing", "temp_high"), ("resolved", "temp_high")] and r_ == cleared,
+          "clear for a minute: exactly one RESOLVED, dated when it first cleared (not a minute later)", (ek(msgs(n0, "dev-gap")), r_, cleared))
+    drop("dev-gap")
 
     print("\nThe fleet restarting does not page every bridge")
     print("===============================================")
@@ -567,6 +607,30 @@ try:
     check(ek(msgs(n0, "dev-garbled")) == [("firing", "telemetry_unreadable"), ("resolved", "telemetry_unreadable")],
           "readable again: 'Unreadable status' resolves, nothing else changes", ek(msgs(n0, "dev-garbled")))
     drop("dev-garbled")
+    bridge("dev-back", 27, "Back", latest={"pin": {"pin_set": False, "required": True, "protocol": 2}})
+    for _ in range(3):
+        setdev("dev-back"); tick()                                # No PIN set: open and emailed
+    n0 = len(HOOK["got"])
+    for _ in range(3):
+        setdev("dev-back", seen=120); tick()
+    check(ek(msgs(n0, "dev-back")) == [("firing", "offline")], "it goes offline: emailed", ek(msgs(n0, "dev-back")))
+    def garbled_back(dev, *a, **k):
+        if dev.id == "dev-back":
+            raise ValueError("telemetry the fleet cannot read")
+        return real_da(dev, *a, **k)
+    AL.device_alerts = garbled_back
+    try:
+        for _ in range(4):
+            setdev("dev-back"); tick()                            # heartbeats again, telemetry garbled
+    finally:
+        AL.device_alerts = real_da
+    got = ek(msgs(n0, "dev-back"))
+    check(sorted(got) == [("firing", "offline"), ("firing", "telemetry_unreadable"), ("resolved", "offline")]
+          and all(e.resolved_at is not None for e in events("dev-back", "offline")),
+          "back online but its telemetry unreadable: the heartbeat still closes 'offline' and says RESOLVED", got)
+    check([e.resolved_at for e in events("dev-back", "pin_not_set")] == [None],
+          "…while the PIN alert, which it cannot see, stays open")
+    drop("dev-back")
 
     print("\nA PIN lockout on older bridge software")
     print("======================================")
@@ -635,6 +699,32 @@ try:
     check(len(sent) > n_before and sent[-1]["Subject"] == "[NetBridge CRITICAL] 5 alerts at once — Offline"
           and db_.count("1. Check it has power") == 1 and db_.count("FIRING: Offline") == 5,
           "a digest: one subject for 5 bridges, each listed, the fix steps once", sent[-1]["Subject"] if len(sent) > n_before else dg)
+    three = [bm("NB-%03d · %s" % (n, nm), "d-" + nm, "offline", "no heartbeat", "firing",
+                AS.alert_fix("offline", types.SimpleNamespace(pairing_code="BRIDGE-" + code)))
+             for n, nm, code in ((1, "Hall", "AAA1"), (2, "Lab", "BBB2"), (3, "Gym", "CCC3"))]
+    n_before = len(sent)
+    attempt(lambda: NT._send_email(NT.build_digest(three)))
+    tb = sent[-1].get_content() if len(sent) > n_before else ""
+    check(all(tb.count("setup Wi-Fi BridgeSetup-" + c) == 1 for c in ("AAA1", "BBB2", "CCC3")),
+          "a digest of bridges whose fixes differ gives each its OWN steps (its own setup Wi-Fi), not the first one's", tb[:900])
+    fmt0 = S.alert_webhook_format
+    many = [bm("NB-%03d · Venue %d" % (i, i), "d%d" % i, "offline", "no heartbeat", "firing", AS.alert_fix("offline"))
+            for i in range(1, 61)]
+    for fmt, key, hard in (("discord", "content", 2000), ("slack", "text", 4000)):
+        S.alert_webhook_format = fmt
+        body = attempt(lambda: NT._webhook_body(NT.build_digest(many)))
+        txt = body.get(key, "") if isinstance(body, dict) else ""
+        rows = txt.split("\n")[1:]
+        m = re.fullmatch(r"…and (\d+) more — open the fleet panel's Alerts page", rows[-1] if rows else "")
+        kept = rows[:-1]
+        check(0 < len(txt) <= hard and m and len(kept) + int(m.group(1)) == 60
+              and kept == [NT._summary_line(p) for p in many[:len(kept)]],
+              "%s: a 60-bridge digest fits one message (%d chars), whole lines, '…and %s more'"
+              % (fmt, len(txt), m.group(1) if m else "?"), txt[-300:])
+        small = attempt(lambda: NT._webhook_body(NT.build_digest(many[:3])))
+        st_ = small.get(key, "") if isinstance(small, dict) else ""
+        check(st_.count("\n") == 3 and "more —" not in st_, "%s: a short digest is sent whole" % fmt, st_)
+    S.alert_webhook_format = fmt0
     line = NT._summary_line(bm("NB-001 · Hall", "dev-a", "pin_not_set", "no PIN", "firing", AS.alert_fix("pin_not_set")))
     check("No PIN set" in line and "pin_not_set" not in line, "chat messages use the readable title, not the slug", line)
     line = NT._summary_line(bm("NB-009 · Lab", "dev-lab", "offline", "no heartbeat", "resolved", None, opened_at=o, resolved_at=c))
@@ -712,6 +802,16 @@ try:
         tick()
     check(sorted(ek(msgs(n0))) == [("firing", "temp_high")] * 6 and all(e.notified_at for d in fs for e in events(d, "temp_high")),
           "once the channel works again the held alerts go out (and are marked notified)", ek(msgs(n0)))
+    HOOK["status"] = 500
+    gaps = []
+    for _ in range(8):
+        CLOCK[0] += dt.timedelta(hours=1)                         # well past any back-off
+        attempt(lambda: NT.deliver(bm("NB-051 · Floor 1", "dev-f1", "temp_high", "80.0'C", "firing", AS.alert_fix("temp_high"))))
+        gaps.append(round(NT._health["webhook"]["next_try"] - NT._now()))
+    HOOK["status"] = 200
+    check(gaps == [30, 120, 600, 600, 600, 600, 600, 600],
+          "the wait grows 30 s, 2 min, 10 min and stops there: a channel that recovers is used again within 10 min (was 1 h)", gaps)
+    attempt(lambda: NT._health["webhook"].update(fails=0, failing_since=None, last_error=None, next_try=0.0))
     drop(*fs)
 
     print("\nThe panel and the test alert say where alerts go")
@@ -724,6 +824,12 @@ try:
           "a failing webhook shows as failing on /admin/alerts/channels", (r.text[:200], ch.status_code, cj))
     check(cj.get("webhook", {}).get("target") == "127.0.0.1" and "hook-secret-path" not in ch.text and cj.get("email", {}).get("configured") is False,
           "…naming only the webhook's host (its URL can be a secret), and email as not set up", cj)
+    db.add(User(email="admin@acme.test", role="admin", org_id="acme", token_hash=hash_token("ACME"))); db.commit()
+    oc = httpx.get(BASE + "/admin/alerts/channels", headers={"Authorization": "Bearer ACME"})
+    oj = oc.json() if oc.status_code == 200 else {}
+    check(oc.status_code == 200 and oj == {"any": True, "managed": True, "email": {"configured": False}, "webhook": {"configured": True}},
+          "another organisation's admin learns only that alerts are delivered - not where to, not that a channel is failing",
+          (oc.status_code, oc.text[:300]))
     check(httpx.get(BASE + "/admin/alerts/channels", headers={"Authorization": "Bearer PRES"}).status_code == 401
           and httpx.get(BASE + "/admin/alerts/channels").status_code == 401, "/admin/alerts/channels is admin-only")
     HOOK["status"] = 200
@@ -739,6 +845,10 @@ try:
     check("Alerts are also emailed.</p>" not in panel and "/admin/alerts/channels" in panel and "No alert channel is set up" in panel,
           "the Alerts page words where alerts go from the fleet (no fixed 'Alerts are also emailed')")
     check("<th>Notified</th>" in panel and "<th>Emailed</th>" not in panel, "the history column says Notified (a webhook counts too)")
+    check("c.managed" in panel and "the fleet operator's alert channels" in panel,
+          "…and for another organisation it says alerts go through the operator's channels, naming none")
+    check("has been failing since " in panel and "is failing\" + (x.failing_since" not in panel,
+          "a failing channel reads 'has been failing since 10:15', not 'is failing since 10:15'")
     check("um >= 15" not in panel and ">= 75 ?" not in panel and "< 500 ?" not in panel and 'hasAlert(d, "temp_high")' in panel,
           "panel colours follow the fleet's alerts, not copies of its thresholds")
 

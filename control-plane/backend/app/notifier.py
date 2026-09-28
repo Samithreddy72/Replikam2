@@ -158,6 +158,9 @@ def _summary_line(payload: dict, note: bool = True) -> str:
     return s.rstrip(" —")
 
 
+CHAT_LIMIT = {"discord": 1900, "slack": 3800}       # characters per message, with room to spare
+
+
 def _webhook_body(payload: dict) -> dict:
     """Shape the payload for the target. Slack wants {text}, Discord wants
     {content}; a raw consumer (n8n, a custom endpoint) gets the structured data.
@@ -165,9 +168,22 @@ def _webhook_body(payload: dict) -> dict:
     or Discord, which is the whole reason this exists."""
     fmt = (settings.alert_webhook_format or "raw").lower()
     if payload["event"] == "digest":
-        line = ((payload["note"] + "\n") if payload.get("note") else "") + \
-            "%d NetBridge alert updates:\n" % payload["count"] + "\n".join(
-                _summary_line(p, note=not payload.get("note")) for p in payload["items"])
+        head = ((payload["note"] + "\n") if payload.get("note") else "") + \
+            "%d NetBridge alert updates:\n" % payload["count"]
+        rows = [_summary_line(p, note=not payload.get("note")) for p in payload["items"]]
+        line = head + "\n".join(rows)
+        # A chat message has a size limit (Discord refuses more than 2,000 characters with HTTP 400,
+        # Slack truncates long text). A fleet-wide outage used to fail delivery EVERY pass, so the
+        # digest never arrived at all (review, 2026-09-28): keep whole lines, say how many are left out.
+        cap = CHAT_LIMIT.get(fmt)
+        if cap and len(line) > cap:
+            kept = []
+            for i, r in enumerate(rows):
+                more = "\n…and %d more — open the fleet panel's Alerts page" % (len(rows) - i)
+                if len(head) + len("\n".join(kept + [r])) + len(more) > cap:
+                    line = head + "\n".join(kept) + more
+                    break
+                kept.append(r)
     else:
         line = _summary_line(payload)
     if fmt == "slack":
@@ -269,10 +285,14 @@ def _send_email(payload: dict) -> bool:
         subject = _digest_subject(payload)
         lines = ([payload["note"], ""] if payload.get("note") else []) + \
             ["%d alert updates came in one check, so they arrive as one email." % payload["count"], ""]
+        # Steps are printed once per DISTINCT fix, not once per kind (review, 2026-09-28): alert_fix()
+        # fills the steps in per bridge (the offline fix names THAT bridge's setup Wi-Fi; an unclaimed
+        # bridge is told to claim first), so keying on the kind showed bridge B the steps of bridge A.
         seen_fix = set()
         for p in payload["items"]:
-            first = p["kind"] not in seen_fix
-            seen_fix.add(p["kind"])
+            sig = json.dumps(p.get("fix") or {}, sort_keys=True)
+            first = sig not in seen_fix
+            seen_fix.add(sig)
             lines += _email_lines(p, steps=first, note=not payload.get("note")) + [""]
     elif payload["event"] == "test":
         subject = _subject(payload)
@@ -327,10 +347,12 @@ def send_mail(to: str, subject: str, body: str) -> bool:
 # attempt blocking up to 8 s (webhook) + 10 s (SMTP). With the Gmail app password missing or
 # revoked that was a failed Gmail login per open alert every 30 s - 20 a minute with 10 alerts,
 # the pattern that gets an account flagged - and a pass took minutes. Now a channel that fails
-# is left alone for 30 s, 2 min, 10 min, then 1 h between attempts; one success resets it. The
+# is left alone for 30 s, 2 min, then 10 min between attempts; one success resets it. The
 # alerts are not lost meanwhile: they stay un-notified and go out when the channel works again.
 # In memory, for this process: the fleet runs one worker, and a restart simply tries at once.
-_BACKOFF_S = (30, 120, 600, 3600)
+# Capped at 10 minutes (review, 2026-09-28): with a 1 h step, a channel that failed four times in a
+# row stayed dark for an hour after it recovered, and a brand-new CRITICAL alert was not even tried.
+_BACKOFF_S = (30, 120, 600)
 _now = time.time                          # tests move the clock
 _health = {name: {"fails": 0, "failing_since": None, "last_error": None, "last_ok": None, "next_try": 0.0}
            for name in ("webhook", "email")}

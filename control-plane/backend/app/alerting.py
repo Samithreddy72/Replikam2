@@ -162,9 +162,14 @@ def evaluate(db, now: dt.datetime | None = None, started_at: dt.datetime | None 
         # 2) CLEARED: an open episode whose alert is no longer firing closes once it has stayed
         # clear ALERT_CLEAR_AFTER_S. Not while the bridge is offline or unreadable: then nothing
         # else is known about it, and "cannot see it" must not be announced as "fixed".
-        if online and not unreadable:
+        if online:
             for kind, ev in open_events.items():
                 if kind in current:
+                    continue
+                # Unreadable telemetry hides every OTHER alert (not the same as fixed), but the heartbeat
+                # itself says the bridge is back: its offline episode closes and its RESOLVED goes out
+                # (review, 2026-09-28).
+                if unreadable and kind != "offline":
                     continue
                 if ev.clear_since is None:
                     ev.clear_since = now

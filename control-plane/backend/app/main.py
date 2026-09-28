@@ -1819,8 +1819,13 @@ def alerts_channels(actor=Depends(auth.require_admin)):
     """Where alerts go and whether that works: email / webhook configured, failing since when,
     the last error and the next attempt. The panel said "Alerts are also emailed" when nothing was
     configured, and nothing anywhere said that email was failing (audit, 2026-09-28). No secrets:
-    the webhook shows only its host, the recipient is masked."""
-    return notifier.channel_status()
+    the webhook shows only its host, the recipient is masked. The channels belong to the fleet's
+    operator (OPERATOR_ORG): another organisation's admin learns only whether alerts are delivered."""
+    st = notifier.channel_status()
+    if actor.org != settings.operator_org:
+        return {"any": st["any"], "managed": True,
+                "email": {"configured": st["email"]["configured"]}, "webhook": {"configured": st["webhook"]["configured"]}}
+    return st
 
 
 # ----------------------------- live stream for the panel -----------------------------

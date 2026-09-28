@@ -110,6 +110,10 @@ class Settings:
     alert_repeat_s = _env_int("ALERT_REPEAT_S", 900)
     alert_digest_over = _env_int("ALERT_DIGEST_OVER", 3)
     alert_webhook_url = _env("ALERT_WEBHOOK_URL", "")   # POST JSON here (Slack/Discord/n8n/…)
+    # The organisation that runs this fleet. The alert channels (SMTP_*, ALERT_WEBHOOK_URL) are
+    # fleet-wide settings of that operator; other organisations' admins see only that alerts are
+    # delivered, never where to or why a channel is failing (2026-09-28).
+    operator_org = _env("OPERATOR_ORG", "default").strip() or "default"
     alert_webhook_format = _env("ALERT_WEBHOOK_FORMAT", "raw")  # slack | discord | raw
     smtp_host = _env("SMTP_HOST", "")
     smtp_port = _env_int("SMTP_PORT", 587)
