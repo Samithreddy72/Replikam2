@@ -23,6 +23,25 @@ CHECK_S="${BRIDGE_SSH_CHECK_S:-30}"
 ONCE="${BRIDGE_SSH_ONCE:-}"          # tests: write + check the config, then exit
 USER_ALLOWED="${BRIDGE_SSH_USER:-pi}"
 
+KEY_DIRECTIVES="AuthorizedKeysFile $KEYS"
+STRICT_KEYS=0
+if [ -e "${BRIDGE_SIGNATURE_POLICY:-/etc/netbridge/script-signature-v2}" ]; then
+  STRICT_KEYS=1
+  KEY_VERIFY="${BRIDGE_SIGNATURE_VERIFIER:-/usr/local/bin/bridge-verify-update.py}"
+  KEY_PUB="${BRIDGE_SSH_PUBKEY:-/etc/netbridge/script-pubkey.pem}"
+  KEY_FLOORS="${BRIDGE_SSH_FLOORS:-/data/overrides/.security-floor}"
+  KEY_DIRECTIVES="AuthorizedKeysFile none
+AuthorizedKeysCommand /usr/bin/python3 \"$KEY_VERIFY\" owner-keys \"$KEY_PUB\" \"$KEY_FLOORS\" \"$KEYS\"
+AuthorizedKeysCommandUser root"
+fi
+owner_keys_present(){
+  if [ "$STRICT_KEYS" = 1 ]; then
+    python3 "$KEY_VERIFY" owner-keys "$KEY_PUB" "$KEY_FLOORS" "$KEYS" | grep -q '^[^#]'
+  else
+    [ -s "$KEYS" ] && grep -q '^[^#]' "$KEYS"
+  fi
+}
+
 log(){ echo "bridge-ssh: $*" >&2; }
 
 # The bridge's IPv4 on the tailnet: 100.64.0.0/10 and nothing else.
@@ -47,7 +66,7 @@ Port 22
 AddressFamily inet
 HostKey $HOSTKEY_DIR/ssh_host_ed25519_key
 PidFile $RUNDIR/sshd.pid
-AuthorizedKeysFile $KEYS
+$KEY_DIRECTIVES
 PermitRootLogin no
 AllowUsers $USER_ALLOWED@100.64.0.0/10
 PubkeyAuthentication yes
@@ -79,7 +98,7 @@ EOF
   mv -f "$RUNDIR/sshd_config.tmp" "$RUNDIR/sshd_config"
 }
 
-[ -s "$KEYS" ] && grep -q '^[^#]' "$KEYS" || { log "no owner key in $KEYS — SSH stays off"; [ -n "$ONCE" ] && exit 2; exec sleep infinity; }
+owner_keys_present || { log "no owner key in $KEYS — SSH stays off"; [ -n "$ONCE" ] && exit 2; exec sleep infinity; }
 mkdir -p "$PRIVSEP" && chmod 0755 "$PRIVSEP"
 ensure_hostkey || { log "could not create a host key on $HOSTKEY_DIR"; exit 1; }
 

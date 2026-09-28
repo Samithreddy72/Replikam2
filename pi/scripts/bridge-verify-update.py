@@ -75,13 +75,34 @@ def verify(payload, signature, public_key, name, floor_dir, accept=False):
     if revision < old['revision'] or (revision == old['revision'] and digest != old.get('sha256')):
         raise ValueError('update replay or conflicting revision refused')
     if accept:
+        if name == 'owner_ssh_authorized_keys':
+            saved = floor.parent/'.accepted'/name/(str(revision)+'-'+digest)
+            atomic_write(saved, body)
+            atomic_write(saved.with_name(saved.name+'.sig'), pathlib.Path(signature).read_bytes())
         atomic_write(floor, json.dumps({'revision':revision,'sha256':digest}).encode()+b'\n')
     return meta
+
+def owner_keys(public_key, floor_dir, fallback):
+    name = 'owner_ssh_authorized_keys'
+    floor = pathlib.Path(floor_dir)/name
+    try:
+        record = json.loads(floor.read_text())
+    except FileNotFoundError:
+        return pathlib.Path(fallback).read_bytes()
+    # After the first accepted rotation, losing/corrupting its snapshot must never
+    # silently re-authorize the image's old key, including during safe mode.
+    if not isinstance(record,dict) or type(record.get('revision')) is not int or not re.fullmatch(r'[0-9a-f]{64}',str(record.get('sha256',''))):
+        raise ValueError('owner key acceptance record invalid')
+    saved = floor.parent/'.accepted'/name/(str(record['revision'])+'-'+record['sha256'])
+    verify(saved, saved.with_name(saved.name+'.sig'), public_key, name, floor_dir)
+    return saved.read_bytes()
 
 def main():
     try:
         if sys.argv[1] == 'prepare':
             prepare(*sys.argv[2:5], int(os.environ.get('NB_UPDATE_REVISION') or time.time_ns()))
+        elif sys.argv[1] == 'owner-keys':
+            sys.stdout.buffer.write(owner_keys(*sys.argv[2:5]))
         elif sys.argv[1] == 'verify':
             verify(*sys.argv[2:7], accept=len(sys.argv)>7 and sys.argv[7]=='accept')
         else: raise ValueError('unknown operation')

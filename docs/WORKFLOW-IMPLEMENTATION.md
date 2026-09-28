@@ -138,3 +138,7 @@ New images require `script-signature-v2` and the read-only `bridge-verify-update
 CLI now confirms before publishing, distinguishes explicit paths from bare catalog names, and queues deploy/revert for idle with a 30-minute expiry without stalling on offline bridges. Twelve CLI tests pass. A queue acceptance is explicitly not execution success.
 
 CI 36478934149 for 6b0ebe8 passed 1687 common checks but failed the extracted-JavaScript freshness harness because its copied helper list omitted the new tone function. The harness now includes the actual new function and lockout state; its behavior test passes locally. Full CI remains required for this batch.
+
+### Owner SSH revocation (29 September continuation)
+
+The strict image policy now uses an AuthorizedKeysCommand backed by the durable accepted signed owner-key snapshot. Static AuthorizedKeysFile lookup is disabled. Signature verification and revision checks occur on each new authentication; missing snapshots and corrupt acceptance records fail closed. Seven real-signature tests and 23 SSH tests pass locally, including real sshd configuration validation. Both old OS slots and existing authenticated sessions require separate migration handling; B87 remains partial. This does not change the live bridge.

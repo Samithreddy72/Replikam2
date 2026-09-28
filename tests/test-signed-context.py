@@ -36,6 +36,22 @@ class Context(unittest.TestCase):
   src=self.root/'resign';src.write_bytes(self.payload.read_bytes());v.prepare(src,self.payload,'bridge-web.py',101)
   self.assertEqual(self.payload.read_bytes().count(v.PREFIX),1)
   with self.assertRaises(ValueError):v.prepare(src,self.payload,'../escape',102)
+ def test_owner_rotation_survives_override_removal_and_refuses_old_keys(self):
+  name='owner_ssh_authorized_keys';fallback=self.root/'baked-keys';fallback.write_bytes(b'old-key\n')
+  self.assertEqual(v.owner_keys(self.pub,self.floors,fallback),b'old-key\n')
+  self.sign(100,name,body='new-key\n');self.verify(name,accept=True)
+  accepted=self.payload.read_bytes();self.payload.unlink();self.sig.unlink()
+  self.assertEqual(v.owner_keys(self.pub,self.floors,fallback),accepted)
+  self.sign(99,name,body='old-key\n')
+  with self.assertRaises(ValueError):self.verify(name,accept=True)
+  self.assertEqual(v.owner_keys(self.pub,self.floors,fallback),accepted)
+ def test_owner_snapshot_loss_and_corrupt_floor_fail_closed(self):
+  name='owner_ssh_authorized_keys';fallback=self.root/'baked-keys';fallback.write_bytes(b'old-key\n')
+  self.sign(100,name,body='new-key\n');self.verify(name,accept=True)
+  for snapshot in (self.floors/'.accepted'/name).iterdir():snapshot.unlink()
+  with self.assertRaises(OSError):v.owner_keys(self.pub,self.floors,fallback)
+  (self.floors/name).write_text('broken')
+  with self.assertRaises(ValueError):v.owner_keys(self.pub,self.floors,fallback)
  def test_real_loader_checks_context_when_policy_enabled(self):
   self.sign(name='demo.sh');body=self.payload.read_bytes();sig=self.sig.read_bytes()
   baked=self.root/'baked';baked.mkdir();(baked/'demo.sh').write_text('#!/bin/sh\necho BAKED\n');(baked/'demo.sh').chmod(0o755)

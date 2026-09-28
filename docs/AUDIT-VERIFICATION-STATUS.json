@@ -187,9 +187,9 @@
       "severity": "medium",
       "title": "Revoking an owner SSH key through the signed override does not last: revert-script, revert-all, safe mode, or replaying the older signed file all restore it",
       "file": "pi/configs/updatable.conf",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "partial; strict-image revocation implemented and targeted tests passed",
+      "evidence": "tests/test-signed-context.py; tests/test-bridge-ssh.sh",
+      "note": "Strict image SSH uses the durable accepted signed key snapshot for each authentication, with static key lookup disabled. Override removal/safe mode cannot revive the baked key; lost snapshot fails closed. Old OS slots do not implement this policy: qualify both slots before declaring rollback-safe revocation. Existing authenticated SSH sessions are not terminated."
     },
     {
       "id": "B88",
