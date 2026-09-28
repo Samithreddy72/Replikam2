@@ -51,6 +51,13 @@ sed -e "s#^BAKED=.*#BAKED=\"$T/baked/\$NAME\"#" \
 chmod +x "$T/run.sh"
 run(){ bash "$T/run.sh" demo.sh 2>>"$T/err.log"; }
 
+cat > "$T/systemctl" <<EOF
+#!/bin/sh
+cat "$T/restarts"
+EOF
+chmod +x "$T/systemctl"; echo 0 > "$T/restarts"
+export BRIDGE_RUN_SYSTEMCTL="$T/systemctl"
+
 # ===================== 1. no override at all =====================
 clear_ovr
 [ "$(run)" = "BAKED" ] && ok "no override -> runs the baked-in script" || no "expected BAKED, got '$(run)'"
@@ -84,7 +91,7 @@ mv "$T/pub.bak" "$T/root/script-pubkey.pem"
 
 # ===================== 7. auto-rollback quarantines a crash-looper =====================
 clear_ovr; mkoverride "OVERRIDE"; sign
-r1=$(run); r2=$(run); r3=$(run)      # 3 starts inside the window = the trip
+echo 0 > "$T/restarts"; r1=$(run); echo 1 > "$T/restarts"; r2=$(run); echo 2 > "$T/restarts"; r3=$(run)      # 3 starts inside the window = the trip
 [ "$r1" = "OVERRIDE" ] && [ "$r2" = "OVERRIDE" ] && ok "override runs for the first starts" \
                                                  || no "override did not run before the trip ($r1,$r2)"
 [ "$r3" = "BAKED" ] && ok "3 starts in the window QUARANTINES the override (auto-rollback)" \
@@ -103,7 +110,7 @@ ls "$T/data/overrides/quarantine"/demo.sh.* >/dev/null 2>&1 \
 # Counting is now boot-relative (/proc/uptime) and keyed by boot id.
 clear_ovr; mkoverride "OVERRIDE"; sign
 export BRIDGE_RUN_UPTIME_SRC="$T/uptime" BRIDGE_RUN_BOOTID_SRC="$T/bootid"
-reboot_sim(){ printf '%s\n' "boot-$1" > "$T/bootid"; printf '12.34 100.0\n' > "$T/uptime"; }
+reboot_sim(){ echo 0 > "$T/restarts"; printf '%s\n' "boot-$1" > "$T/bootid"; printf '12.34 100.0\n' > "$T/uptime"; }
 reboot_sim 1; b1=$(run)
 reboot_sim 2; b2=$(run)
 reboot_sim 3; b3=$(run)      # three separate boots, each ~12s in
@@ -112,11 +119,15 @@ reboot_sim 3; b3=$(run)      # three separate boots, each ~12s in
   || no "a reboot was mistaken for a crash loop ($b1,$b2,$b3) — D1 has regressed"
 # ...and a genuine crash loop inside ONE boot must still be caught.
 reboot_sim 9
-c1=$(run); c2=$(run); c3=$(run)
+c1=$(run); echo 1 > "$T/restarts"; c2=$(run); echo 2 > "$T/restarts"; c3=$(run)
 [ "$c3" = "BAKED" ] && ok "a real crash loop within one boot is still caught" \
                     || no "crash-loop detection broke while fixing D1 (got '$c3')"
 unset BRIDGE_RUN_UPTIME_SRC BRIDGE_RUN_BOOTID_SRC
 rm -rf "$T/data/overrides/.state" "$T/data/overrides/.quarantined.json" "$T/data/overrides/quarantine"
+
+clear_ovr; mkoverride "OVERRIDE"; sign; echo 0 > "$T/restarts"
+m1=$(run); m2=$(run); m3=$(run); m4=$(run)
+[ "$m1$m2$m3$m4" = "OVERRIDEOVERRIDEOVERRIDEOVERRIDE" ] && ok "four deliberate restarts never trigger crash quarantine" || no "manual restarts counted as crashes"
 
 # ===================== 8. a fresh deploy clears the trip =====================
 mkoverride "NEWVERSION"; sign; rm -rf "$T/data/overrides/.state" "$T/data/overrides/.quarantined.json"
@@ -179,11 +190,12 @@ sed -e "s#^DIR=.*#DIR=\"$T/data/overrides\"#" \
 chmod +x "$T/deploy.sh"
 
 clear_ovr; mkoverride "OVERRIDE"; sign
-r1=$(run); r2=$(run); r3=$(run)            # trip the quarantine
+echo 0 > "$T/restarts"; r1=$(run); echo 1 > "$T/restarts"; r2=$(run); echo 2 > "$T/restarts"; r3=$(run) # automatic restart chain
 [ "$r3" = "BAKED" ] && ok "setup: override quarantined, device on baked-in" \
                     || no "could not set up the quarantine (got '$r3')"
 
 bash "$T/deploy.sh" --unquarantine >/dev/null 2>&1
+echo 0 > "$T/restarts"
 [ "$(run)" = "OVERRIDE" ] && ok "unquarantine RESTORES the override (signature re-verified)" \
                           || no "unquarantine did not restore the override"
 [ -f "$T/data/overrides/.quarantined.json" ] && no "stale .quarantined.json left behind" \
@@ -192,14 +204,14 @@ bash "$T/deploy.sh" --unquarantine >/dev/null 2>&1
 # start 3 trips. (The check above already consumed start 1.) The failure this guards against
 # is the counter surviving the quarantine, which would leave the restored override one start
 # from being parked again — recovery that lasts a single boot is not recovery.
-r2=$(run); r3=$(run)
+echo 1 > "$T/restarts"; r2=$(run); echo 2 > "$T/restarts"; r3=$(run)
 [ "$r2" = "OVERRIDE" ] && [ "$r3" = "BAKED" ] \
   && ok "restored override gets a FRESH trial (runs again, trips only on the 3rd start)" \
   || no "start counter not reset like a fresh deploy ($r2 then $r3)"
 
 # A file tampered with WHILE quarantined must not come back.
 clear_ovr; mkoverride "OVERRIDE"; sign
-run >/dev/null; run >/dev/null; run >/dev/null
+echo 0 > "$T/restarts"; run >/dev/null; echo 1 > "$T/restarts"; run >/dev/null; echo 2 > "$T/restarts"; run >/dev/null
 Q="$T/data/overrides/quarantine"
 for f in "$Q"/demo.sh.*; do case "$f" in *.sig.*) ;; *) echo 'echo EVIL' >> "$f" ;; esac; done
 bash "$T/deploy.sh" --unquarantine >/dev/null 2>&1

@@ -50,7 +50,8 @@ cat > "$T/bin/systemctl" <<EOF
 echo "\$*" >> "$T/systemctl.log"
 st(){ cat "$T/state/\$1.active" 2>/dev/null || echo active; }
 case "\$1" in
-  show) [ "\$3" = ActiveState ] && st "\$5"; [ "\$3" = NRestarts ] && { cat "$T/state/\$5.nrestarts" 2>/dev/null || echo 0; }; exit 0 ;;
+  show) for spec in Type:type Result:result ExecMainStatus:exit; do [ "\$3" = "\${spec%%:*}" ] && cat "$T/state/\$5.\${spec#*:}" 2>/dev/null; done; [ "\$3" = ActiveState ] && st "\$5"; [ "\$3" = NRestarts ] && { cat "$T/state/\$5.nrestarts" 2>/dev/null || echo 0; }; exit 0 ;;
+  restart) [ -e "$T/crash-after-restart" ] && echo 1 > "$T/state/\$2.nrestarts" || echo 0 > "$T/state/\$2.nrestarts"; exit 0 ;;
   is-active) st "\$2"; [ "\$(st "\$2")" = active ] ;;
   is-failed) [ "\$(st "\$3")" = failed ] ;;
   *) exit 0 ;;
@@ -61,9 +62,11 @@ cat > "$T/fetch.sh" <<EOF
 cp "$T/server/\$(basename "\$2")" "\$1" 2>/dev/null
 EOF
 chmod +x "$T"/bin/* "$T/fetch.sh"
+echo boot-one > "$T/boot-id"; export BRIDGE_OVR_BOOTID="$T/boot-id"
 echo 5000.00 > "$T/uptime"; echo "not attached" > "$T/udc"
 : > "$T/live"                         # empty = not live; "1" = live
 export PATH="$T/bin:$PATH"
+export BRIDGE_RUN_SYSTEMCTL="$T/bin/systemctl"
 export BRIDGE_OVR_CATALOG="$T/updatable.conf" BRIDGE_OVR_DIR="$T/data/overrides" BRIDGE_OVR_PUBKEY="$T/pub.pem" \
        BRIDGE_OVR_RUN="$T/run" BRIDGE_OVR_DROPIN_ROOT="$T/dropins" BRIDGE_OVR_MOUNTINFO="$T/mountinfo" \
        BRIDGE_OVR_UDC_GLOB="$T/udc" BRIDGE_OVR_UPTIME="$T/uptime" BRIDGE_OVR_AGENT_OK="$T/agent-ok" \
@@ -114,6 +117,14 @@ publish bridge-read.py "$T/web.py" "$T/evil.pem"; deploy bridge-read.py
 [ "$(rc)" = 4 ] && [ ! -e "$D/bridge-read.py" ] && ok "signed with the WRONG key -> refused" || no "wrong-key payload accepted (rc $(rc))"
 publish bridge-read.py "$T/web.py"; printf '#!/usr/bin/env python3\nprint("tampered")\n' > "$T/server/bridge-read.py"; deploy bridge-read.py
 [ "$(rc)" = 4 ] && ok "tampered after signing -> refused" || no "tampered payload accepted (rc $(rc))"
+
+# A restarting unit is not healthy merely because systemd has not marked it failed.
+echo activating > "$T/state/bridge-web.active"; deploy bridge-web.py
+[ "$(rc)" = 7 ] && ok "activating service cannot pass post-deploy health" || no "activating service reported healthy"
+echo active > "$T/state/bridge-web.active"; touch "$T/crash-after-restart"; deploy bridge-web.py
+[ "$(rc)" = 7 ] && ok "active service with an automatic restart cannot pass health" || no "crash-loop reported healthy"
+rm -f "$T/crash-after-restart"; echo 0 > "$T/state/bridge-web.nrestarts"; deploy bridge-web.py
+[ "$(rc)" = 0 ] && ok "stable active service passes post-deploy health" || no "healthy service rejected"
 
 # ===================== 3. the camera never restarts under an attached laptop =====================
 printf '#!/bin/bash\necho CAMERA-V2\n' > "$T/uvcd.sh"; publish bridge-uvcd.sh "$T/uvcd.sh"
@@ -193,14 +204,27 @@ reset_log; bash "$DEPLOY" --unquarantine bridge-web.py >"$T/out" 2>&1
   && ok "unquarantine: signature re-verified, back in place, restarted" || no "unquarantine failed: $(cat "$T/out")"
 unset BRIDGE_OVR_NOW_CMD
 
-# ===================== 10. lifeline guard =====================
+# ===================== 10. lifeline proof and monotonic deadlines =====================
 printf '#!/usr/bin/env python3\nprint("agent v2")\n' > "$T/agent.py"; publish bridge-agent.py "$T/agent.py"; deploy bridge-agent.py
-echo 5000.00 > "$T/uptime"
-touch "$T/agent-ok"; bash "$OVR" health >/dev/null 2>&1
-[ -e "$D/bridge-agent.py" ] && ok "agent update + fleet heard from recently: kept" || no "agent update reverted while the fleet was reachable"
-touch -t 202001010000 "$T/agent-ok" "$D/bridge-agent.py"; bash "$OVR" health >/dev/null 2>&1
-[ ! -e "$D/bridge-agent.py" ] && ok "agent update + fleet silent 15 min: reverted automatically (lifeline guard)" || no "lifeline guard did not revert the agent"
-touch "$T/agent-ok"
+echo 5010.00 > "$T/uptime"
+echo contact-after-install > "$T/agent-ok"; bash "$OVR" health >/dev/null 2>&1
+[ -e "$D/bridge-agent.py" ] && ok "new agent contacts fleet: kept and proven" || no "reachable agent reverted"
+rm -f "$T/agent-ok"; echo 10000.00 > "$T/uptime"; bash "$OVR" health >/dev/null 2>&1
+[ -e "$D/bridge-agent.py" ] && ok "proven update survives a later unrelated fleet outage" || no "proven update reverted"
+echo boot-two > "$T/boot-id"; echo 1000.00 > "$T/uptime"; bash "$OVR" health >/dev/null 2>&1
+[ -e "$D/bridge-agent.py" ] && ok "proof survives reboot without fleet contact" || no "proof lost across reboot"
+printf '#!/usr/bin/env python3\nprint("agent v3")\n' > "$T/agent.py"; publish bridge-agent.py "$T/agent.py"; deploy bridge-agent.py
+echo 1899.00 > "$T/uptime"; bash "$OVR" health >/dev/null 2>&1
+[ -e "$D/bridge-agent.py" ] && ok "new bytes get their own complete trial grace" || no "new update lost its grace"
+echo 1900.00 > "$T/uptime"; bash "$OVR" health >/dev/null 2>&1
+[ ! -e "$D/bridge-agent.py" ] && ok "unproven new bytes revert at 900 monotonic seconds" || no "unproven agent did not revert"
+deploy bridge-agent.py
+echo boot-three > "$T/boot-id"; echo 899.00 > "$T/uptime"
+touch -t 203701010000 "$D/bridge-agent.py"; bash "$OVR" health >/dev/null 2>&1
+[ -e "$D/bridge-agent.py" ] && ok "rebooted unproven update gets boot-relative grace" || no "premature reboot rollback"
+echo 900.00 > "$T/uptime"; bash "$OVR" health >/dev/null 2>&1
+[ ! -e "$D/bridge-agent.py" ] && ok "future wall-clock mtime cannot defeat rollback after reboot" || no "wall clock defeated rollback"
+echo 5000.00 > "$T/uptime"; touch "$T/agent-ok"
 
 # ===================== 11. boot: apply-all, known-good, safe mode =====================
 : > "$T/mountinfo"; echo 0 > "$D/.boot-attempts"
@@ -296,6 +320,22 @@ bash "$DEPLOY" --unquarantine bridge-web.py >"$T/out" 2>&1; qrc=$?
 deploy bridge-web.py
 [ "$(rc)" = 0 ] && [ ! -f "$D/quarantine/bridge-web.py.9000" ] && [ -f "$D/quarantine-history/bridge-web.py.9000" ] \
   && ok "new deployment archives stale parked copies outside the active quarantine" || no "stale parked copy survived a new deployment: $(cat "$T/out")"
+
+# Completed oneshots may be inactive, but must have succeeded.
+printf '#!/usr/bin/env python3\nprint("idle frame")\n' > "$T/render.py"
+publish render-idle-frame.py "$T/render.py"
+echo inactive > "$T/state/bridge-idle-frame.active"; echo oneshot > "$T/state/bridge-idle-frame.type"
+echo success > "$T/state/bridge-idle-frame.result"; echo 0 > "$T/state/bridge-idle-frame.exit"
+deploy render-idle-frame.py
+[ "$(rc)" = 0 ] && ok "successful inactive oneshot passes deployment health" || no "valid oneshot rejected: $(cat "$T/out")"
+echo 1 > "$T/state/bridge-idle-frame.exit"; deploy render-idle-frame.py
+[ "$(rc)" = 7 ] && ok "failed inactive oneshot does not pass deployment health" || no "failed oneshot accepted"
+
+# Reverting all must retain the restarts it cannot safely perform yet.
+echo 1 > "$T/live"; echo suspended > "$T/udc"; deploy bridge-feeder-audio.sh
+reset_log; bash "$OVR" revert-all > "$T/revert-all-out" 2>&1
+[ -f "$D/.pending/bridge-feeder-audio.sh" ] && ! called "restart bridge-feeder-audio" \
+ && ok "revert-all keeps a media restart pending during a live session" || no "revert-all dropped pending restart or interrupted media"
 
 echo
 echo "  $pass passed, $fail failed"

@@ -160,18 +160,18 @@
       "severity": "medium",
       "title": "Lifeline guard reverts PROVEN lifeline and agent overrides after any 15-minute stretch without the fleet (it never checks whether the fleet was heard from after install)",
       "file": "pi/scripts/bridge-overrides.sh",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-signed-updates.sh",
+      "note": "Proof is tied to exact update bytes and persisted; later outages cannot revert a proven update."
     },
     {
       "id": "B85",
       "severity": "medium",
       "title": "Lifeline guard never fires after a reboot without internet: wall-clock arithmetic on a Pi with no RTC and a clock that cannot be saved",
       "file": "pi/scripts/bridge-overrides.sh",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-signed-updates.sh",
+      "note": "Boot ID and monotonic uptime bound the unproven trial; future wall-clock timestamps cannot prevent rollback."
     },
     {
       "id": "B86",
@@ -214,18 +214,18 @@
       "severity": "medium",
       "title": "`revert-all` deletes the pending restarts that its own reverts just queued, so services keep running override code while status reports 'built-in'",
       "file": "pi/scripts/bridge-overrides.sh",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-signed-updates.sh",
+      "note": "Revert-all preserves deferred media restarts; actual shell regression verifies no live restart."
     },
     {
       "id": "B91",
       "severity": "medium",
       "title": "Loader crash-loop trip counts deliberate restarts, so a healthy media override is quarantined after 3 ordinary restarts in 2 minutes",
       "file": "pi/scripts/bridge-run.sh",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-script-override.sh",
+      "note": "Use systemd automatic-restart history to reset deliberate-start sequences; four manual starts stay installed while real automatic loops quarantine."
     },
     {
       "id": "B93",
@@ -295,9 +295,9 @@
       "severity": "medium",
       "title": "A page reloaded or reopened during a live session polls with whatever the Bridge dropdown shows, which can switch the live helper to another bridge",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; browser regression passed; full CI pending",
+      "evidence": "app/netbridge-desktop/tests/source-state.spec.ts",
+      "note": "Restore live host and bridge identity from engine state; disable source selectors during a session; polling remains read-only."
     },
     {
       "id": "B114",
@@ -358,27 +358,27 @@
       "severity": "medium",
       "title": "Known-red file (f) #1: test-app-diagnosis.py fails on a correct _quit() because it takes the first .terminate() in the function, which belongs to an unrelated branch",
       "file": "tests/test-app-diagnosis.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "test defect corrected; full CI passed at eb8cc7d",
+      "evidence": "tests/test-app-diagnosis.py",
+      "note": "Quit assertions reconcile the correct branch; actual suite passes."
     },
     {
       "id": "B146",
       "severity": "medium",
       "title": "Known-red file (f) #2: test-fleet-drift.py's comment-false-positive check depends on git history, and newer security commits broke it",
       "file": "tests/test-fleet-drift.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "test defect corrected; full CI passed at eb8cc7d",
+      "evidence": "tests/test-fleet-drift.py; .github/workflows/tests.yml",
+      "note": "CI fetches complete history and the comment-only fixture passes."
     },
     {
       "id": "B147",
       "severity": "medium",
       "title": "Known-red file (f) #3: test-usb-audio-analysis.py imports numpy at the top of the file and crashes when numpy is missing instead of reporting a skip",
       "file": "tests/test-usb-audio-analysis.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "required test dependency supplied; full CI passed at eb8cc7d",
+      "evidence": ".github/workflows/tests.yml",
+      "note": "numpy is pinned in the required common test environment; missing dependencies remain hard failures, not accepted skips."
     },
     {
       "id": "B160",
@@ -421,9 +421,9 @@
       "severity": "medium",
       "title": "The post-deploy health check passes for a crash-looping service (only 'is-failed' is checked)",
       "file": "pi/scripts/bridge-deploy-script.sh",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-signed-updates.sh",
+      "note": "Require stable active services or successful completed oneshots; activating units and automatic restarts fail health explicitly."
     },
     {
       "id": "B171",
@@ -439,9 +439,9 @@
       "severity": "high",
       "title": "Fleet-wide bootstrap token lets anyone take over an enrolled bridge: steal its pending PIN and mint a tag:bridge mesh key",
       "file": "control-plane/backend/app/main.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; full CI passed at eb8cc7d",
+      "evidence": "tests/test-enrollment-ownership.py",
+      "note": "Bootstrap cannot re-enroll existing claimed or unclaimed device identities; org-scoped recovery is explicit."
     },
     {
       "id": "B185",
@@ -484,9 +484,9 @@
       "severity": "medium",
       "title": "A lockout hit while re-entering the PIN mid-session puts the presenter in a loop: the PIN dialog reopens every 4 s and hides the lockout message",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; browser regression passed; full CI pending",
+      "evidence": "app/netbridge-desktop/tests/source-state.spec.ts",
+      "note": "Keep lockout message and suppress automatic PIN prompts for the reported retry interval."
     },
     {
       "id": "B202",
@@ -502,9 +502,9 @@
       "severity": "medium",
       "title": "The image-2.1 refusal sends presenters to an 'Older versions folder' that does not ship, and auto-update can move 1.4.3 installs onto 1.5.x before bridges are reflashed",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "partially addressed",
+      "evidence": "tests/test-app-update-auth.py",
+      "note": "PIN-channel compatibility guard implemented; nonexistent Older versions folder advice removed. Native compatibility set still requires certification."
     },
     {
       "id": "B205",
@@ -538,9 +538,9 @@
       "severity": "high",
       "title": "When the bridge stops answering mid-meeting, the page keeps its last green rows and 'Ready to present'; mesh-helper death is never shown",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; browser regression passed; full CI pending",
+      "evidence": "app/netbridge-desktop/tests/source-state.spec.ts",
+      "note": "Actual browser regression verifies lost checks erase previous green readiness. Dead mesh route produces an explicit unavailable response."
     },
     {
       "id": "B217",
@@ -556,9 +556,9 @@
       "severity": "medium",
       "title": "The go-live status line (including 'NO ROOM AUDIO') is overwritten within 4 s by 'direct mesh path \u00b7 <public IP:port>'",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; browser regression passed; full CI pending",
+      "evidence": "app/netbridge-desktop/tests/source-state.spec.ts",
+      "note": "Connection path has a separate status element and cannot overwrite room-audio warnings."
     },
     {
       "id": "B237",
@@ -592,9 +592,9 @@
       "severity": "medium",
       "title": "The presenter app shows 'Ready to present' in the red error box",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; browser regression passed; full CI pending",
+      "evidence": "app/netbridge-desktop/tests/source-state.spec.ts",
+      "note": "Verified readiness uses green styling; failures reset to warning styling."
     },
     {
       "id": "B256",
@@ -655,9 +655,9 @@
       "severity": "medium",
       "title": "Presenter app: the audio diagnostics panel (raw JSON, big red 'Restart return audio' button) shows for every presenter, even on the sign-in screen",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; browser regression passed; full CI pending",
+      "evidence": "app/netbridge-desktop/tests/source-state.spec.ts",
+      "note": "Advanced audio diagnostics are hidden and not polled while idle; opening them during a session is explicit."
     },
     {
       "id": "B277",

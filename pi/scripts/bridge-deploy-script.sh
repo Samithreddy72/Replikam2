@@ -195,10 +195,20 @@ case "$RES" in
     UNITS="$(echo "$ROW" | cut -d' ' -f4)"; [ "$UNITS" = "-" ] && UNITS=""
     [ "$(echo "$ROW" | cut -d' ' -f3)" = video ] && UNITS="bridge-feeder-net bridge-uvcd"
     for u in $UNITS; do
-      if ${BRIDGE_DEPLOY_SYSTEMCTL:-systemctl} is-failed --quiet "$u" 2>/dev/null; then
-        die "$u FAILED after the restart — automatic rollback will park the new file if it keeps failing" 7
+      CTL="${BRIDGE_DEPLOY_SYSTEMCTL:-systemctl}"
+      ACTIVE="$($CTL is-active "$u" 2>/dev/null)"
+      RESTARTS="$($CTL show -p NRestarts --value "$u" 2>/dev/null)"
+      case "$RESTARTS" in ''|*[!0-9]*) die "$u restart count unavailable; health not verified" 7 ;; esac
+      [ "$RESTARTS" = 0 ] || die "$u restarted unexpectedly after deployment; health not verified" 7
+      if [ "$ACTIVE" != active ]; then
+        TYPE="$($CTL show -p Type --value "$u" 2>/dev/null)"
+        RESULT="$($CTL show -p Result --value "$u" 2>/dev/null)"
+        EXIT_STATUS="$($CTL show -p ExecMainStatus --value "$u" 2>/dev/null)"
+        [ "$TYPE" = oneshot ] && [ "$ACTIVE" = inactive ] && [ "$RESULT" = success ] && [ "$EXIT_STATUS" = 0 ] \
+          || die "$u is $ACTIVE after restart; health not verified" 7
       fi
-      log "  $u: $(${BRIDGE_DEPLOY_SYSTEMCTL:-systemctl} is-active "$u" 2>/dev/null)"
+      log "  $u: verified $ACTIVE"
+
     done ;;
 esac
 log "done"

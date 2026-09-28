@@ -114,6 +114,13 @@ now="${now:-0}"
 BOOT_ID="$(cat "$BOOTID_SRC" 2>/dev/null)"
 BOOT_ID="${BOOT_ID:-unknown}"
 
+# systemd resets NRestarts on an explicit/manual start. Only its automatic
+# restart chain may accumulate failures; three deliberate restarts are not a crash.
+SYSTEMCTL="${BRIDGE_RUN_SYSTEMCTL:-systemctl}"
+RESTARTS="$($SYSTEMCTL show -p NRestarts --value "${NAME%.sh}.service" 2>/dev/null)"
+case "$RESTARTS" in ''|*[!0-9]*) log "cannot verify restart history — using built-in"; exec_baked "$@" ;; esac
+[ "$RESTARTS" = 0 ] && rm -f "$STAMP"
+
 recent=""
 if [ -f "$STAMP" ]; then
   stamped_boot="$(head -n1 "$STAMP" 2>/dev/null)"

@@ -56,7 +56,7 @@ jobs:
           npm test
           npm run build
           npx playwright install --with-deps chromium
-          npx playwright test tests/fleet-workflow.spec.ts
+          npx playwright test
       - name: Preserve individual test evidence
         # Test verdicts remain mandatory; storage exhaustion must not change them.
         # The same summaries and failed assertions remain in the run log.

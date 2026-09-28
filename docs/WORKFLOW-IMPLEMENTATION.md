@@ -119,3 +119,13 @@ Implementation references: [Go ReverseProxy](https://pkg.go.dev/net/http/httputi
 ## 29 September — honest cancellation and provisioning failures
 
 B257: Fleet baseline Cancel now closes without a command; saving unconfirmed has a separate explicit button. Two local Chromium workflow tests pass, including no writes on Cancel; both are required in CI. B333: provisioning remains after command delivery and now tolerates socket timeout/reset, incomplete HTTP response and invalid JSON, and ignores malformed payloads. Three new isolated tests pass. No live provisioning or baseline command was issued. B20 was reconciled against its existing passing real-Git-history test.
+
+
+## Presenter status reconciliation
+
+Source retains the engine's active bridge across page reloads, keeps lockout messages through polling, separates connection path from audio warnings, uses green readiness styling, and hides advanced diagnostics until a live session. All eight Source/Studio/Fleet Chromium checks pass locally, including three new Source regressions; all browser files are now required in CI. Existing PIN/peer tests are rerun unchanged. B181 and the B145–147 test/environment findings were reconciled against successful eb8cc7d evidence. Release and physical acceptance remain open.
+
+
+## Update guard corrections
+
+B84/B85: per-content proof prevents a later venue outage from reverting an update that already reached Fleet. Unproven trials use boot ID/uptime; no RTC/NTP assumptions. B91: deliberate starts reset the crash sequence using systemd NRestarts; real automatic restart sequences still quarantine. B170: active state and restart evidence are required; completed oneshots need success/zero exit status. B90's existing pending-restart preservation now has a direct revert-all/live-session regression. These are sandboxed signed-script tests, not a physical update qualification. Reference: [systemd v257 service start and restart accounting](https://github.com/systemd/systemd/blob/v257/src/core/service.c).

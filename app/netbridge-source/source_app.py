@@ -1559,8 +1559,7 @@ PIN_MESSAGES = {
               "in the fleet (the bridge → Actions → Set PIN).",
     "bad_format": "The PIN is 4 to 8 digits.",
     "old_bridge": "This bridge runs older software that cannot check a PIN, so NetBridge will not "
-                  "go live on it. Ask your admin to update the bridge, or use the previous "
-                  "NetBridge version (Older versions folder) with this bridge.",
+                  "go live on it. Ask your admin for a compatible, verified bridge and presenter release.",
 }
 # Why the bridge refused a ticket (its 401 on set-peer) or reported itself locked mid-session.
 SESSION_LOST = {
@@ -2576,6 +2575,8 @@ class Handler(BaseHTTPRequestHandler):
                 "voice_backend": getattr(SESSION, "voice_backend", None),
                 "live": SESSION.live,
                 "wanted": SESSION.wanted,
+                "live_host": (PINS.host() or st.get("bridge_host")) if SESSION.wanted else None,
+                "live_bridge_id": MESH.bridge_id if SESSION.wanted else None,
                 "pin": PINS.snapshot(),      # never the ticket itself
                 "voice_muted": SESSION.voice_muted and not SESSION.voice_sending(),
                 "legs": LEGS.snapshot(),
@@ -3051,6 +3052,7 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
 </div>
 
 <div class=card id=health style=display:none>
+  <p id=meshPath class=lat></p>
   <div class=row><span id=c1>Bridge online</span><span class=lat id=l1></span></div>
   <div class=row><span id=c2>Your video arriving at bridge</span><span class=lat id=l2></span></div>
   <div class=row><span id=c5>Your voice arriving at bridge</span><span class=lat id=l5></span></div>
@@ -3062,7 +3064,7 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
   <div class=trow><span>Play meeting audio here</span>
     <label class=sw><input type=checkbox id=playhere checked onchange=togglePlay()><span class=sl></span></label></div>
 </div>
-<details class=card style="margin-top:12px"><summary>Audio diagnostics</summary>
+<details id=audioDiagnostics class=card hidden style="margin-top:12px"><summary>Advanced audio diagnostics</summary>
 <p id=audioSummary>Waiting for receiver…</p>
 <button onclick="captureAudio()">Record 15-second diagnostic</button>
 <button onclick="recoverAudio()">Restart return audio</button>
@@ -3077,6 +3079,7 @@ UI = r"""<!doctype html><meta charset=utf8><title>NetBridge Source</title>
 const $=id=>document.getElementById(id); let BR=[],timer=null;
 const j=(u,o)=>fetch(u,o).then(r=>r.json());
 async function refreshAudio(){
+ if($('audioDiagnostics').hidden||!$('audioDiagnostics').open)return;
  try{
   const a=await j('/api/audio/diagnostics');
   $('audioSummary').textContent=a.backend==='gstreamer-persistent'
@@ -3104,16 +3107,20 @@ function host(){const b=BR.find(x=>x.id===$('bridge').value);return b?(b.tailsca
 async function boot(){
   const s=await j('/api/state');
   if(s.control_url)$('curl').value=s.control_url;
+  if(s.wanted)liveHost=s.live_host||(s.pin&&s.pin.host)||'';
   if(typeof s.return_on==='boolean')$('playhere').checked=s.return_on;
   if(s.signed_in){$('who').textContent='Signed in as '+(s.email||'');$('signout').style.display='';
     $('signin').style.display='none';$('main').style.display='';await load(s)}
-  setLive(s.live);
+  setLive(s.live||s.wanted);
   // Walkthrough J3: "Updated to 2.3.1 while you were away". Only rendered when there is
   // actually something to say — an update just applied, or one is staged for next start.
   if(s.update_note)$('updnote').textContent=s.update_note;
   $('ver').textContent='v'+(s.version||'?');
 }
-function setLive(v){$('livepill').innerHTML=v?'<span class="pill on">● LIVE</span>':'';
+function setLive(v){
+  for(const id of ['bridge','cam','mic'])$(id).disabled=!!v;
+  $('audioDiagnostics').hidden=!v;
+  $('livepill').innerHTML=v?'<span class="pill on">● LIVE</span>':'';
   $('go').textContent=v?'End session':'Go live';$('health').style.display=v?'':'none';
   if(v&&!timer)timer=setInterval(poll,4000); if(!v&&timer){clearInterval(timer);timer=null}}
 async function togglePlay(){const on=$('playhere').checked;
@@ -3143,7 +3150,7 @@ async function load(s){
   }
   BR=b; $('bridge').innerHTML=b.map(x=>`<option value="${x.id}">${x.label?x.label+' · ':''}${x.name}`+
     `${x.label?'':' · '+x.pairing_code}${x.online?'':' (offline)'}</option>`).join('');
-  if(s.last_bridge)$('bridge').value=s.last_bridge;
+  if(s.live_bridge_id||s.last_bridge)$('bridge').value=s.live_bridge_id||s.last_bridge;
   const d=await j('/api/devices');
   $('cam').innerHTML=(d.video||[]).map(x=>`<option>${x.name}</option>`).join('');
   $('mic').innerHTML=(s.system_default_mic?[{name:'System default microphone'}]:(d.audio||[])).map(x=>`<option>${x.name}</option>`).join('');
@@ -3156,7 +3163,7 @@ function remember(){fetch('/api/remember',{method:'POST',headers:{'Content-Type'
 // The PIN is typed here, sent once to this app (127.0.0.1 only), checked ON THE BRIDGE, and the
 // field is cleared at once. What the bridge returns (a one-session ticket) stays inside the app
 // process and never reaches this page. Stop ends the session on the bridge.
-let liveHost='', pinSnooze=0;
+let liveHost='', pinSnooze=0, pinBlockedUntil=0, pinBlockedMessage='';
 const FATAL_PIN=['no_pin','old_bridge','locked_out','locked_out_now'];
 function openPin(why,err){
   $('pinWhy').textContent=why||"Every go-live needs the bridge's PIN.";
@@ -3176,14 +3183,16 @@ async function startSession(extra){
   const r=await j('/api/golive',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(Object.assign({host:h,camera_name:$('cam').value,mic_name:$('mic').value},extra||{}))});
   if(r._error){
-    if(FATAL_PIN.includes(r.reason)){pinClose();$('m2').textContent=r._error;return false}
+    if(FATAL_PIN.includes(r.reason)){
+      pinBlockedUntil=Date.now()+Math.max(60,Number(r.retry_in)||3600)*1000;
+      pinBlockedMessage=r._error;pinClose();checksUnavailable(r._error);$('m2').textContent=r._error;return false}
     if(r.reason==='wrong'||r.reason==='bad_format'){openPin($('pinWhy').textContent,r._error);return false}
     if(r.need_pin){openPin(r._error,'');return false}
     pinClose(); $('m2').textContent=r._error; return false}
-  pinClose();
+  pinBlockedUntil=0;pinBlockedMessage='';pinClose();
   if(r.resumed){$('m2').textContent=r.note||'PIN accepted';$('ckfix').style.display='none';return true}
   liveHost=h;
-  const warn = r.return_player!=='gstreamer';
+  const warn = !['gstreamer','gstreamer-persistent','off'].includes(r.return_player);
   const via = r.via==='mesh' ? 'via secure mesh' : (r.via||'direct');
   $('m2').innerHTML=`live · ${r.camera} · ${r.mic} · <b>${via}</b><br>`+
     `<span style="color:${warn?'var(--red)':'var(--ok)'}">${r.return_note||''}</span>`;
@@ -3310,14 +3319,20 @@ async function checkSetup(){
  catch(e){out.textContent='Setup could not be checked: '+e.message;}
 }
 function checksUnavailable(message){
-  greenSince=null;
+  greenSince=null;setCheckTone(false);$('meshPath').textContent='Connection path not verified';
   for(const [ci,li] of [['c1','l1'],['c2','l2'],['c5','l5'],['c3','l3'],['c4','l4']]){
     $(ci).className='bad'; $(li).textContent='Not currently verified';
   }
   $('ckfix').textContent=message; $('ckfix').style.display='';
   $('m2').textContent='Connection status unavailable — checking…';
 }
+function setCheckTone(ready){
+  $('ckfix').style.color=ready?'var(--ok)':'var(--red)';
+  $('ckfix').style.background=ready?'rgba(24,128,90,.08)':'rgba(198,57,44,.09)';
+  $('ckfix').style.borderColor=ready?'var(--ok)':'rgba(198,57,44,.28)';
+}
 async function poll(){
+  setCheckTone(false);
   const h=liveHost||host(); if(!h)return;
   let c;
   try{c=await j('/api/checks?host='+encodeURIComponent(h));}
@@ -3325,6 +3340,7 @@ async function poll(){
   if(!c||c._error){checksUnavailable((c&&c._error)||'Bridge checks unavailable.');return;}
   // The bridge ended our PIN session (10 min without video, an admin lock, someone else's PIN).
   // It refuses our media now, so every red row below would send the presenter the wrong way.
+  if(Date.now()<pinBlockedUntil){checksUnavailable(pinBlockedMessage);$('m2').textContent=pinBlockedMessage;return;}
   const pin=c.pin||{};
   if(pin.locked && (pin.protocol||1)>=2){
     if(typeof c._bridge_uptime_s==='number')lastBridgeUptime=c._bridge_uptime_s;
@@ -3373,8 +3389,9 @@ async function poll(){
   // Show the path whenever it is known. "direct" is quietly reassuring; "relay" is the
   // one you want to see BEFORE the meeting, because it roughly doubles the latency.
   const mp=c._mesh_path||{};
-  if(mp.via==="relay") $('m2').textContent='⚠ relayed path ('+(mp.detail||'derp')+') — higher latency than direct';
-  else if(mp.via==="direct") $('m2').textContent='direct mesh path'+(mp.detail?' · '+mp.detail:'');
+  if(mp.via==="relay") $('meshPath').textContent='⚠ relayed path ('+(mp.detail||'derp')+') — higher latency than direct';
+  else if(mp.via==="direct") $('meshPath').textContent='Direct connection';
+  else $('meshPath').textContent='Connection path not verified';
 
   const guard=c._guard||{};
   const repaired=Object.keys(guard.repairs||{}).length>0;
@@ -3398,6 +3415,7 @@ async function poll(){
     $('ckfix').textContent='Checking your connection… ready in '+s+'s';
     $('ckfix').style.display='';
   } else {
+    setCheckTone(true);
     $('ckfix').textContent=repaired
       ? 'Ready to present · recovered automatically from a brief interruption'
       : 'Ready to present';

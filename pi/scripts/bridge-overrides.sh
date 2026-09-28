@@ -31,6 +31,7 @@ MOUNTINFO="${BRIDGE_OVR_MOUNTINFO:-/proc/self/mountinfo}"
 UDC_GLOB="${BRIDGE_OVR_UDC_GLOB:-/sys/class/udc/*/state}"
 UPTIME_SRC="${BRIDGE_OVR_UPTIME:-/proc/uptime}"
 AGENT_OK="${BRIDGE_OVR_AGENT_OK:-/run/bridge-agent/last-ok}"
+BOOTID_SRC="${BRIDGE_OVR_BOOTID:-/proc/sys/kernel/random/boot_id}"
 SYSTEMCTL="${BRIDGE_OVR_SYSTEMCTL:-systemctl}"
 MOUNT="${BRIDGE_OVR_MOUNT:-mount}"
 UMOUNT="${BRIDGE_OVR_UMOUNT:-umount}"
@@ -91,11 +92,53 @@ superseded(){   # the stored update was installed on another OS than the one run
   cur="$(running_image)"; [ -n "$cur" ] || return 1      # OS unknown: apply as before
   [ "$(installed_on "$1")" != "$cur" ]                   # unrecorded = installed before 2026-09-28
 }
+# Proof is tied to these exact bytes and survives later network outages. Grace is
+# boot-monotonic: a missing RTC or an NTP clock jump cannot disable rollback.
+lifeline_state(){
+  python3 - "$1" "$2" "$DIR" "$UPTIME_SRC" "$BOOTID_SRC" "$AGENT_OK" "$LIFELINE_QUIET_S" <<'PYLIFE'
+import hashlib,json,os,pathlib,sys
+mode,name,root,uptime,bootid,contact,grace=sys.argv[1:]
+root=pathlib.Path(root); state=root/'.lifeline'/name
+try:
+    digest=hashlib.sha256((root/name).read_bytes()).hexdigest()
+    boot=pathlib.Path(bootid).read_text().strip()
+    up=float(pathlib.Path(uptime).read_text().split()[0])
+    if not boot or up<0: raise ValueError('unknown boot')
+except (OSError,ValueError,IndexError): sys.exit(0)
+try:
+    c=pathlib.Path(contact)
+    heard=str(c.stat().st_mtime_ns)+':'+hashlib.sha256(c.read_bytes()).hexdigest()
+except OSError: heard=''
+try: old=json.loads(state.read_text())
+except (OSError,ValueError): old={}
+if not isinstance(old,dict): old={}
+if mode=='stamp' or old.get('digest')!=digest:
+    old={'digest':digest,'boot':boot,'since':up,'contact':heard,'proven':False}
+elif old.get('proven'):
+    sys.exit(0)
+elif old.get('boot')!=boot:
+    old.update(boot=boot,since=0,contact='')
+if mode!='stamp' and heard and heard!=old.get('contact'):
+    old['proven']=True
+try:
+    since=float(old.get('since',up))
+    if since>up: old['since']=since=up
+except (ValueError,TypeError): old['since']=since=up
+try:
+    state.parent.mkdir(parents=True,exist_ok=True)
+    tmp=state.with_name(state.name+'.tmp')
+    tmp.write_text(json.dumps(old)); os.replace(tmp,state)
+except OSError: sys.exit(0)
+sys.exit(10 if mode!='stamp' and not old.get('proven') and up-since>=float(grace) else 0)
+PYLIFE
+}
 stamp(){
   local cur; cur="$(running_image)"
   if [ -n "$cur" ]; then printf '%s\n' "$cur" > "$DIR/$1.image"; else rm -f "$DIR/$1.image"; fi
+  case "$(field "$1" 3)" in agent|lifeline) lifeline_state stamp "$1" ;; esac
   return 0
 }
+
 dropin_path(){ echo "$DROPIN_ROOT/$1.service.d/50-netbridge-override.conf"; }
 
 session_live(){
@@ -325,21 +368,18 @@ health(){
     case "$kind" in bind|dropin) ;; *) continue ;; esac
     case "$apply" in restart|lifeline|idle|camera|video) crash_check "$name" ;; esac
   done
-  # 3. lifeline guard: an update to anything the bridge needs to stay reachable is reverted if
-  #    the fleet has not heard from this bridge for 15 minutes since it went in.
-  if [ "$up" -ge "$LIFELINE_QUIET_S" ]; then
-    quiet=1
-    if [ -f "$AGENT_OK" ]; then age=$(( $(now) - $($MTIME_CMD "$AGENT_OK" 2>/dev/null || echo 0) )); [ "$age" -lt "$LIFELINE_QUIET_S" ] && quiet=0; fi
-    if [ "$quiet" = 1 ]; then
-      for name in $(names); do
-        [ -f "$DIR/$name" ] || continue
-        superseded "$name" && continue
-        case "$(field "$name" 3)" in agent|lifeline) ;; *) continue ;; esac
-        age=$(( $(now) - $($MTIME_CMD "$DIR/$name" 2>/dev/null || echo 0) ))
-        [ "$age" -ge "$LIFELINE_QUIET_S" ] && quarantine "$name" "no fleet contact for ${LIFELINE_QUIET_S}s after it was installed"
-      done
+  # 3. Only an unproven update may be blamed for a missing fleet connection.
+  for name in $(names); do
+    [ -f "$DIR/$name" ] || continue
+    superseded "$name" && continue
+    case "$(field "$name" 3)" in agent|lifeline) ;; *) continue ;; esac
+    lifeline_state health "$name"; life_rc=$?
+    if [ "$life_rc" = 10 ]; then
+      quarantine "$name" "no fleet contact during this update's ${LIFELINE_QUIET_S}s trial"
+    elif [ "$life_rc" != 0 ]; then
+      log "could not verify lifeline trial for $name; leaving it unchanged"
     fi
-  fi
+  done
   # 4. pending changes whose moment has come
   if [ -d "$DIR/.pending" ]; then
     for f in "$DIR/.pending"/*; do
