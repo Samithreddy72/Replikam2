@@ -51,7 +51,8 @@ V="" VIA="" PRUNE="" YES="" LIST=""
 while [ $# -gt 0 ]; do case "$1" in
   --list) LIST=1; shift ;;
   --via-mac) VIA=1; shift ;;
-  --prune) PRUNE="${2:-}"; [ $# -ge 2 ] && shift 2 || shift ;;
+  --prune) [[ "${2-}" =~ ^[1-9][0-9]*$ ]] || die "--prune needs how many versions to keep (1 or more)"
+           PRUNE="$2"; shift 2 ;;
   --yes) YES=1; shift ;;
   -h|--help) awk 'NR > 1 { if (/^#/) print; else exit }' "$0"; exit 0 ;;
   -*) die "unknown option $1 (see --help)" ;;
@@ -63,15 +64,18 @@ if [ -n "$LIST" ]; then
   exit 0
 fi
 [ -n "$V$PRUNE" ] || die "usage: publish-ota.sh <version> [--via-mac] [--prune N [--yes]] | --prune N [--yes] | --list"
-[ -z "$PRUNE" ] || [[ "$PRUNE" =~ ^[1-9][0-9]*$ ]] || die "--prune needs how many versions to keep (1 or more)"
 [ -z "$V" ] || [[ "$V" =~ $VRE ]] || die "bad version '$V' (expected like 2.1.0-abc1234)"
 [[ "$MIN_FREE_MB" =~ ^[0-9]+$ ]] || die "FLEET_MIN_FREE_MB must be a whole number of MB, not '$MIN_FREE_MB'"
 [ -f "$SSHKEY" ] || die "no fleet SSH key at $SSHKEY"
 
 # The versions the fleet OFFERS: complete and signed. The same list the panel and `nb update` use.
+# Installable = signed AND its image is there. Checked here, not left to the server: a fleet still
+# running the server from before 2026-09-28 lists an image-less leftover with a .sig as "signed"
+# with "bytes": null, and --prune would keep that leftover as one of the newest N and remove the
+# last real image (review, 2026-09-28).
 offered_versions(){
   curl -fsS -m 20 -H "Authorization: Bearer $(token)" "$FLEET/admin/payloads/ota" \
-    | python3 -c 'import json,sys; [print(x["version"]) for x in json.load(sys.stdin) if x.get("signed")]'
+    | python3 -c 'import json,sys; [print(x["version"]) for x in json.load(sys.stdin) if x.get("signed") and x.get("bytes")]'
 }
 # The versions an unfinished (active or paused) rollout still sends bridges to: its version, and
 # the /payloads/ota/<v> its update commands actually fetch, in case the two differ. The fleet is

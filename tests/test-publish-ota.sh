@@ -21,7 +21,7 @@ ok(){ echo "  PASS  $1"; pass=$((pass+1)); }
 no(){ echo "  FAIL  $1"; fail=$((fail+1)); sed 's/^/        /' "$T/out" 2>/dev/null | tail -5; }
 
 PY=""
-for c in "${FLEET_TEST_PY:-}" "$HOME/netbridge/fleet-test-venv/bin/python" /private/tmp/claude-501/bev311/bin/python python3; do
+for c in "${FLEET_TEST_PY:-}" "$HOME/netbridge/fleet-test-venv/bin/python" python3; do
   [ -n "$c" ] && command -v "$c" >/dev/null 2>&1 && "$c" -c 'import fastapi, uvicorn, sqlalchemy' 2>/dev/null && { PY="$c"; break; }
 done
 # "SKIPPED" is the word tools/run-tests.sh counts as a skip (rather than a crash).
@@ -65,6 +65,9 @@ for a; do case "\$a" in
   http://127.0.0.1:$PORT/*) ;;
   http://*|https://*) echo "\$a" >> "$T/refused"; echo "test curl: refusing \$a" >&2; exit 7 ;;
 esac; done
+if [ -z "\$gh" ] && [ -e "$T/old_server" ] && [[ "\${@: -1}" == */admin/payloads/ota ]]; then
+  exec python3 "$T/old-ota-list.py" "$OTA"         # the live fleet's listing, until it is redeployed
+fi
 [ -n "\$gh" ] || exec "$REAL_CURL" "\$@"
 out=""; auth=""; prev=""
 for a; do [ "\$prev" = -o ] && out="\$a"; [ "\$prev" = -K ] && auth="\$a"; prev="\$a"; done
@@ -81,9 +84,34 @@ n=\$(( \$(cat "$T/ssh.n" 2>/dev/null || echo 0) + 1 )); echo \$n > "$T/ssh.n"
 # question) nothing is piped in; the real ssh would only forward keystrokes nobody reads.
 if [ -t 0 ]; then : > "$T/ssh.in.\$n"; else cat > "$T/ssh.in.\$n"; fi
 printf '%s\n' "\$cmd" >> "$T/ssh.log"
-chk="\$(printf '%s\n' "\$cmd"; cat "$T/ssh.in.\$n")"; chk="\${chk//"$T"/}"
-case "\$chk" in *"/data/payloads"*|*"/tmp/ota-"*) echo "\$cmd" >> "$T/unsandboxed"; exit 99 ;; esac
+# The sandbox path goes in through a variable: macOS /bin/bash 3.2 splits ${x//"/lit/eral"/y} at the
+# first slash inside the quotes, so a pasted-in path was never replaced at all (found 2026-09-28).
+sb="$T"
+chk="\$(printf '%s\n' "\$cmd"; cat "$T/ssh.in.\$n")"; chk="\${chk//\$sb/SANDBOX}"
+# Any path that OPENS a quote with / after the sandbox is renamed is a real path on this Mac
+# ('/tmp' in the host clean-up if FLEET_TMP were unset); a closing quote before /* is not.
+case "\$chk" in *" '/"*|*" \"/"*|*"/data/payloads"*|*"/tmp/ota-"*) echo "\$cmd" >> "$T/unsandboxed"; exit 99 ;; esac
 bash -c "\$cmd" < "$T/ssh.in.\$n"
+EOF
+# The OTA listing of the fleet server from before 2026-09-28 (7401809), line for line: every
+# directory with a manifest, "signed" if a .sig is there, "bytes": null when the image is not.
+cat > "$T/old-ota-list.py" <<'EOF'
+import json, os, sys
+root, out = sys.argv[1], []
+for v in sorted(os.listdir(root)):
+    mf = os.path.join(root, v, "manifest.txt")
+    if not os.path.isfile(mf):
+        continue
+    kv = {}
+    for line in open(mf):
+        if "=" in line:
+            k, _, val = line.strip().partition("=")
+            kv[k] = val
+    img = os.path.join(root, v, kv.get("image", ""))
+    out.append({"version": kv.get("version", v), "image": kv.get("image"),
+                "bytes": os.path.getsize(img) if kv.get("image") and os.path.isfile(img) else None,
+                "signed": os.path.exists(mf + ".sig"), "built": kv.get("built")})
+print(json.dumps(out))
 EOF
 cat > "$T/bin/scp" <<'EOF'
 #!/bin/bash
@@ -299,6 +327,12 @@ TOKEN="$T/bad-token" ota --prune 1 --yes
   || no "if the fleet cannot say what it offers or which versions rollouts use, nothing is removed (rc $(rc))"
 ota --prune 0
 [ "$(rc)" != 0 ] && ok "--prune 0 is refused" || no "--prune 0 is refused"
+for args in "$C --prune" "--prune --yes" "$C --prune ="; do
+  ota $args
+  { [ "$(rc)" != 0 ] && grep -q "needs how many versions" "$T/out" && ! grep -q "▶" "$T/out"; } \
+    && ok "'publish-ota.sh $args' is refused before doing anything (it was a silent publish without pruning)" \
+    || no "'publish-ota.sh $args' is refused before doing anything (rc $(rc))"
+done
 ota --prune 1 --yes
 { [ "$(rc)" = 0 ] && [ -d "$OTA/$C" ] && [ ! -e "$OTA/$B" ]; } \
   && ok "--prune 1 kept the newest installable version ($C) and removed an older one ($B)" \
@@ -336,7 +370,35 @@ rm -rf "$OTA/$F"
 ota --list
 { [ "$(rc)" = 0 ] && grep -q "\"$D\"" "$T/out"; } && ok "--list shows what the fleet offers" || no "--list shows what the fleet offers"
 
+echo "== --prune before the fleet server is redeployed =="
+# The live fleet lists an image-less leftover that has a .sig as signed ("bytes": null). Rollouts
+# are finished here, so nothing is kept for them and only the N rule decides.
+python3 - "$T/fleet.db" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1]); c.execute("UPDATE rollouts SET status = 'done'"); c.commit()
+PY
+X=2.3.0-abcdef1
+mkdir -p "$OTA/$X"
+printf 'version=%s\nimage=rootfs.tar.zst\n' "$X" > "$OTA/$X/manifest.txt"; : > "$OTA/$X/manifest.txt.sig"
+real=(); for d in "$OTA"/2.*; do [ "$d" = "$OTA/$X" ] || { real+=("${d##*/}"); ago 48 "$d"; }; done
+ago 30 "$OTA/$D"; ago 24 "$OTA/$X"                                # the leftover is the newest
+: > "$T/old_server"
+ota --prune 1 --yes
+rm -f "$T/old_server"
+others=0; for v in "${real[@]}"; do [ "$v" = "$D" ] || [ ! -e "$OTA/$v" ] || others=$((others+1)); done
+{ [ "$(rc)" = 0 ] && [ ${#real[@]} -ge 2 ] && [ -d "$OTA/$D" ] && grep -q "keeping $D (one of the newest 1)" "$T/out" \
+  && [ ! -e "$OTA/$X" ] && [ "$others" = 0 ]; } \
+  && ok "against the older server, --prune 1 keeps the newest REAL image ($D) and removes the image-less leftover ($X)" \
+  || no "against the older server, --prune 1 keeps the newest REAL image ($D) and removes the image-less leftover ($X) (rc $(rc); real: ${real[*]})"
+
 echo "== nothing left the sandbox =="
+# The stand-in fleet host itself: a real path in a command is refused and recorded, never run.
+"$T/bin/ssh" test@fleet.invalid "find '/tmp' -mindepth 1 -maxdepth 1 -name 'ota-[0-9]*' -print" </dev/null >/dev/null 2>&1; r=$?
+{ [ "$r" = 99 ] && grep -q "find '/tmp'" "$T/unsandboxed" 2>/dev/null; } \
+  && ok "the stand-in fleet host refuses a command naming a real path (the host clean-up with FLEET_TMP unset: '/tmp')" \
+  || no "the stand-in fleet host refuses a command naming a real path (rc $r)"
+grep -vF "find '/tmp' -mindepth 1 -maxdepth 1 -name 'ota-[0-9]*' -print" "$T/unsandboxed" > "$T/unsandboxed.rest" 2>/dev/null
+if [ -s "$T/unsandboxed.rest" ]; then mv "$T/unsandboxed.rest" "$T/unsandboxed"; else rm -f "$T/unsandboxed" "$T/unsandboxed.rest"; fi
 [ ! -e "$T/unsandboxed" ] && ok "no command on the stand-in fleet host named a real path" || { : > "$T/out"; cp "$T/unsandboxed" "$T/out"; no "no command on the stand-in fleet host named a real path"; }
 [ ! -e "$T/refused" ] && ok "no request went anywhere but the local test server" || { cp "$T/refused" "$T/out"; no "no request went anywhere but the local test server"; }
 

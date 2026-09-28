@@ -73,7 +73,7 @@ pub "$CLOSED" "$T/src/bridge-status.sh" --name
 
 echo "== part 2: publishing to the real fleet server =="
 PY=""
-for c in "${FLEET_TEST_PY:-}" "$HOME/netbridge/fleet-test-venv/bin/python" /private/tmp/claude-501/bev311/bin/python python3; do
+for c in "${FLEET_TEST_PY:-}" "$HOME/netbridge/fleet-test-venv/bin/python" python3; do
   [ -n "$c" ] && command -v "$c" >/dev/null 2>&1 && "$c" -c 'import fastapi, uvicorn, sqlalchemy, multipart' 2>/dev/null && { PY="$c"; break; }
 done
 if [ -z "$PY" ]; then
