@@ -125,6 +125,8 @@ bash "$DEPLOY" --running | grep -q '^bridge-uvcd.sh override sha256=.*PENDING: w
   && ok "fleet 'running' shows it as pending, with the reason" || no "running output: $(bash "$DEPLOY" --running)"
 reset_log; bash "$OVR" health >/dev/null 2>&1
 ! called "restart bridge-uvcd" && ok "health tick: laptop still attached -> still waits" || no "camera restarted while attached"
+echo suspended > "$T/udc"; reset_log; bash "$OVR" health >/dev/null 2>&1
+! called "restart bridge-uvcd" && [ -f "$D/.pending/bridge-uvcd.sh" ] && ok "sleeping attached laptop keeps camera update pending" || no "camera restarted under suspended laptop"
 echo "not attached" > "$T/udc"; echo 1 > "$T/live"; reset_log; bash "$OVR" health >/dev/null 2>&1
 ! called "restart bridge-uvcd" && ok "health tick: unplugged but a session is live -> still waits" || no "camera restarted during a live session"
 : > "$T/live"; reset_log; bash "$OVR" health >/dev/null 2>&1

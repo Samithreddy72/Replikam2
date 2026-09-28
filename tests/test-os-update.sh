@@ -89,7 +89,7 @@ publish(){  # publish <version> <filler-bytes>: a bridge root filesystem + signe
   echo '# agent' > "$r/usr/local/bin/bridge-agent.py"
   head -c "$2" /dev/urandom > "$r/filler"
   tar -C "$r" -cf - . | zstd -q -c > "$d/rootfs.tar.zst"
-  printf 'version=%s\nimage=rootfs.tar.zst\nsha256=%s\nsize=%s\nkernel=%s\n' "$1" \
+  printf 'product=netbridge-os\nversion=%s\nimage=rootfs.tar.zst\nsha256=%s\nsize=%s\nkernel=%s\n' "$1" \
     "$(sha256sum "$d/rootfs.tar.zst" | cut -d' ' -f1)" "$(fsize "$d/rootfs.tar.zst")" "$(uname -r)" > "$d/manifest.txt"
   openssl dgst -sha256 -sign "$T/ota.pem" -out "$d/manifest.txt.sig" "$d/manifest.txt" 2>/dev/null
 }
@@ -134,6 +134,18 @@ if [ "$(rc)" = 8 ] && echo "$d" | grep -q "meeting laptop is attached" && echo "
    && ! echo "$d" | grep -qE ' [0-9]+$' && ! echo "$d" | grep -q -- "--force"; then
   ok "refused under an attached laptop, in plain words: '$d'"
 else no "refusal text (rc $(rc)): '$d'"; fi
+fresh; echo suspended > "$T/udc"; update --url "file://$T/srv/$V1"
+[ "$(rc)" = 8 ] && ! did "mkfs" && ok "sleeping attached laptop blocks OS update" || no "suspended laptop was treated as unplugged"
+# Re-sign a wrong-product manifest with the real test key: reject despite valid crypto.
+cp "$T/srv/$V1/manifest.txt" "$T/good-manifest"
+for product in netbridge-disk other-product ''; do
+  sed "s/^product=.*/product=$product/" "$T/good-manifest" > "$T/srv/$V1/manifest.txt"
+  openssl dgst -sha256 -sign "$T/ota.pem" -out "$T/srv/$V1/manifest.txt.sig" "$T/srv/$V1/manifest.txt" 2>/dev/null
+  fresh; update --no-reboot --url "file://$T/srv/$V1"
+  [ "$(rc)" = 3 ] && ! did "mkfs" && ok "wrong or absent product rejected before formatting ($product)" || no "wrong-product manifest accepted ($product)"
+done
+cp "$T/good-manifest" "$T/srv/$V1/manifest.txt"
+openssl dgst -sha256 -sign "$T/ota.pem" -out "$T/srv/$V1/manifest.txt.sig" "$T/srv/$V1/manifest.txt" 2>/dev/null
 fresh; touch "$T/mkfs-fail"; update --no-reboot --url "file://$T/srv/$V1"
 d="$(st detail)"
 [ "$(rc)" = 6 ] && [ "$(st state)" = failed ] && ! echo "$d" | grep -qE ' [0-9]+$' \

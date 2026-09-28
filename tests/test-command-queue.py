@@ -83,7 +83,7 @@ db = SessionLocal()
 for i, name in ((1, "Studio A"), (2, "Studio B"), (3, "Hall"), (4, None)):
     db.add(Device(id="q%d" % i, org_id="org-q", name=name, pairing_code="BRIDGE-Q%03d" % i, number=i if name else None,
                   claimed_at=utcnow() if name else None, last_seen=utcnow(), version="2.2.1-aaaaaaa",
-                  latest={"udc": "not attached", "streams": {"video": False}, "pin": PIN2}))
+                  latest={"udc": "not attached", "streams": {"video": False, "voice": False}, "pin": PIN2}))
 db.commit()
 
 
@@ -316,7 +316,7 @@ print("\n  ---- broadcast has the same guards as one bridge ----")
 for cid in [c[0] for d in ("q1", "q2", "q3") for c in cmds(d) if c[2] in ("pending", "sent")]:
     set_row(cid, status="done")
 s = SessionLocal()
-s.get(Device, "q2").latest = {"udc": "configured", "streams": {"video": False}, "pin": PIN2}
+s.get(Device, "q2").latest = {"udc": "configured", "streams": {"video": False, "voice": False}, "pin": PIN2}
 s.commit()
 s.close()
 b1 = client.post("/admin/commands/broadcast", json={"type": "restart", "idempotency_key": "k-1"})

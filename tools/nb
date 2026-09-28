@@ -41,6 +41,7 @@
 Anything that changes a bridge asks first; add --yes to skip the question (scripts).
 Config: FLEET_URL (default https://fleet.scine.online), token in ~/.netbridge/fleet-automation-token.
 """
+import http.client
 import json, os, pathlib, re, shlex, socket, subprocess, sys, time, urllib.error, urllib.request
 
 FLEET = os.environ.get("FLEET_URL", "https://fleet.scine.online").rstrip("/")
@@ -93,8 +94,11 @@ def api(method, path, body=None, timeout=30, soft=()):
             except ValueError:
                 raise Refused(e.code, {"detail": detail})
         die("fleet said %s: %s" % (e.code, detail))
-    except urllib.error.URLError as e:
-        die("cannot reach the fleet (%s): %s" % (FLEET, e.reason))
+    except (OSError, http.client.HTTPException):
+        suffix = " Check command history before retrying; the request may have reached the fleet." if method != "GET" else " Try again when the connection returns."
+        die("The fleet connection was interrupted." + suffix)
+    except (ValueError, UnicodeError):
+        die("The fleet returned an unreadable response. Check its health before retrying.")
 
 
 def devices():
@@ -106,15 +110,18 @@ def pick(query, allow_all=False):
     if allow_all and query.lower() == "all":
         return [d for d in devs if d.get("claimed")]
     # A fleet number: NB-003, nb3, 3 - the name you and the panel use for a bridge.
-    m = re.fullmatch(r"(?:nb-?)?0*(\d{1,4})", query.strip().lower())
+    m = re.fullmatch(r"(?:nb-?)?0*(\d+)", query.strip().lower())
     if m:
         hit = [d for d in devs if d.get("number") == int(m.group(1))]
         if hit:
             return hit
+        die("no bridge has fleet number %s — try: nb list" % int(m.group(1)))
     q = query.lower()
     exact = [d for d in devs if (d.get("name") or "").lower() == q or d["id"] == query]
-    if exact:
-        return exact[:1]
+    if len(exact) == 1:
+        return exact
+    if len(exact) > 1:
+        die("%r names multiple bridges — use the fleet number or full device id" % query)
     cand = [d for d in devs if (d.get("name") or "").lower().startswith(q) or d["id"].endswith(query)]
     if len(cand) == 1:
         return cand
@@ -126,8 +133,9 @@ def pick(query, allow_all=False):
 def short_uptime(u):
     """'2 days, 3 hours, 4 minutes' -> '2d03h04m' (fits the table)."""
     m = {k: 0 for k in "dhm"}
-    for n, unit in re.findall(r"(\d+)\s*(day|hour|minute)", str(u or "")):
-        m[unit[0]] = int(n)
+    for n, unit in re.findall(r"(\d+)\s*(week|day|hour|minute)", str(u or "")):
+        if unit == "week": m["d"] += 7 * int(n)
+        else: m[unit[0]] += int(n)
     if not re.search(r"\d", str(u or "")):
         return "?"
     return ("%dd%02dh%02dm" % (m["d"], m["h"], m["m"])) if m["d"] else "%dh%02dm" % (m["h"], m["m"])

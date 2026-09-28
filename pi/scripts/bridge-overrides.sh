@@ -110,7 +110,9 @@ session_live(){
 }
 laptop_attached(){
   local f
-  for f in $UDC_GLOB; do [ "$(cat "$f" 2>/dev/null)" = "configured" ] && return 0; done
+  for f in $UDC_GLOB; do
+    case "$(cat "$f" 2>/dev/null)" in configured|suspended) return 0 ;; esac
+  done
   return 1
 }
 

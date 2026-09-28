@@ -36,7 +36,7 @@ services:
       # Tailscale credentials. The control plane mints a SHORT-LIVED, TAG-SCOPED key each time
       # a bridge is claimed or the presenter app goes live — which is what lets the walkthrough
       # promise "no Tailscale key on the SD card". Without these the mint fails and the app
-      # silently falls back to the LAN path the walkthrough forbids.
+      # cannot go live: there is no LAN fallback.
       TS_API_KEY: "${TS_API_KEY}"
       # Optional inventory-only token for expiry warnings; never used to mint keys.
       TS_DEVICES_READ_TOKEN: "${TS_DEVICES_READ_TOKEN:-}"

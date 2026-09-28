@@ -95,7 +95,7 @@ dur(){   # dur <seconds> -> "2 h 30 min" / "30 min" / "40 s"
 busy(){
   local f pid t0 t1
   for f in $UDC_GLOB; do
-    [ "$(cat "$f" 2>/dev/null)" = configured ] && { echo "the meeting laptop is attached"; return 0; }
+    case "$(cat "$f" 2>/dev/null)" in configured|suspended) echo "the meeting laptop is attached"; return 0 ;; esac
   done
   if [ -n "$LIVE_CMD" ]; then eval "$LIVE_CMD" && { echo "a presenter session is live"; return 0; }; return 1; fi
   pid=$(pgrep -f 'udpsrc port=5000' | head -1)
@@ -277,6 +277,10 @@ log "verifying manifest signature (EC/SHA256) ..."
 openssl dgst -sha256 -verify "$PUBKEY" -signature "$STAGE/manifest.txt.sig" "$STAGE/manifest.txt" >/dev/null 2>&1 \
   || die "the manifest signature does not verify with this bridge's OTA key — refusing the update" 3
 log "  signature OK"
+# The disk image and rootfs manifests share a signing key. A valid signature alone
+# must never make an unrelated product eligible for partition formatting.
+product=$(sed -n 's/^product=//p' "$STAGE/manifest.txt")
+[ "$product" = netbridge-os ] || die "the signed manifest is not a NetBridge OS root filesystem update" 3
 
 VER=$(sed -n 's/^version=//p'  "$STAGE/manifest.txt")
 img=$(sed -n 's/^image=//p'    "$STAGE/manifest.txt")

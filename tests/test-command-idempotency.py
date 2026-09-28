@@ -67,7 +67,7 @@ db = SessionLocal()
 for i in (1, 2):
     # claimed: a broadcast skips unclaimed bench cards (2026-09-28)
     d = Device(id="dev%d" % i, org_id="org-test", name="bridge-%d" % i,
-               pairing_code="BRIDGE-%04d" % (1000 + i), claimed_at=utcnow(), last_seen=utcnow(), latest={"udc":"not attached","streams":{}})
+               pairing_code="BRIDGE-%04d" % (1000 + i), claimed_at=utcnow(), last_seen=utcnow(), latest={"udc":"not attached","streams":{"video":False,"voice":False}})
     db.add(d)
 db.commit()
 

@@ -31,14 +31,33 @@ A bridge that cannot reach the old URL cannot be told about the new one.
    both containers and checks what is live. DOMAIN is the name those checks ask; it defaults
    to `fleet.scine.online`.
 
+## Mesh configuration before presenter acceptance
+
+Fill in all `TS_*` settings in the template. The presenter requires the private mesh;
+missing credentials cannot be worked around with a LAN connection. Set `TS_SOURCE_TAG` and
+`TS_BRIDGE_TAG` to the exact tags in the existing tailnet policy. The source default is
+`tag:nb-source`; some installations use `tag:source`. Preserve the installed policy explicitly
+instead of assuming those names are interchangeable.
+
+The key-minting OAuth client needs authority to create auth keys with these tags. Use a
+separate inventory-only access token for optional `TS_DEVICES_READ_TOKEN` monitoring; this
+field accepts a bearer access token, not an OAuth client secret. Leave it empty when unused.
+See [Tailscale's OAuth scope and tag documentation](https://tailscale.com/docs/features/oauth-clients).
+Never paste credentials into CLI arguments or troubleshooting reports.
+
+After deployment, verify that a newly enrolled bridge receives its mesh address and that a
+presenter can unlock and reach that bridge. An HTTP health response alone does not establish
+mesh or media readiness.
+
 ## After it is up
 
 - Turn on automatic snapshots. The database lives in the `fleetdata` volume; the snapshot
   is the actual backup.
 - Keep the `caddydata` volume — it holds the certificates, and Let's Encrypt rate-limits
   re-issues.
-- Leave `BOOTSTRAP_TOKENS` empty: the bootstrap key self-retires once a real admin exists,
-  and an unconfigured deployment should be closed rather than open with a guessable key.
+- Clear `ADMIN_API_KEY` after creating the first admin; it self-retires at that point.
+- `BOOTSTRAP_TOKENS` is separate device enrollment authority. Configure it only for enrollment
+  and clear it afterward; creating an admin does not retire device bootstrap tokens.
 
 ## Updating later
 
