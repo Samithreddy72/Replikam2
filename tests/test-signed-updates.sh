@@ -6,6 +6,7 @@
 # (pi/configs/updatable.conf), and stand-ins only for what needs a Pi (mount, umount, systemctl,
 # the UDC state, the clock, "is a presenter session live").
 set -uo pipefail
+file_mode(){ python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777)[2:])' "$1"; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$HERE/.."
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
@@ -38,6 +39,9 @@ exit 0
 EOF
 cat > "$T/bin/umount" <<EOF
 #!/bin/bash
+[ -e "$T/umount-fail" ] && exit 1
+if [ -e "$T/umount-busy" ] && [ "\$1" != -l ]; then exit 1; fi
+[ "\$1" = -l ] && shift
 awk -v t="\$1" 'BEGIN{d=0} {l[NR]=\$0; m[NR]=\$5} END{for(i=NR;i>=1;i--) if(!d && m[i]==t){skip=i; d=1}; for(i=1;i<=NR;i++) if(i!=skip) print l[i]}' "$T/mountinfo" > "$T/mountinfo.new"
 mv "$T/mountinfo.new" "$T/mountinfo"; exit 0
 EOF
@@ -64,7 +68,7 @@ export BRIDGE_OVR_CATALOG="$T/updatable.conf" BRIDGE_OVR_DIR="$T/data/overrides"
        BRIDGE_OVR_RUN="$T/run" BRIDGE_OVR_DROPIN_ROOT="$T/dropins" BRIDGE_OVR_MOUNTINFO="$T/mountinfo" \
        BRIDGE_OVR_UDC_GLOB="$T/udc" BRIDGE_OVR_UPTIME="$T/uptime" BRIDGE_OVR_AGENT_OK="$T/agent-ok" \
        BRIDGE_OVR_SYSTEMCTL="$T/bin/systemctl" BRIDGE_OVR_MOUNT="$T/bin/mount" BRIDGE_OVR_UMOUNT="$T/bin/umount" \
-       BRIDGE_OVR_LIVE_CMD="[ -s $T/live ]" BRIDGE_OVR_MTIME_CMD="stat -f %m" \
+       BRIDGE_OVR_LIVE_CMD="[ -s $T/live ]" BRIDGE_OVR_MTIME_CMD="$(if [ "$(uname -s)" = Darwin ]; then echo 'stat -f %m'; else echo 'stat -c %Y'; fi)" \
        BRIDGE_OVR_IMAGE_VERSION="$T/image-version"
 echo "2.2.0-aaaaaaa" > "$T/image-version"   # the OS this bridge runs (/etc/netbridge-image-version)
 export BRIDGE_DEPLOY_DIR="$T/data/overrides" BRIDGE_DEPLOY_PUBKEY="$T/pub.pem" \
@@ -98,7 +102,7 @@ publish bridge-web.py "$T/web.py"; reset_log; deploy bridge-web.py
 if [ "$(rc)" = 0 ] && bound "$T/root/usr/local/bin/bridge-web.py" && called "restart bridge-web" && grep -q "applied now" "$T/out"; then
   ok "bridge-web.py: signature OK, compiles, bind-mounted over the built-in, bridge-web restarted"
 else no "bridge-web.py deploy: rc=$(rc) $(tail -3 "$T/out")"; fi
-[ "$(stat -f %Lp "$D/bridge-web.py")" = 755 ] && ok "installed executable (0755)" || no "wrong mode $(stat -f %Lp "$D/bridge-web.py")"
+[ "$(file_mode "$D/bridge-web.py")" = 755 ] && ok "installed executable (0755)" || no "wrong mode $(file_mode "$D/bridge-web.py")"
 
 printf '#!/usr/bin/env python3\nprint("broken"\n' > "$T/bad.py"
 publish jitter-sentry.sh "$T/evil.sh"                   # (valid bash — used later)
@@ -146,7 +150,7 @@ printf '#!/bin/bash\necho GADGET-V2\n' > "$T/gadget.sh"; publish uvc-raw-setup.s
   && ok "USB descriptor update: in place, nothing restarted, applies at the next reboot" || no "uvc-raw-setup.sh: rc=$(rc) $(tail -2 "$T/out")"
 ssh-keygen -q -t ed25519 -N "" -f "$T/k1" && printf 'restrict,pty %s\n' "$(cat "$T/k1.pub")" > "$T/keys"
 publish owner_ssh_authorized_keys "$T/keys"; deploy owner_ssh_authorized_keys
-[ "$(rc)" = 0 ] && bound "$T/root/etc/netbridge/owner_ssh_authorized_keys" && [ "$(stat -f %Lp "$D/owner_ssh_authorized_keys")" = 644 ] \
+[ "$(rc)" = 0 ] && bound "$T/root/etc/netbridge/owner_ssh_authorized_keys" && [ "$(file_mode "$D/owner_ssh_authorized_keys")" = 644 ] \
   && ok "owner SSH key rotation: valid key accepted, 0644, in place" || no "key rotation failed: rc=$(rc) $(tail -2 "$T/out")"
 printf 'ssh-ed25519 NOT-A-KEY\n' > "$T/badkeys"; publish owner_ssh_authorized_keys "$T/badkeys"; deploy owner_ssh_authorized_keys
 [ "$(rc)" = 5 ] && ok "a malformed key file is refused (cannot lock the owner out by typo)" || no "malformed key accepted (rc $(rc))"
@@ -156,10 +160,14 @@ printf '[Service]\nCPUAffinity=3\n' > "$T/dropin"; publish dropin.bridge-web "$T
 printf '[Evil]\nx=1\n' > "$T/dropin2"; publish dropin.jitter-sentry "$T/dropin2"; deploy dropin.jitter-sentry
 [ "$(rc)" = 5 ] && ok "drop-in with an unknown section is refused" || no "bad drop-in accepted (rc $(rc))"
 
+# Busy script mount: ordinary unmount fails, lazy detach must expose the baked-in path.
+touch "$T/umount-busy"
 # ===================== 7. revert =====================
 reset_log; bash "$DEPLOY" --revert bridge-web.py >"$T/out" 2>&1
 ! bound "$T/root/usr/local/bin/bridge-web.py" && [ ! -e "$D/bridge-web.py" ] && called "restart bridge-web" \
   && ok "revert: unmounted, removed, service restarted on the built-in" || no "revert failed: $(cat "$T/out")"
+
+rm -f "$T/umount-busy"
 
 # ===================== 8. crash-loop rollback of a bound service =====================
 publish bridge-web.py "$T/web.py"; deploy bridge-web.py

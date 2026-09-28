@@ -79,7 +79,7 @@ export PATH="$T/bin:$PATH"
 # ---- signed OS versions on a "fleet" -----------------------------------------------------------
 openssl ecparam -name prime256v1 -genkey -noout -out "$T/ota.pem" 2>/dev/null
 openssl ec -in "$T/ota.pem" -pubout -out "$T/ota-pub.pem" 2>/dev/null
-fsize(){ stat -f %z "$1" 2>/dev/null || stat -c %s "$1"; }
+fsize(){ python3 -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$1"; }
 publish(){  # publish <version> <filler-bytes>: a bridge root filesystem + signed manifest
   local r="$T/roots/$1" d="$T/srv/$1"
   mkdir -p "$r/etc" "$r/usr/local/bin" "$d"

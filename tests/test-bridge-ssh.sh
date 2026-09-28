@@ -3,6 +3,7 @@
 # forwarding. Runs the real script in its test mode (BRIDGE_SSH_ONCE: write + `sshd -t`, exit),
 # with this machine's real sshd validating the generated config.
 set -uo pipefail
+file_mode(){ python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777)[2:])' "$1"; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
 S="$HERE/../pi/scripts/bridge-ssh.sh"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
@@ -31,7 +32,7 @@ for want in 'PermitRootLogin no' 'PasswordAuthentication no' 'KbdInteractiveAuth
             'AllowAgentForwarding no' 'X11Forwarding no' 'PermitTunnel no' "AuthorizedKeysFile $T/keys"; do
   grep -qx "$want" "$C" && ok "$want" || no "missing: $want"
 done
-[ -s "$T/hk/ssh_host_ed25519_key" ] && [ "$(stat -f %Lp "$T/hk")" = 700 ] && ok "host key created on /data (dir 0700): stable fingerprint across reboots/updates" || no "host key missing"
+[ -s "$T/hk/ssh_host_ed25519_key" ] && [ "$(file_mode "$T/hk")" = 700 ] && ok "host key created on /data (dir 0700): stable fingerprint across reboots/updates" || no "host key missing"
 fp1="$(ssh-keygen -l -f "$T/hk/ssh_host_ed25519_key.pub")"; run 100.67.196.104 >/dev/null
 [ "$(ssh-keygen -l -f "$T/hk/ssh_host_ed25519_key.pub")" = "$fp1" ] && ok "host key reused, not regenerated" || no "host key changed on restart"
 

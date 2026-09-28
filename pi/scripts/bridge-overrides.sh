@@ -115,6 +115,17 @@ laptop_attached(){
 }
 
 # ---------------------------------------------------------------- putting files in place
+detach_target(){
+  local target="$1" attempts=0
+  while is_bound "$target"; do
+    attempts=$((attempts+1))
+    [ "$attempts" -le 16 ] || { log "too many stacked mounts at $target"; return 5; }
+    # Running shells may hold the old script open. Lazy detach changes future opens;
+    # the existing process stays alive until the normal restart/idle policy permits it.
+    "$UMOUNT" "$target" 2>/dev/null || "$UMOUNT" -l "$target" 2>/dev/null \
+      || { log "cannot detach override at $target; no rollback claimed"; return 5; }
+  done
+}
 bind_one(){   # verify + bind a bind/keys item; dropins are written under /run
   local name="$1" target kind
   target="$(field "$name" 1)"; kind="$(field "$name" 2)"
@@ -125,7 +136,7 @@ bind_one(){   # verify + bind a bind/keys item; dropins are written under /run
   esac
   verified "$name" || { log "$name: override missing or signature invalid — not applied"; return 3; }
   [ -e "$target" ] || { log "$name: built-in $target does not exist — refusing"; return 4; }
-  while is_bound "$target"; do $UMOUNT "$target" 2>/dev/null || break; done
+  detach_target "$target" || return 5
   $MOUNT --bind "$DIR/$name" "$target" || { log "$name: bind mount failed"; return 5; }
   $MOUNT -o remount,bind,ro "$target" 2>/dev/null || true
   log "$name: in place (sha $(sha "$DIR/$name"))"
@@ -141,7 +152,7 @@ unbind_one(){
   local name="$1" target kind
   target="$(field "$name" 1)"; kind="$(field "$name" 2)"
   case "$kind" in
-    bind|keys) while is_bound "$target"; do $UMOUNT "$target" 2>/dev/null || break; done ;;
+    bind|keys) detach_target "$target" || return 5 ;;
     dropin) rm -f "$(dropin_path "$target")"; $SYSTEMCTL daemon-reload ;;
   esac
   return 0
@@ -196,7 +207,7 @@ quarantine(){
   local name="$1" why="${2:-}" ts q units kind
   ts="$(now)"; q="$DIR/quarantine"; mkdir -p "$q"
   kind="$(field "$name" 2)"; units="$(units_of "$name")"
-  [ "$kind" = loader ] || unbind_one "$name"
+  if [ "$kind" != loader ]; then unbind_one "$name" || return 5; fi
   mv -f "$DIR/$name" "$q/$name.$ts" 2>/dev/null
   mv -f "$DIR/$name.sig" "$q/$name.sig.$ts" 2>/dev/null
   rm -f "$DIR/$name.image"                                   # a restore stamps it afresh
@@ -219,7 +230,7 @@ revert(){
     pending_clear "$name"
     echo "reverted $name (it was installed on another OS and not in use here)"; return 0
   fi
-  [ "$kind" = loader ] || unbind_one "$name"
+  if [ "$kind" != loader ]; then unbind_one "$name" || return 5; fi
   rm -f "$DIR/$name" "$DIR/$name.sig" "$DIR/$name.image" "$DIR/.state/$name.starts"
   pending_clear "$name"
   echo "reverted $name to the built-in version — $(policy "$name")"
@@ -385,7 +396,7 @@ case "$cmd" in
   revert)     row "${1:-}" >/dev/null || { echo "not updatable: ${1:-}" >&2; exit 64; }; revert "$1" ;;
   stamp)      row "${1:-}" >/dev/null || { echo "not updatable: ${1:-}" >&2; exit 64; }; stamp "$1" ;;
   superseded) row "${1:-}" >/dev/null || exit 64; [ -f "$DIR/$1" ] && superseded "$1" ;;
-  revert-all) for n in $(names); do [ -f "$DIR/$n" ] && revert "$n"; done; rm -rf "$DIR/.pending"; write_status ;;
+  revert-all) failures=0; for n in $(names); do if [ -f "$DIR/$n" ]; then revert "$n" || failures=1; fi; done; write_status; exit "$failures" ;;
   health)     health ;;
   status)     status_lines ;;
   row)        row "${1:-}" ;;

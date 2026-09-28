@@ -2784,10 +2784,11 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(dict(res, _error=res.get("message")),
                                           401 if res.get("reason") in PIN_MESSAGES else 502)
                     route = bridge_route(host, st)
-                    if route.get("via") != "none" and route.get("return_peer"):
-                        api("POST", route["base"] + "/api/set-peer",
-                            body={"ip": route["return_peer"], "port": SESSION.return_port or 5004,
-                                  "ticket": PINS.ticket(host)}, timeout=15)
+                    peer = api("POST", route["base"] + "/api/set-peer",
+                               body={"ip": route["return_peer"], "port": SESSION.return_port or 5004,
+                                     "ticket": PINS.ticket(host)}, timeout=15) if route.get("via") != "none" and route.get("return_peer") else None
+                    if not isinstance(peer, dict) or peer.get("ok") is not True:
+                        return self._send({"_error":"The bridge did not confirm the resumed session. Existing media has not been restarted."},502)
                     BRIDGEWATCH.request_refresh()
                     return self._send({"ok": True, "already_live": True, "resumed": True,
                                        "camera": st.get("camera_name"), "mic": st.get("mic_name"),
@@ -2836,6 +2837,8 @@ class Handler(BaseHTTPRequestHandler):
                 PINS.clear(lost=reason)
                 return self._send({"_error": SESSION_LOST.get(reason, SESSION_LOST["locked"]),
                                    "need_pin": True, "reason": reason}, 401)
+            if not isinstance(peer, dict) or peer.get("ok") is not True:
+                return self._send({"_error":"The bridge did not confirm your session. Media has not been started; try again."},502)
             SESSION.start(route["media_host"], vidx, aidx, return_port=port, mic_name=aname)
             st.update({"bridge_host": host, "camera_name": vname, "mic_name": aname})
             save_state(st)
@@ -3295,6 +3298,7 @@ async function poll(){
   // It refuses our media now, so every red row below would send the presenter the wrong way.
   const pin=c.pin||{};
   if(pin.locked && (pin.protocol||1)>=2){
+    if(typeof c._bridge_uptime_s==='number')lastBridgeUptime=c._bridge_uptime_s;
     const s=await j('/api/state');
     const why=(s.pin&&s.pin.lost_message)||'The bridge locked itself. Enter the PIN to continue.';
     checksUnavailable(why);

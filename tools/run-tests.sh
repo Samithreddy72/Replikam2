@@ -49,6 +49,11 @@ for t in tests/test-*.py tests/test-*.sh; do
     *)    out=$(bash "$t" 2>&1);  rc=$? ;;
   esac
 
+  if [ -n "${NB_TEST_LOG_DIR:-}" ]; then
+    mkdir -p "$NB_TEST_LOG_DIR"
+    printf '%s\n' "$out" > "$NB_TEST_LOG_DIR/$name.log"
+  fi
+
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qE "^[[:space:]]*SKIPPED([[:space:]]|$)"; then
     SKIP=$((SKIP+1))
     printf '  %-32s \033[33mSKIPPED\033[0m  (dependencies absent)\n' "$name"
@@ -96,7 +101,9 @@ for t in tests/test-*.py tests/test-*.sh; do
   if [ "$f" -gt 0 ] || [ "$rc" -ne 0 ]; then
     FAILED_FILES="$FAILED_FILES $name"
     printf '  %-32s \033[31m%s\033[0m  (rc=%s)\n' "$name" "$line" "$rc"
+    printf '%s\n' "$out" | tail -80 | sed 's/^/        /'
   else
+    if [ "$SKIP" -gt "$skips_before" ]; then printf '%s\n' "$out" | grep -E 'SKIP|skip' | sed 's/^/        /'; fi
     printf '  %-32s %s (%s skipped)\n' "$name" "$line" "$((SKIP-skips_before))"
   fi
 done

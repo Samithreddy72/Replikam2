@@ -70,3 +70,11 @@ The full checkpoint before the latest image/updater edits was 1629 passed, 1 fai
 - Launcher now validates status JSON and reports port conflicts. Power trim frequency log corrected; electrical acceptance is documented in POWER-ACCEPTANCE.md.
 
 The historical backlog is not closed wholesale. Fallbacks, persistent presenter identity, full off-device backup automation, dormant attestations, complete linked incident logs, full UI parity, native signed distribution and physical acceptance still need work. No claim of full release readiness is justified at this checkpoint.
+
+### Verification update
+
+The later Mac regression checkpoint completed with 1645 passed, 0 failed, 3 skipped. Subsequent focused checks: updater 7, presenter PIN/peer-confirmation 66, signed overrides 54, structured agent results 3, staging trust 1. These are overlapping targeted checks, not an additive claim about a single full run.
+
+Linux CI run 36466933139 failed: 1596 passed, 44 failed, 5 skipped. Identified harness gaps include shallow Git history (historical drift fixtures), BSD-only file-mode/size commands and missing media dependencies; remaining failures require individual logs. The runner now preserves per-test evidence and prints failed output. A Mac-specific VideoToolbox test still needs explicit platform coverage in the CI design. No release is approved by this result.
+
+Additional source fixes: require positive bridge peer confirmation before go-live/resume; keep diagnosis JSON complete or report a failure; busy override mounts may be lazily detached under the existing restart policy, and failed detach cannot claim rollback; image staging uses the pinned owner key, validates release identity and no longer hardcodes version 2.0.0.

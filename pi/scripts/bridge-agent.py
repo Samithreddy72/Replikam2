@@ -417,6 +417,20 @@ def _cid_ok(cid):
     return re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(cid)) is not None
 
 
+def command_result(ctype, rc, output):
+    """Keep structured diagnosis complete; clipping JSON is not a successful result."""
+    status = "done" if rc == 0 else "failed"
+    if ctype == "jitter-diagnose" and rc == 0:
+        if len(output.encode('utf-8')) > 65536:
+            return "failed", "Diagnosis exceeded 64 KB; collect a diagnostics bundle for the full evidence."
+        try:
+            if not isinstance(json.loads(output), dict): raise ValueError('not an object')
+        except (ValueError, TypeError):
+            return "failed", "Diagnosis did not return valid JSON; collect a diagnostics bundle."
+        return status, output
+    return status, output[-2000:]
+
+
 def run_command(cmd):
     """-> (cid, status, output); status None = started in the background, reported later."""
     cid, ctype, args = cmd.get("id"), cmd.get("type"), cmd.get("args") or {}
@@ -464,8 +478,8 @@ def run_command(cmd):
             return cid, "failed", "could not start in the background: %s" % e
     p = subprocess.run(argv, capture_output=True, text=True, timeout=300,
                        input=STDIN[ctype](args) if ctype in STDIN else None)
-    status = "done" if p.returncode == 0 else "failed"
-    return cid, status, (p.stdout + p.stderr)[-2000:]
+    status, output = command_result(ctype, p.returncode, p.stdout + p.stderr)
+    return cid, status, output
 
 
 def _forget(cid):
@@ -499,10 +513,17 @@ def collect_results(base, token):
             except (OSError, ValueError):
                 rc = 1
             try:
-                out = open(os.path.join(RESULTS, cid + ".out"), errors="replace").read()[-2000:]
+                with open(os.path.join(RESULTS, cid + ".out"), "rb") as result_file:
+                    if meta.get("type") == "jitter-diagnose":
+                        raw = result_file.read(65537)
+                    else:
+                        result_file.seek(0, os.SEEK_END)
+                        result_file.seek(max(0, result_file.tell() - 8000))
+                        raw = result_file.read(8000)
+                    out = raw.decode("utf-8", "replace")
             except OSError:
                 out = ""
-            status = "done" if rc == 0 else "failed"
+            status, out = command_result(meta.get("type"), rc, out)
         elif now - float(meta.get("t", now)) > max(2 * 3600, DETACHED.get(meta.get("type"), 0) + 600):
             # Never before the job's own time limit is up: a 3-hour OS update still running at
             # 2 h is not lost (2026-09-28).

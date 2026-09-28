@@ -79,9 +79,13 @@ bw.subprocess = types.SimpleNamespace(run=bw_run, CompletedProcess=subprocess.Co
 bw.read = lambda path: ""
 OLD_BRIDGE = {"on": False}
 LOCKSTATE_FAILS = {"n": 0}
+PEER_FAILS = {"n": 0}
 
 def bridge(method, path, body, caller):
     BRIDGE_LOG.append((method, path, json.loads(json.dumps(body or {}))))
+    if path == "/api/set-peer" and PEER_FAILS["n"] > 0:
+        PEER_FAILS["n"] -= 1
+        return {"_error":"timed out","_code":503}
     if path == "/api/lock-state" and LOCKSTATE_FAILS["n"] > 0:
         LOCKSTATE_FAILS["n"] -= 1
         return {"_error": "timed out"}
@@ -301,6 +305,11 @@ def run(platform):
         st, r = call("/api/golive", {"host": H, "camera_name": "Cam", "mic_name": "Mic"})
         check(st == 200 and ses.starts == 5, "[%s] Studio: go live right after unlocking" % platform, r)
 
+        PEER_FAILS["n"] = 1
+        st, r = call("/api/golive", {"host":H,"pin":"864200"})
+        check(st == 502 and not r.get("resumed") and ses.starts == 5,
+              "[%s] a failed peer confirmation never claims the session resumed or restarts media" % platform,r)
+
         # the watcher re-points return audio WITH the ticket; a 401 drops the ticket
         app.BRIDGEWATCH.give_up = set()
         with patch.object(app.urllib.request, "urlopen", side_effect=urllib.error.HTTPError(
@@ -310,6 +319,11 @@ def run(platform):
               "[%s] the bridge watcher learns 'superseded' and drops the ticket" % platform, note)
         call("/api/stop", {})
 
+        PEER_FAILS["n"] = 1
+        st, r = call("/api/golive", {"host":H,"camera_name":"Cam","mic_name":"Mic","pin":"864200"})
+        check(st == 502 and not r.get("ok") and ses.starts == 5,
+              "[%s] failed peer confirmation prevents capture from starting" % platform,r)
+        call("/api/stop", {})
         blob = json.dumps(FLEET_LOG)
         check("864200" not in blob and "111111" not in blob and (not tk or tk not in blob),
               "[%s] neither the PIN nor the ticket was ever sent to the fleet" % platform)
