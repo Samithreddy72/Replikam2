@@ -80,6 +80,16 @@ if ! git cat-file -e "${clean}^{commit}" 2>/dev/null; then
   exit 3
 fi
 
+# A newer/divergent or dirty deployment is not proven to match this checkout.
+if ! git merge-base --is-ancestor "${clean}" HEAD; then
+  say "  UNKNOWN: deployed commit is ahead of or diverged from this checkout."
+  exit 3
+fi
+if [ "$clean" != "$sha" ]; then
+  say "  UNKNOWN: a dirty deployed build cannot be verified against a commit."
+  exit 3
+fi
+
 missing=()
 while IFS= read -r _l; do
   [ -n "$_l" ] && missing+=("$_l")

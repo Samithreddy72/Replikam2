@@ -599,12 +599,20 @@ def healthz():
 # ----------------------------- device-facing (/v1) -----------------------------
 
 @app.post("/v1/enroll", response_model=EnrollOut)
-def enroll(body: EnrollIn, db: Session = Depends(get_db)):
+def enroll(body: EnrollIn, request: Request, db: Session = Depends(get_db)):
     if body.bootstrap_token not in settings.bootstrap_tokens:
         raise HTTPException(401, "invalid bootstrap token")
     token, token_hash = auth.new_device_token()
     dev = db.get(Device, body.device_id)
     is_new = dev is None
+    if not is_new:
+        # A factory/bootstrap credential admits NEW devices, not an existing device's
+        # identity. Otherwise any holder can rotate its token and collect its PIN/mesh key.
+        if dev.org_id != settings.bootstrap_tokens[body.bootstrap_token]:
+            raise HTTPException(403, "bootstrap organization does not own this device")
+        current = auth._bearer(request.headers.get("Authorization"))
+        if not dev.token_hash or not auth.secrets.compare_digest(auth.hash_token(current), dev.token_hash):
+            raise HTTPException(401, "existing device credential required; contact the fleet owner for recovery")
     if is_new:
         # The bootstrap token decides which org the device enrolls into, so a
         # customer's cards land directly in their org (never visible to others).

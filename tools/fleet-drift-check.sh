@@ -80,6 +80,13 @@ say ""
 # of this script used it and died with "command not found" followed by "unbound variable".
 # It failed loudly rather than reporting "in sync", which is the correct direction to fail --
 # but a drift checker that cannot run on the operator's own machine is useless, so: portable.
+# A newer/divergent or dirty deployment is not proven to match this checkout.
+if ! git merge-base --is-ancestor "${sha}" HEAD; then
+  say "  UNKNOWN: deployed commit is ahead of or diverged from this checkout."
+  [ "$JSON" = "1" ] && echo '{"result":"unknown","reason":"divergent_history"}'
+  exit 3
+fi
+
 missing=()
 while IFS= read -r _l; do
   [ -n "$_l" ] && missing+=("$_l")
@@ -111,6 +118,7 @@ for line in "${missing[@]}"; do
   # keep only +/- lines, drop the ones that are entirely a comment, then match
   if git show "$c" -- pi/ 2>/dev/null \
        | grep -E '^[+-]' \
+       | grep -vE '^(\+\+\+|---)' \
        | grep -vE '^[+-][[:space:]]*#' \
        | grep -qE "($secpat)"; then
     sec+=("$line")

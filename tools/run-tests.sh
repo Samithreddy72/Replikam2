@@ -21,7 +21,17 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 PY="python3"
-[ "${1:-}" = "--python" ] && { PY="$2"; shift 2; }
+MEDIA_PY=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --python|--media-python)
+      [ "$#" -ge 2 ] || { echo "missing interpreter after $1" >&2; exit 2; }
+      if [ "$1" = "--python" ]; then PY="$2"; else MEDIA_PY="$2"; fi
+      shift 2 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+MEDIA_PY="${MEDIA_PY:-$PY}"
 
 PASS=0; FAIL=0; SKIP=0; BROKEN=0
 FAILED_FILES=""
@@ -29,12 +39,17 @@ FAILED_FILES=""
 for t in tests/test-*.py tests/test-*.sh; do
   [ -e "$t" ] || continue
   name=$(basename "$t")
+  skips_before=$SKIP
+  test_py="$PY"
+  # PyGObject is tied to the system GStreamer Python ABI; the backend may need a
+  # different supported interpreter. Both runtimes remain explicit in the release run.
+  [ "$name" = "test-audio-engine.py" ] && test_py="$MEDIA_PY"
   case "$t" in
-    *.py) out=$("$PY" "$t" 2>&1); rc=$? ;;
+    *.py) out=$("$test_py" "$t" 2>&1); rc=$? ;;
     *)    out=$(bash "$t" 2>&1);  rc=$? ;;
   esac
 
-  if printf '%s' "$out" | grep -q "SKIPPED"; then
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qE "^[[:space:]]*SKIPPED([[:space:]]|$)"; then
     SKIP=$((SKIP+1))
     printf '  %-32s \033[33mSKIPPED\033[0m  (dependencies absent)\n' "$name"
     continue
@@ -46,10 +61,13 @@ for t in tests/test-*.py tests/test-*.sh; do
   if [ -z "$line" ] && ran=$(printf '%s' "$out" | grep -oE "^Ran [0-9]+ tests?" | tail -1 | grep -oE "[0-9]+"); then
     if printf '%s' "$out" | grep -qE "^OK( |$)"; then
       sk=$(printf '%s' "$out" | grep -oE "^OK \(.*skipped=[0-9]+" | grep -oE "skipped=[0-9]+" | grep -oE "[0-9]+" || true)
+      SKIP=$((SKIP + ${sk:-0}))
       line="$(( ran - ${sk:-0} )) passed, 0 failed"
     elif fl=$(printf '%s' "$out" | grep -E "^FAILED \("); then
       nf=$(printf '%s' "$fl" | grep -oE "(failures|errors)=[0-9]+" | grep -oE "[0-9]+" | paste -sd+ - | bc)
-      line="$(( ran - nf )) passed, $nf failed"
+      sk=$(printf '%s' "$fl" | grep -oE "skipped=[0-9]+" | grep -oE "[0-9]+" || true)
+      SKIP=$((SKIP + ${sk:-0}))
+      line="$(( ran - nf - ${sk:-0} )) passed, $nf failed"
     fi
   fi
   if [ -z "$line" ]; then
@@ -64,11 +82,15 @@ for t in tests/test-*.py tests/test-*.sh; do
   p=$(printf '%s' "$line" | grep -oE '^[0-9]+')
   f=$(printf '%s' "$line" | grep -oE '[0-9]+ failed' | grep -oE '^[0-9]+')
   PASS=$((PASS + p)); FAIL=$((FAIL + f))
+  # A success-looking footer must never override a process failure.
+  if [ "$rc" -ne 0 ] && [ "$f" -eq 0 ]; then
+    BROKEN=$((BROKEN+1))
+  fi
   if [ "$f" -gt 0 ] || [ "$rc" -ne 0 ]; then
     FAILED_FILES="$FAILED_FILES $name"
     printf '  %-32s \033[31m%s\033[0m  (rc=%s)\n' "$name" "$line" "$rc"
   else
-    printf '  %-32s %s\n' "$name" "$line"
+    printf '  %-32s %s (%s skipped)\n' "$name" "$line" "$((SKIP-skips_before))"
   fi
 done
 
@@ -76,5 +98,5 @@ echo "  ────────────────────────
 printf '  \033[1mTOTAL %d passed, %d failed, %d skipped, %d with NO RESULT\033[0m\n' \
        "$PASS" "$FAIL" "$SKIP" "$BROKEN"
 [ -n "$FAILED_FILES" ] && echo "  needs attention:$FAILED_FILES"
-[ "$FAIL" -eq 0 ] && [ "$BROKEN" -eq 0 ] && echo "  → suite is green" || echo "  → SUITE NOT GREEN"
-exit $([ "$FAIL" -eq 0 ] && [ "$BROKEN" -eq 0 ] && echo 0 || echo 1)
+[ "$FAIL" -eq 0 ] && [ "$BROKEN" -eq 0 ] && [ "$SKIP" -eq 0 ] && echo "  → suite is green" || echo "  → SUITE NOT GREEN"
+exit $([ "$FAIL" -eq 0 ] && [ "$BROKEN" -eq 0 ] && [ "$SKIP" -eq 0 ] && echo 0 || echo 1)

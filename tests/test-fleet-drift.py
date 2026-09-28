@@ -121,7 +121,8 @@ print("\n  ---- comments must not be mistaken for security changes ----")
 parent = git("rev-parse", "--short", "da41726^")
 srv = serve({"version": "2.0.0-" + parent, "device_id": "TESTDEV"}, port)
 rc, out = run("127.0.0.1")
-if "da41726" in out and ("SECURITY-RELEVANT" not in out or "182eaea" in out):
+security_section = out.split("OF THESE CHANGE SECURITY-RELEVANT CODE", 1)[-1] if "OF THESE CHANGE SECURITY-RELEVANT CODE" in out else ""
+if "da41726" in out and "da41726" not in security_section:
     ok("a comment mentioning 'authority' is not treated as a security change")
 else:
     no("comment-only match must not be flagged as security drift", out[-300:])

@@ -2221,9 +2221,9 @@ class BridgeWatch:
         power = self._power()
         if isinstance(power, dict) and power.get("live"):
             with self.lock:
-                self.last = ("the bridge is browning out (under-voltage) — audio will "
-                             "stutter and it may reboot. This is electrical, not the "
-                             "network; not restarting anything.")
+                self.last = ("the bridge reports under-voltage — media disruption or a reboot "
+                             "is possible. Check the power path; this does not prove the "
+                             "cause of an audible fault. Not restarting anything.")
                 self.power = power
             print("[bridge] %s" % self.last, flush=True)
             return
@@ -2345,7 +2345,7 @@ def _bridge_rec(host, st):
     return {"id": None, "tailscale_ip": None, "ip": host}
 
 
-def bridge_route(host, st):
+def bridge_route(host, st, read_only=False):
     """Base control URL + routing for a bridge, bringing the mesh up if appropriate.
 
     via="none" means the mesh could not be established. There is deliberately no LAN
@@ -2353,7 +2353,16 @@ def bridge_route(host, st):
     rather than dereference control_host, which would otherwise raise a TypeError and
     surface as a stack trace instead of the plain reason the route failed."""
     rec = _bridge_rec(host, st)
-    route = MESH.route(rec, st)
+    if read_only:
+        # Status polling must never create/repoint a helper or interrupt a live session.
+        if (MESH.proc is not None and MESH.proc.poll() is None
+                and MESH.bridge_id == rec.get("id") and MESH.bridge_id is not None):
+            route = MESH._mesh_route()
+        else:
+            return {"via": "none", "base": "",
+                    "error": "No active mesh route for this bridge; start its session first."}
+    else:
+        route = MESH.route(rec, st)
     if route.get("via") == "none":
         route["base"] = ""
         return route
@@ -2476,10 +2485,12 @@ class Handler(BaseHTTPRequestHandler):
                     b["online_via"] = "probe"     # fleet says stale; the device itself answered
             return self._send(out)
         if self.path.startswith("/api/checks"):
+            if not self._csrf_ok() or self.headers.get("Sec-Fetch-Site") == "cross-site":
+                return self._send({"_error": "cross-origin checks refused"}, 403)
             host = self.path.split("host=", 1)[1] if "host=" in self.path else ""
             if not host:
                 return self._send({"_error": "host required"}, 400)
-            route = bridge_route(host, load_state())   # over the mesh when the bridge has one
+            route = bridge_route(host, load_state(), read_only=True)
             if route.get("via") == "none":
                 return self._send({"_error": route.get("error", "no route to the bridge")}, 502)
             r = api("GET", route["base"] + "/api/checks", timeout=10)
@@ -3114,15 +3125,28 @@ async function repairLegs(){
   setLive(false);
   await startSession({reconnect:true});
 }
+function checksUnavailable(message){
+  greenSince=null;
+  for(const [ci,li] of [['c1','l1'],['c2','l2'],['c5','l5'],['c3','l3'],['c4','l4']]){
+    $(ci).className='bad'; $(li).textContent='Not currently verified';
+  }
+  $('ckfix').textContent=message; $('ckfix').style.display='';
+  $('m2').textContent='Connection status unavailable — checking…';
+}
 async function poll(){
-  const h=liveHost||host(); if(!h)return; const c=await j('/api/checks?host='+h); if(c._error)return;
+  const h=liveHost||host(); if(!h)return;
+  let c;
+  try{c=await j('/api/checks?host='+encodeURIComponent(h));}
+  catch(e){checksUnavailable('Cannot reach the bridge checks. Your session has not been stopped.');return;}
+  if(!c||c._error){checksUnavailable((c&&c._error)||'Bridge checks unavailable.');return;}
   // The bridge ended our PIN session (10 min without video, an admin lock, someone else's PIN).
   // It refuses our media now, so every red row below would send the presenter the wrong way.
   const pin=c.pin||{};
   if(pin.locked && (pin.protocol||1)>=2){
     const s=await j('/api/state');
     const why=(s.pin&&s.pin.lost_message)||'The bridge locked itself. Enter the PIN to continue.';
-    $('ckfix').textContent=why; $('ckfix').style.display='';
+    checksUnavailable(why);
+    $('m2').textContent='Bridge locked — enter the PIN to continue';
     if($('pinbox').hidden && Date.now()-pinSnooze>60000)openPin(why,'');   // not every 4 s after a Cancel
     return}
   const map=[['c1','l1','online'],['c2','l2','video_arriving'],['c5','l5','voice_arriving'],

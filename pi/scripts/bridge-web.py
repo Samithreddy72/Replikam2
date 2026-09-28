@@ -295,18 +295,18 @@ def power_state(raw=None):
     thermal = bool(v & 0x8) or bool(v & 0x80000)
     rate = brownout_rate()
     if rate and rate["pct"] >= 2.0:
-        # Above ~2% the stutter is audible. Below ~1% this board has been confirmed clean
-        # by ear with the sticky bits already set, so the rate is what to act on.
-        summary = ("browning out %.1f%% of the time — enough to be audible; raise the "
-                   "return buffer and expect possible reboots" % rate["pct"])
+        # Sampling records electrical state, not audible quality or root cause of every
+        # media fault. A larger audio buffer cannot repair an unstable power path.
+        summary = ("under-voltage in %.1f%% of recent samples — check the power path; "
+                   "media disruption or reboots are possible" % rate["pct"])
         return {"raw": raw, "ok": False, "live": live, "ever": True, "rate": rate,
                 "source": srcs[0][0] if srcs else None,
                 "summary": summary, "flags": flags}
     if live:
-        summary = "browning out RIGHT NOW — expect stutter and possible reboots"
+        summary = "under-voltage or throttling RIGHT NOW — check the power path; media disruption or reboots are possible"
     elif ever:
-        summary = ("this board HAS browned out since boot — audio stutter and spontaneous "
-                   "reboots come from here, not from the network")
+        summary = ("under-voltage has occurred since boot — check the recent samples and power path; "
+                   "this history alone does not identify the cause of a media fault")
     elif thermal:
         summary = "power clean, but the SoC has hit its temperature limit — check airflow"
     else:
@@ -1465,7 +1465,12 @@ class H(http.server.BaseHTTPRequestHandler):
                                       ).encode("utf-8"), "application/json; charset=utf-8", status=403)
                 return
             cur = read("/etc/default/bridge-return-audio")
-            if ("RETURN_DEST_IP=%s" % ip) in cur and ("RETURN_DEST_PORT=%s" % port) in cur:
+            current = {}
+            for line in cur.splitlines():
+                key, sep, value = line.partition("=")
+                if sep and key.strip() in ("RETURN_DEST_IP", "RETURN_DEST_PORT"):
+                    current[key.strip()] = value.strip().strip("\"'")
+            if current.get("RETURN_DEST_IP") == ip and current.get("RETURN_DEST_PORT") == port:
                 self._send(json.dumps({"ok": True, "changed": False,
                                        "peer": "%s:%s" % (ip, port)}).encode("utf-8"),
                            "application/json; charset=utf-8")

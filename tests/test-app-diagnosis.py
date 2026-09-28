@@ -133,16 +133,30 @@ if "stdin=subprocess.PIPE" in text:
 else:
     no("no stdin pipe — the only way to stop ffmpeg is a signal")
 
-q = re.search(r"\ndef _quit\(p, timeout=[\d.]+\):.*?\n(?=\n\S)", text, re.S)
-if q:
-    body = q.group(0)
-    ask, term, kill = (body.find('b"q'), body.find(".terminate()"), body.find(".kill()"))
-    if -1 not in (ask, term, kill) and ask < term < kill:
-        ok("escalation order is ask -> SIGTERM -> SIGKILL, never straight to kill")
-    else:
-        no("escalation order is wrong or incomplete", (ask, term, kill))
-else:
-    no("_quit() helper not found")
+# Exercise process behavior: a separate in-process audio-player branch legitimately
+# terminates before the subprocess branch, so textual .find() ordering is misleading.
+import ast
+module = ast.parse(text)
+quit_node = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_quit")
+quit_ns = {}
+exec(compile(ast.Module(body=[quit_node], type_ignores=[]), str(SRC), "exec"), quit_ns)
+class Process:
+    def __init__(self, succeeds_at):
+        self.events = []; self.succeeds_at = succeeds_at; self.stdin = self; self.closed = False
+    def poll(self): return None
+    def write(self, data): self.events.append("ask")
+    def flush(self): pass
+    def wait(self, timeout):
+        if self.events[-1] == self.succeeds_at: return 0
+        raise TimeoutError()
+    def terminate(self): self.events.append("term")
+    def kill(self): self.events.append("kill")
+for succeeds_at, expected in [("ask", ["ask"]), ("term", ["ask", "term"]),
+                               (None, ["ask", "term", "kill"])]:
+    proc = Process(succeeds_at)
+    quit_ns["_quit"](proc)
+    if proc.events == expected: ok("graceful shutdown escalation: %s" % expected)
+    else: no("incorrect subprocess shutdown sequence", proc.events)
 
 for fn, why in (("def stop", "full teardown"), ("def respawn_leg", "single-leg repair")):
     seg = text[text.find(fn):]

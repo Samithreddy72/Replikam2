@@ -15,7 +15,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/../pi/scripts/bridge-return-audio.sh"
 T="$(mktemp -d)"
-cleanup(){ pkill -P $$ 2>/dev/null; rm -rf "$T"; }
+cleanup(){ stopall; rm -rf "$T"; }
 trap cleanup EXIT
 
 pass=0; fail=0
@@ -30,6 +30,7 @@ echo "$@" >> "$ARGV_LOG"
 for a in "$@"; do
   case "$a" in audio/x-raw,rate=*) echo "${a#audio/x-raw,rate=}" >> "$RATE_LOG"; break;; esac
 done
+echo $$ >> "$GST_PIDS"
 exec sleep 600
 STUB
 # --- stub amixer: report whatever the test wrote to ratefile --------------------------
@@ -54,6 +55,7 @@ done
 STUB
 chmod +x "$T/bin"/*
 export PATH="$T/bin:$PATH"
+export GST_PIDS="$T/gst-pids"
 export RATE_LOG="$T/rates.log" ARGV_LOG="$T/argv.log" T_HOSTRATE="$T/hostrate" T_EVENT="$T/event"
 : > "$RATE_LOG"
 
@@ -64,13 +66,14 @@ nth(){ sed -n "${1}p" "$RATE_LOG"; }
 nlines(){ wc -l < "$RATE_LOG" | tr -d ' '; }
 
 RUNSEQ=0
-stopall(){ pkill -f "bridge-return-audio.sh" 2>/dev/null; pkill -f "$T/bin/alsactl" 2>/dev/null
-           pkill -f 'sleep 600' 2>/dev/null; sleep 0.5; }
+stopgst(){ if [ -f "$GST_PIDS" ]; then while read -r pid; do kill "$pid" 2>/dev/null || true; done < "$GST_PIDS"; : > "$GST_PIDS"; fi; }
+stopall(){ if [ -f "$T/parents" ]; then while read -r pid; do pkill -P "$pid" 2>/dev/null || true; kill "$pid" 2>/dev/null || true; done < "$T/parents"; : > "$T/parents"; fi
+           stopgst; pkill -f "$T/bin/alsactl" 2>/dev/null || true; sleep 0.5; }
 run(){ RUNSEQ=$((RUNSEQ+1))
        RETURN_GST="$T/bin/gst" RETURN_AMIXER="$T/bin/amixer" RETURN_ALSACTL="$T/bin/alsactl" \
        RETURN_DEST_IP=10.0.0.1 RETURN_RUNDIR="$T/run$RUNSEQ" \
        RETURN_DEBOUNCE_S=0 RETURN_MIN_RESTART_GAP_S="${1:-0}" \
-       bash "$SCRIPT" >> "$T/out.log" 2>&1 & echo $!; }
+       bash "$SCRIPT" >> "$T/out.log" 2>&1 & pid=$!; echo "$pid" >> "$T/parents"; echo "$pid"; }
 
 # ============================ 1. fail-safe, no control ============================
 rm -f "$T_HOSTRATE"; : > "$RATE_LOG"
@@ -141,7 +144,7 @@ kill -9 $P 2>/dev/null; stopall
 stopall; : > "$RATE_LOG"; : > "$T/out.log"; sethost 48000; event
 P=$(run 0); sleep 2
 sethost 44100                                   # device moves; NO event (steady control)
-pkill -f 'sleep 600' 2>/dev/null; sleep 4       # pipeline dies -> supervisor restarts
+stopgst; sleep 4       # pipeline dies -> supervisor restarts
 last=$(tail -1 "$RATE_LOG")
 [ "$last" = "44100" ] && ok "restart reconciles to the LIVE rate (no wedge on stale file)" \
                       || no "restarted on the stale file rate (got: $(rates))"
@@ -150,7 +153,7 @@ kill -9 $P 2>/dev/null; stopall
 # ============================ 4. crash recovery ============================
 : > "$RATE_LOG"; : > "$T/out.log"; sethost 48000; event
 P=$(run 0); sleep 2
-pkill -f 'sleep 600' 2>/dev/null; sleep 5          # simulate a crash (supervisor backs off 2s first)
+stopgst; sleep 5          # simulate a crash (supervisor backs off 2s first)
 [ "$(nlines)" -ge 2 ] && ok "pipeline crash is restarted automatically" \
                       || no "crash was not recovered (got: $(rates))"
 kill -9 $P 2>/dev/null; stopall

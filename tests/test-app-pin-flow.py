@@ -134,6 +134,7 @@ def fake_api(method, url, token=None, body=None, timeout=10):
 def fake_route(rec, st):
     if not HELPER["alive"]:
         HELPER["alive"] = True
+    app.MESH.bridge_id = rec.get("id")
     app.MESH.control_port = 18080
     app.MESH.tailnet_ip = HELPER["ip"]
     app.MESH.proc = types.SimpleNamespace(poll=lambda: None if HELPER["alive"] else 0,

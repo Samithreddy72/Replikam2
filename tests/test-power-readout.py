@@ -131,13 +131,12 @@ if bw.brownout_rate() is None:
 else:
     no("empty recorder reported as a rate", bw.brownout_rate())
 
-# Above 2% the verdict must be actionable, because that is the audible threshold measured
-# on this hardware (0.50% clean by ear, 2.33% audible).
+# High sample rates must prompt an electrical check without inferring what the user hears.
 with_sources([("flight", 0x50000)])
 flight(["t thr=0x50001"] * 3 + ["t thr=0x50000"] * 97)
 st = bw.power_state()
-if st["ok"] is False and "audible" in st["summary"]:
-    ok("3%% brownout rate -> 'enough to be audible'")
+if st["ok"] is False and "3.0%" in st["summary"] and "power path" in st["summary"] and "audible" not in st["summary"] and "buffer" not in st["summary"]:
+    ok("high brownout rate gives electrical guidance without asserting audio quality")
 else:
     no("high rate did not produce an actionable summary", st["summary"])
 
