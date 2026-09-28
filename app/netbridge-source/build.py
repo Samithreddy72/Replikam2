@@ -613,12 +613,8 @@ def main():
     # ships the matching PUBLIC key and refuses anything it cannot verify, so the update
     # channel is authenticated even though the app itself is not Apple-signed.
     ver = args.version or _stamped_version()
-    rel = DIST / "release" / _plat_tag()
-    rel.mkdir(parents=True, exist_ok=True)
-    fname = "%s-%s-%s%s" % (name, ver, _plat_tag(), ".exe" if IS_WIN else "")
-    shutil.copy2(built, rel / fname)
-    man = rel / "manifest.txt"
-    man.write_text("version=%s\nsha256=%s\nfile=%s\n" % (ver, _sha256(built), fname), encoding="utf-8")
+    side = DIST / ("netbridge-mesh.exe" if IS_WIN else "netbridge-mesh")
+    rel, man = write_update_manifest(built, side, ver, name)
     if args.signing_key:
         subprocess.run(["openssl", "dgst", "-sha256", "-sign", args.signing_key,
                         "-out", str(man) + ".sig", str(man)], check=True)
@@ -631,6 +627,27 @@ def main():
         log("UPDATE %s manifest written UNSIGNED (%s) — pass --signing-key to publish it; "
             "the app refuses unsigned updates by design" % (ver, rel))
     return 0
+
+
+def write_update_manifest(built, helper, version, name):
+    """Publish only to the protocol-2 feed; bind the required helper bytes too.
+
+    Binary-only OTA cannot replace the helper or a native application bundle.
+    A different helper therefore requires installing the complete package.
+    """
+    import re
+    if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?', version):
+        raise ValueError("Invalid release version")
+    if not helper.is_file():
+        raise ValueError("Cannot publish an update without its mesh helper")
+    rel = DIST / "release" / "pin-v2" / _plat_tag()
+    rel.mkdir(parents=True, exist_ok=True)
+    fname = "%s-%s-%s%s" % (name, version, _plat_tag(), ".exe" if IS_WIN else "")
+    shutil.copy2(built, rel / fname)
+    man = rel / "manifest.txt"
+    man.write_text("version=%s\nsha256=%s\nfile=%s\nplatform=%s\nbridge_protocol=2\nhelper_sha256=%s\n" %
+                   (version, _sha256(built), fname, _plat_tag(), _sha256(helper)), encoding="utf-8")
+    return rel, man
 
 
 def _sha256(path):

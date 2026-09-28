@@ -36,6 +36,9 @@ jobs:
           npm test
           npm run build
       - name: Preserve individual test evidence
+        # Test verdicts remain mandatory; storage exhaustion must not change them.
+        # The same summaries and failed assertions remain in the run log.
+        continue-on-error: true
         if: always()
         uses: actions/upload-artifact@v4
         with:

@@ -86,8 +86,8 @@ n=\$(( \$(cat "$T/ssh.n" 2>/dev/null || echo 0) + 1 )); echo \$n > "$T/ssh.n"
 # question) nothing is piped in; the real ssh would only forward keystrokes nobody reads.
 if [ -t 0 ]; then : > "$T/ssh.in.\$n"; else cat > "$T/ssh.in.\$n"; fi
 printf '%s\n' "\$cmd" >> "$T/ssh.log"
-# The sandbox path goes in through a variable: macOS /bin/bash 3.2 splits ${x//"/lit/eral"/y} at the
-# first slash inside the quotes, so a pasted-in path was never replaced at all (found 2026-09-28).
+# The sandbox path goes in a variable because Bash 3.2 mishandles quoted slash patterns.
+# Do not embed an unescaped dollar expression here: this heredoc is expanded at setup.
 sb="$T"
 chk="\$(printf '%s\n' "\$cmd"; cat "$T/ssh.in.\$n")"; chk="\${chk//\$sb/SANDBOX}"
 # Any path that OPENS a quote with / after the sandbox is renamed is a real path on this Mac
@@ -147,6 +147,11 @@ echo "/dev/root 80000 10000 \$(cat "$T/df_free") 12% /"
 EOF
 printf '#!/bin/bash\nshasum -a 256 "$@"\n' > "$T/bin/sha256sum"
 chmod +x "$T"/bin/*
+# An empty executable shell fixture exits zero. Prove it actually handles commands
+# before trusting any publishing result (Bash 5 nounset exposed this setup failure).
+if [ "$("$T/bin/ssh" test@fleet.invalid "printf fixture-works" </dev/null)" != fixture-works ]; then
+  echo "0 passed, 1 failed — SSH fixture could not execute a command"; exit 1
+fi
 
 ID=100
 mkrel(){ # mkrel <version> [image bytes]: a signed release, as CI publishes it

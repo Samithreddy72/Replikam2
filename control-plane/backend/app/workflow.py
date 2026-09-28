@@ -31,7 +31,7 @@ def activity(dev, now=None):
     live = bool(streams.get('video') or streams.get('voice') or
                 (isinstance(session,dict) and session.get('active')))
     laptop = t.get('udc') in ('configured','suspended')
-    unknown = 'udc' not in t or 'streams' not in t
+    unknown = t.get('udc') not in ('not attached','attached','powered','default','addressed','configured','suspended') or not all(isinstance(streams.get(k),bool) for k in ('video','voice'))
     return {'busy': live or laptop or unknown, 'unknown': unknown, 'live':live,
             'laptop':laptop, 'reason': 'A presenter is live.' if live else
             'The meeting laptop is attached.' if laptop else

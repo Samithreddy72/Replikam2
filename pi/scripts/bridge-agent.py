@@ -450,7 +450,8 @@ def run_command(cmd):
             current = telemetry()
             streams = current.get("streams") or {}
             pin = current.get("pin") or {}
-            busy = ("udc" not in current or "streams" not in current
+            busy = (current.get("udc") not in ("not attached", "attached", "powered", "default", "addressed", "configured", "suspended")
+                    or not all(isinstance(streams.get(k), bool) for k in ("video", "voice"))
                     or current.get("udc") in ("configured", "suspended")
                     or streams.get("video") or streams.get("voice")
                     or (pin.get("session") or {}).get("active"))

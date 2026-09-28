@@ -38,6 +38,8 @@ services:
       # promise "no Tailscale key on the SD card". Without these the mint fails and the app
       # silently falls back to the LAN path the walkthrough forbids.
       TS_API_KEY: "${TS_API_KEY}"
+      # Optional inventory-only token for expiry warnings; never used to mint keys.
+      TS_DEVICES_READ_TOKEN: "${TS_DEVICES_READ_TOKEN:-}"
       TS_TAILNET: "${TS_TAILNET}"
       TS_SOURCE_TAG: "${TS_SOURCE_TAG}"
       TS_BRIDGE_TAG: "${TS_BRIDGE_TAG}"

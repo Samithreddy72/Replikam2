@@ -31,6 +31,12 @@ class Workflow(unittest.TestCase):
    d=db.get(Device,'a');d.latest={'udc':'not attached','streams':{'video':False,'voice':False}};db.commit()
   rows=c.get('/v1/commands',headers=hdr).json();self.assertEqual(len(rows),1)
   self.assertEqual(c.get('/v1/commands',headers=hdr).json(),[])
+ def test_incomplete_stream_state_never_releases_disruptive_work(self):
+  c=self.client
+  for streams in ({},{'video':False},{'video':False,'voice':None},{'video':'false','voice':False}):
+   with SessionLocal() as db:
+    d=db.get(Device,'a');d.latest={'udc':'not attached','streams':streams};db.commit()
+   self.assertEqual(c.post('/admin/devices/a/commands',json={'type':'reboot','confirm':True}).status_code,409)
  def test_cancel_and_expire_waiting(self):
   c=self.client;r=c.post('/admin/devices/a/commands',json={'type':'reboot','confirm':True,'when':'idle'}).json()
   self.assertEqual(c.delete('/admin/devices/a/commands/'+str(r['id'])).status_code,200)
@@ -69,7 +75,7 @@ class Workflow(unittest.TestCase):
   c=self.client
   self.assertEqual(c.post('/admin/devices/a/recovery-grant',json={'confirm':True}).status_code,409)
   with SessionLocal() as db:
-   d=db.get(Device,'a');d.latest={'udc':'not attached','streams':{}};d.name='Room A';db.commit()
+   d=db.get(Device,'a');d.latest={'udc':'not attached','streams':{'video':False,'voice':False}};d.name='Room A';db.commit()
   r=c.post('/admin/devices/a/recovery-grant',json={'confirm':True});self.assertEqual(r.status_code,200,r.text)
   token=r.json()['recovery_token']
   body={'device_id':'a','pairing_code':'A','bootstrap_token':'factory','recovery_token':token}

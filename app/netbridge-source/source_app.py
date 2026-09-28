@@ -106,8 +106,15 @@ _update_note = None            # set once an update has been staged/applied, sho
 
 
 def _app_binary():
-    """The file that gets replaced — only meaningful for a frozen (packaged) build."""
-    return pathlib.Path(sys.executable) if getattr(sys, "frozen", False) else None
+    """Only a standalone packaged executable can use the binary update channel.
+
+    Replacing Contents/MacOS inside a .app invalidates its bundle signature and
+    permission identity. Native bundles must be replaced as complete packages.
+    """
+    if not getattr(sys, "frozen", False): return None
+    exe = pathlib.Path(sys.executable).resolve()
+    if any(parent.suffix.lower() == '.app' for parent in exe.parents): return None
+    return exe
 
 
 def _update_pubkey():
@@ -155,6 +162,13 @@ def _update_compatible(fields):
     # Separate feed prevents older clients from discovering this protocol-2 release.
     # Missing metadata/fleet evidence is unknown, not permission to migrate.
     if fields.get('platform') != _plat_tag() or fields.get('bridge_protocol') != '2': return False
+    # A binary-only update must not pair a new app with an unrelated old helper.
+    # Missing/different helper evidence requires the complete installer.
+    try:
+        helper = _mesh_bin()
+        if not helper or _sha256(helper) != fields.get('helper_sha256'): return False
+    except OSError:
+        return False
     st = load_state()
     if not st.get('bridge_id') or not st.get('token'): return False
     try:
