@@ -159,6 +159,8 @@ elif args[0] == "rmi":
 elif args[0] == "build":
     if flag("build_fail"):
         sys.exit("ERROR: failed to solve: process \"/bin/sh -c pip install -r requirements.txt\" did not complete successfully")
+    if flag("build_silent"):                  # exit 0 and no image id: what the old `| tail -1` hid
+        sys.exit(0)
     sha = [x.split("=", 1)[1] for x in args if x.startswith("CONTROL_PLANE_GIT_SHA=")][0]
     tag = args[args.index("-t") + 1]
     img = "sha256:" + hashlib.sha256(("%s %s" % (sha, time.time_ns())).encode()).hexdigest()
@@ -348,6 +350,13 @@ check '[ "$(rc)" != 0 ] && grep -q "the image did not build" "$T/out" && grep -q
 check '! went_up && [ "$(live)" = "$C2" ] && [ "$(sum "$SB/opt/netbridge/Caddyfile")" = "$CADDY_BEFORE" ] && [ "$(sum "$SB/opt/netbridge/docker-compose.yml")" = "$COMPOSE_BEFORE" ] && [ "$(backups)" = "$N_BACKUPS" ]' \
       "…and the running app, compose file and Caddyfile are exactly as they were"
 rm -f "$SB/flags/build_fail"
+touch "$SB/flags/build_silent"
+deploy
+check '[ "$(rc)" != 0 ] && grep -q "the image did not build" "$T/out"' \
+      "a build that 'succeeds' with no image id is a failed build, not a deploy of nothing"
+check '! went_up && [ "$(live)" = "$C2" ] && [ "$(sum "$SB/opt/netbridge/Caddyfile")" = "$CADDY_BEFORE" ] && [ "$(backups)" = "$N_BACKUPS" ]' \
+      "…and nothing live changed"
+rm -f "$SB/flags/build_silent"
 
 printf '\n# a later proxy change\n' >> "$W/control-plane/deploy/aws/Caddyfile"; g add -A; g commit -q -m "c5 proxy change"; C5=$(g rev-parse HEAD)
 touch "$SB/flags/caddy_invalid"
