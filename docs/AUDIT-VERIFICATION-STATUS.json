@@ -61,18 +61,18 @@
       "severity": "medium",
       "title": "'Choppy for them \u2192 deepen the bridge buffer' (profile:wan) changes nothing on any bridge; it only restarts media",
       "file": "control-plane/panel-dist/index.html",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; description corrected, full CI pending",
+      "evidence": "control-plane/panel-dist/index.html",
+      "note": "WAN profile accurately described as reapplying current settings with a media restart. Mesh renewal clearly warns about interrupted connectivity and room audio, and recommends idle maintenance."
     },
     {
       "id": "B47",
       "severity": "medium",
       "title": "After claiming from the drawer, the Actions tab still says 'Only reads work until this bridge is claimed'",
       "file": "control-plane/panel-dist/index.html",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; browser regression passed, full CI pending",
+      "evidence": "app/netbridge-desktop/tests/fleet-workflow.spec.ts",
+      "note": "Drawer action visibility and alert render identity include claim state; controls refresh without reload."
     },
     {
       "id": "B60",
@@ -448,9 +448,9 @@
       "severity": "medium",
       "title": "After claiming in the drawer, the 'No PIN set' alert loses its 'Set a PIN\u2026' button until the page is reloaded",
       "file": "control-plane/panel-dist/index.html",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; browser regression passed, full CI pending",
+      "evidence": "app/netbridge-desktop/tests/fleet-workflow.spec.ts",
+      "note": "Drawer action visibility and alert render identity include claim state; controls refresh without reload."
     },
     {
       "id": "B194",
@@ -583,9 +583,9 @@
       "severity": "medium",
       "title": "The sign-in email link uses up a presenter's one-time code in the admin panel",
       "file": "control-plane/backend/app/main.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; role-specific email regression passed, full CI pending",
+      "evidence": "tests/test-presenter-email.py",
+      "note": "Presenter sign-in email contains app-directed code without an admin-panel redemption link. Admin links retained; unknown-account response unchanged. Presenter invites also direct to the app."
     },
     {
       "id": "B253",
@@ -637,9 +637,9 @@
       "severity": "medium",
       "title": "An offline bridge shows stale health as current, and uptime reports a 'clean streak' during the outage",
       "file": "control-plane/panel-dist/index.html",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "partial; offline drawer and loaded uptime labelled, browser regression passed",
+      "evidence": "app/netbridge-desktop/tests/fleet-workflow.spec.ts",
+      "note": "Offline drawer labels last-reported telemetry, removes healthy colouring, and uptime loaded while offline does not claim a current streak. Automatic refresh of already-loaded uptime on state transition remains to verify."
     },
     {
       "id": "B261",
@@ -817,9 +817,9 @@
       "severity": "medium",
       "title": "Panel's 'Re-issue mesh key' sits under 'cannot hear the ROOM - Silent' and says 'nothing is restarted', but re-keying re-logs-in tailscaled",
       "file": "control-plane/panel-dist/index.html",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; description corrected, full CI pending",
+      "evidence": "control-plane/panel-dist/index.html",
+      "note": "WAN profile accurately described as reapplying current settings with a media restart. Mesh renewal clearly warns about interrupted connectivity and room audio, and recommends idle maintenance."
     },
     {
       "id": "B337",

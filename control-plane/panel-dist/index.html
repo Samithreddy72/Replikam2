@@ -510,10 +510,10 @@ const ACTIONS = [
   ["jitter-fix:1",    "Choppy or breaking up → deeper buffer on your side"],
   ["jitter-fix:2",    "Still choppy → deeper still"],
   ["jitter-reset",    "Sounds right again → hand the buffer back"],
-  ["mesh-key",        "Silent — nothing at all → re-issue mesh key"],
+  ["mesh-key",        "Repair an expired mesh connection ⚠ interrupts connectivity"],
 
   ["#The ROOM cannot hear YOU properly", null],
-  ["profile:wan",     "Choppy for them → deepen the bridge buffer ⚠ ~5 s video freeze"],
+  ["profile:wan",     "Reapply the existing WAN profile ⚠ restarts media"],
 
   ["#Robotic, crackling, or devices missing in the meeting", null],
   ["reset-clock",     "Reset the audio clock ⚠ their camera+mic+speakers re-enumerate"],
@@ -1022,7 +1022,10 @@ function paintDrawer(){
   setText(DR.f.hname, d.claimed ? devName(d) : "Unclaimed · " + (d.pairing_code || d.id));
   patch(DR.f.hstate, JSON.stringify([d.state, d.laptop, d.last_seen]), () => [statePill(d), d.laptop ? pill("idle", "laptop connected") : null]);
   DR.f.claimbox.hidden = !!d.claimed;
-  patch(DR.f.alerts, JSON.stringify(d.alerts || []), () => (d.alerts || []).length ? (d.alerts || []).map(a => alertRow(d, a))
+  if (DR.f.claimNote) DR.f.claimNote.hidden = !!d.claimed;
+  if (DR.f.unclaimedActions) DR.f.unclaimedActions.hidden = !!d.claimed;
+  if (DR.f.claimedActions) DR.f.claimedActions.hidden = !d.claimed;
+  patch(DR.f.alerts, JSON.stringify([d.claimed, d.state, d.alerts || []]), () => (d.alerts || []).length ? (d.alerts || []).map(a => alertRow(d, a))
     : [h("div", {class: "small muted"}, d.state === "offline" ? "Offline — nothing else can be measured until it is back." : "Nothing — all quiet.")]);
   kvSet("state", STATE_LABEL[d.state] || d.state);
   kvSet("session", sm.video ? "Presenter streaming" + (ses.peer ? " from " + ses.peer : "") + (ses.age_s != null ? " · " + dur(ses.age_s) : "")
@@ -1056,6 +1059,12 @@ function paintDrawer(){
     : cf.drift ? "Drifted: " + cf.drift + " setting(s) differ (" + (cf.restorable || 0) + " restorable here)" : cf.state);
   kvSet("number", d.label || "—"); kvSet("name", d.name || "—"); kvSet("code", d.pairing_code || "—");
   kvSet("mesh", d.tailscale_ip || "—"); kvSet("lan", t.ip || "—"); kvSet("devid", d.id);
+  if (!d.online) {
+    for (const key of ["session", "laptop", "pin", "path", "power", "usb", "temp", "wifi", "disk", "upfor", "services"]) {
+      const node = DR.f[key];
+      if (node) { node.textContent = "Last reported: " + node.textContent + " (offline; not current)"; node.className = "muted"; }
+    }
+  }
   if (DR.tab === "updates") paintUpdatesTab(d);
   if (DR.f.actOffline) DR.f.actOffline.hidden = d.online;
 }
@@ -1083,7 +1092,7 @@ async function loadUptime(d){
     const u = await api(`/admin/devices/${devId}/uptime`);
     if (DR.id !== d.id) return;
     const today = u.windows && u.windows[0] ? u.windows[0].pct : 0;
-    let txt = "Last 24 h: " + today + "% · clean streak " + dur(u.streak_s);
+    let txt = "Last 24 h: " + today + "% · " + (S.devices.get(devId)?.online ? "online streak " + dur(u.streak_s) : "currently offline; readings are historical");
     const inc = (u.incidents || []).filter(i => !i.ongoing).slice(-1)[0];
     if (inc) txt += " · last outage " + clock(parseTs(inc.start)) + " (" + dur(inc.seconds) + ")";
     setText(DR.f.uptimeTxt, txt);
@@ -1123,6 +1132,7 @@ function buildActions(p, d){
       h("button", {class: "act", type: "button", onclick: () => renameDialog(S.devices.get(d.id))}, h("span", {}, "Rename or renumber…"), h("span", {class: "go"}, "›")),
       h("button", {class: "act", type: "button", onclick: () => labelDialog(S.devices.get(d.id))}, h("span", {}, "Setup label — Wi-Fi name and password…"), h("span", {class: "go"}, "›")),
       h("button", {class: "act warnact", type: "button", onclick: () => forgetDialog(S.devices.get(d.id))}, h("span", {}, "Remove from the fleet… ⚠ deletes its history"), h("span", {class: "go"}, "›"))));
+  DR.f.claimNote = claimNote; DR.f.unclaimedActions = unclaimed; DR.f.claimedActions = main;
   p.append(DR.f.actOffline, claimNote, unclaimed, main);
 }
 
@@ -1536,7 +1546,7 @@ function confirmAndRun(d, type, value, args){
   const why = {restart: "Restarts the video and audio services. The meeting sees a ~5 s freeze.",
     reboot: "Reboots the whole bridge. The meeting loses the camera, mic and speaker for ~30 s; the laptop re-detects them.",
     "reset-clock": "Rebuilds the USB audio device. The meeting laptop's camera, mic and speaker drop and re-enumerate — re-select them there.",
-    profile: "Sets the bridge's receive buffer to the WAN profile and restarts media. ~5 s video freeze.",
+    profile: "Reapplies the existing WAN profile and restarts media. It does not deepen the current buffer. Use only during maintenance.",
     lock: "Ends the live PIN session at once: the presenter's video and voice stop being accepted until someone enters the PIN again. Media services keep running.",
     "free-space": "Permanently removes older archived journal logs until archived usage is at most 64 MB. Current logs and media settings are preserved.",
     "golden-restore": "Rewrites only the tunable settings back to the known-good baseline and restarts just what changed. Anything that needs a code deploy is reported, not silently \"fixed\".",
@@ -1557,7 +1567,7 @@ function meshKeyDialog(d){
   // key the bridge collects on its next check-in - needed when its ephemeral mesh node was
   // garbage-collected while it was offline and it cannot rejoin by itself.
   openDialog({title: "Re-issue the mesh key for " + devLabel(d) + "?",
-    body: [h("p", {}, "The bridge picks up a fresh key on its next check-in (~15 s) and rejoins the secure mesh. Safe to repeat; nothing is restarted.")],
+    body: [h("p", {}, "The bridge picks up a fresh key on its next check-in (~15 s) and signs in to the secure mesh again. This can interrupt the presenter connection and room audio. Use during an idle maintenance window, after checking that an expired mesh connection is the cause.")],
     ok: "Re-issue key", onOk: async () => { const r = await api(`/admin/devices/${devId}/mesh-key`, {method: "POST"}); toast("Mesh key re-issued for " + devLabel(d) + " — " + (r.note || ""), "ok"); }});
 }
 function setPinDialog(d){

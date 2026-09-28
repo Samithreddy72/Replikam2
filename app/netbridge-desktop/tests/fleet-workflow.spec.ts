@@ -64,3 +64,26 @@ test('Unconfirmed baseline requires its explicit save action',async({page})=>{
  expect(writes[0].args.verified).toBe('');
  expect(writes[0].args.note).toMatch(/^UNCONFIRMED /);
 });
+
+test('Claim refreshes actions and PIN fix; offline readings are historical',async({page})=>{
+ const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.route('http://fleet.test/**',async route=>{
+  if(new URL(route.request().url()).pathname==='/')return route.fulfill({contentType:'text/html',body:html});
+  return route.fulfill({json:{windows:[{pct:98}],streak_s:900,incidents:[]}});
+ });
+ await page.goto('http://fleet.test/');
+ await page.evaluate(()=> (window as any).eval(`
+  S.devices.set('a',{id:'a',name:'Room A',state:'new',claimed:false,online:true,latest:{power:{ok:true},temp:'40C'},alerts:[{kind:'pin_not_set',title:'No PIN set',fix:{command:'set-pin',label:'Set a PIN…',steps:[]}}]});
+  openDrawer('a','actions');
+ `));
+ await expect(page.getByText('Only reads work until this bridge is claimed.',{exact:true})).toBeVisible();
+ await page.evaluate(()=> (window as any).eval(`Object.assign(S.devices.get('a'),{claimed:true,state:'active'});paintDrawer();`));
+ await expect(page.getByText('Only reads work until this bridge is claimed.',{exact:true})).toBeHidden();
+ await expect(page.getByText('This bridge in the fleet',{exact:true})).toBeVisible();
+ await page.evaluate(()=> (window as any).selectTab('overview'));
+ await expect(page.getByRole('button',{name:'Set a PIN…',exact:true})).toBeVisible();
+ await page.evaluate(()=> (window as any).eval(`Object.assign(S.devices.get('a'),{online:false,state:'offline'});paintDrawer();loadUptime(S.devices.get('a'));`));
+ await expect(page.getByText('Last reported: OK (offline; not current)',{exact:true})).toBeVisible();
+ await expect(page.getByText('Last 24 h: 98% · currently offline; readings are historical',{exact:true})).toBeVisible();
+ expect(errors).toEqual([]);
+});

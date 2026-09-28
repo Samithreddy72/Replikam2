@@ -146,3 +146,7 @@ The strict image policy now uses an AuthorizedKeysCommand backed by the durable 
 ### Presenter sign-in and stale-heartbeat lookup
 
 Sign-in now normalizes bare HTTPS Fleet addresses and reports failed requests instead of claiming email was sent. Fresh-install invite redemption uses the URL entered in the form. Expired codes retain actionable guidance; outages do not cause a second invite-redemption attempt. Mesh-key failures distinguish invalid credentials and network/server failure. Device IDs resolve cached network addresses for the diagnostic probe. Seven executed handler regressions pass locally; full branch CI remains required.
+
+### Fleet claim refresh, maintenance descriptions and presenter emails
+
+Claiming a device refreshes its drawer actions and PIN fix without reloading. A browser regression verifies those transitions and explicitly historical offline readings. WAN profile and mesh re-key descriptions now describe their actual effect and interruption risk. Presenter emails no longer send their one-use code into the admin panel; an executed backend test verifies role-specific destinations and identical unknown-account responses. Full CI is required for this combined revision.

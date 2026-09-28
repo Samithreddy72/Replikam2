@@ -1990,7 +1990,9 @@ def add_user(body: dict, actor=Depends(auth.require_admin),
     # the admin needs to know NOW whether to deliver the code by hand.
     base = (settings.public_base_url or "").rstrip("/")
     lines = ["You have been added to NetBridge as %s." % role, ""]
-    if base:
+    if role == "presenter":
+        lines += ["Open NetBridge on your Mac or Windows PC and paste this invite code:", ""]
+    elif base:
         lines += ["Open %s and paste this invite code:" % base, ""]
     else:
         lines += ["Open the NetBridge fleet page and paste this invite code:", ""]
@@ -2091,11 +2093,13 @@ def request_magic_link(body: dict, db: Session = Depends(get_db)):
     u.login_hash = auth.hash_token(code)
     u.login_expires = utcnow() + dt.timedelta(minutes=15)
     db.commit()
-    link = ("%s/?code=%s" % (base, code)) if base else None
+    # A presenter must redeem in the app: opening the admin panel would consume
+    # this one-time code without signing the presenter app in.
+    link = ("%s/?code=%s" % (base, code)) if base and u.role == "admin" else None
     lines = ["Sign in to NetBridge.", ""]
     if link:
         lines += ["Open this link to sign in:", link, ""]
-    lines += ["Or paste this code into the NetBridge app:", "", "    %s" % code, "",
+    lines += [("Or paste this code into the NetBridge app:" if link else "Open NetBridge on your Mac or Windows PC and paste this code:"), "", "    %s" % code, "",
               "It expires in 15 minutes. If you didn't ask to sign in, ignore this email."]
     # Send in a background thread so the response time does NOT reveal whether the
     # account exists (a synchronous SMTP round-trip only on the found path would be
