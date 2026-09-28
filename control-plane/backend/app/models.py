@@ -1,7 +1,7 @@
 """SQLAlchemy models for the fleet control plane."""
 import datetime as dt
 
-from sqlalchemy import String, Integer, Float, Boolean, DateTime, ForeignKey, JSON, Text, LargeBinary
+from sqlalchemy import String, Integer, Float, Boolean, DateTime, ForeignKey, JSON, Text, LargeBinary, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -110,8 +110,17 @@ class AlertEvent(Base):
 
     Lifecycle: created when an alert first appears (opened_at set, notified_at
     set once delivery succeeds); resolved_at set when it clears. A recurrence
-    after resolution is a NEW row, so 'offline again' pages again."""
+    after resolution is a NEW row, so 'offline again' pages again.
+
+    A problem that clears is only resolved once it has STAYED clear (clear_since, 2026-09-28):
+    if it comes back first, the same episode carries on and nobody is emailed twice.
+    new_device rows are records, not problems: they are born resolved."""
     __tablename__ = "alert_events"
+    # "This bridge's OPEN episodes" is asked by the alert loop every pass and by the panel's live
+    # stream every second (hysteresis, restart_storm - main._open_episodes). By device_id alone that
+    # read every episode the bridge ever had: 30 ms a call with 100k in the history, 0.1 ms with
+    # this index (2026-09-28). Created on existing databases by main._migrate.
+    __table_args__ = (Index("ix_alert_events_device_resolved", "device_id", "resolved_at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
@@ -121,6 +130,8 @@ class AlertEvent(Base):
     notified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolve_notified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the alert stopped firing while the episode is still open (None = firing now).
+    clear_since: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DiagBundle(Base):

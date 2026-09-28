@@ -229,8 +229,17 @@ def cmd_show(a):
     print("  power: %s" % (p.get("summary") or p))
     print("  audio: return %s Hz, mismatch %s, clock %s" % (l.get("return_rate"), l.get("return_mismatch"), (l.get("clock") or {}).get("verdict")))
     print("  updates: %s | parked: %s | OS update: %s" % (l.get("overrides"), l.get("quarantined"), l.get("ota")))
-    if d.get("alerts"):
-        print("  alerts: %s" % d["alerts"])
+    # One readable line per alert with its fix. It printed the raw list of dicts, fix objects and
+    # all (audit, 2026-09-28). The full steps are in `nb alerts <bridge>`.
+    als = d.get("alerts") or []
+    print("  alerts: %s" % ("none" if not als else "%d  (steps: nb alerts %s)" % (len(als), d.get("label") or d["id"])))
+    ref = {"claimed": d.get("claimed"), "label": d.get("label"), "device_id": d["id"], "pairing_code": d.get("pairing_code")}
+    for al in als:
+        fix = al.get("fix") or {}
+        how = ("  (fix: %s -> %s)" % (fix.get("label"), _fix_cmd(ref, fix["command"])) if fix.get("command")
+               else "  (fix: %s)" % fix["label"] if fix.get("label") else "")
+        print("    %s %s: %s%s" % ("!!" if al.get("severity") == "critical" else " !", al.get("title") or al.get("kind"),
+                                   al.get("detail") or "", how))
     print("  recent commands:")
     for c in (d.get("commands") or [])[:8]:
         print("    #%s %-14s %-9s %s" % (c["id"], c["type"], c["status"], c["created_at"][:19]))
