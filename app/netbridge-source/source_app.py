@@ -2538,8 +2538,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._body_cache = {}
         return self._body_cache
 
+    def _local_host_ok(self):
+        # DNS rebinding can turn an attacker-controlled hostname into 127.0.0.1.
+        # Validate GET as well as POST: diagnostics and recordings are private.
+        values = self.headers.get_all("Host") if hasattr(self.headers,"get_all") else [self.headers.get("Host", "")]
+        return bool(values and len(values) == 1 and re.fullmatch(
+            r"(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?", values[0], re.IGNORECASE))
+
     # ---------------- GET
     def do_GET(self):
+        if not self._local_host_ok():
+            return self._send({"_error": "Unrecognised local address."}, 403)
         self._body_cache = None
         if self.path == "/api/audio/diagnostics":
             return self._send(SESSION.audio_snapshot())
@@ -2696,6 +2705,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------- POST
     def do_POST(self):
+        if not self._local_host_ok():
+            return self._send({"_error": "Unrecognised local address."}, 403)
         self._body_cache = None      # fresh per request (connections are reused)
         if not self._csrf_ok():
             return self._send({"_error": "cross-origin request refused; NetBridge only "

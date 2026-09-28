@@ -29,4 +29,19 @@ class Checks(unittest.TestCase):
                 except urllib.error.HTTPError as e:self.assertEqual(e.code,502)
                 route.assert_called_once_with('one',{},read_only=True)
             finally:srv.shutdown();srv.server_close()
+    def test_rebinding_host_cannot_read_or_mutate_local_app(self):
+        with patch.object(app.SESSION,'audio_snapshot',return_value={}) as snapshot:
+            srv=app.ThreadingHTTPServer(('127.0.0.1',0),app.Handler)
+            threading.Thread(target=srv.serve_forever,daemon=True).start()
+            try:
+                url='http://127.0.0.1:%d/api/audio/diagnostics'%srv.server_port
+                for host in ('evil.invalid','localhost.evil.invalid','127.0.0.1.evil.invalid','user@localhost',''):
+                    for data in (None,b'{}'):
+                        req=urllib.request.Request(url,data=data,headers={'Host':host,'Content-Type':'application/json'})
+                        with self.assertRaises(urllib.error.HTTPError) as cm:urllib.request.urlopen(req)
+                        self.assertEqual(cm.exception.code,403)
+                snapshot.assert_not_called()
+                with urllib.request.urlopen(url) as response:self.assertEqual(response.status,200)
+                snapshot.assert_called_once()
+            finally:srv.shutdown();srv.server_close()
 if __name__=='__main__':unittest.main()

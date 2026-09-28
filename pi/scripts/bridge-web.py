@@ -1430,12 +1430,19 @@ class H(http.server.BaseHTTPRequestHandler):
             return
         _audit(path, peer, True)
         try:
+            if self.headers.get("Transfer-Encoding"):
+                raise ValueError("unsupported transfer encoding")
+            lengths = self.headers.get_all("Content-Length") if hasattr(self.headers,"get_all") else [self.headers.get("Content-Length","0")]
+            if lengths and len(lengths) != 1: raise ValueError("ambiguous content length")
             n = int(self.headers.get("Content-Length", 0) or 0)
-            body = json.loads(self.rfile.read(n) if n else b"{}") or {}
-            if not isinstance(body, dict):
-                body = {}
+            if n < 0 or n > 16384:
+                self._send(b'{"ok":false,"error":"request too large"}', "application/json", status=413)
+                return
+            body = json.loads(self.rfile.read(n) if n else b"{}")
+            if not isinstance(body, dict): raise ValueError("object required")
         except Exception:
-            body = {}
+            self._send(b'{"ok":false,"error":"invalid request body"}', "application/json", status=400)
+            return
         caller = _caller_ip(peer)
         if path in ("/api/set-peer", "/api/return-tune") and not self._session_ok(caller, body):
             return
@@ -1576,6 +1583,38 @@ class H(http.server.BaseHTTPRequestHandler):
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
     address_family = socket.AF_INET6
+    daemon_threads = True
+    max_workers = 16
+    socket_timeout = 10
+
+    def __init__(self, *args, **kwargs):
+        self._slots = threading.BoundedSemaphore(self.max_workers)
+        super().__init__(*args, **kwargs)
+
+    def get_request(self):
+        connection, address = super().get_request()
+        connection.settimeout(self.socket_timeout)
+        return connection, address
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
     def server_bind(self):
         try:
             self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)

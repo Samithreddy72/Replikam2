@@ -7,9 +7,9 @@
       "severity": "medium",
       "title": "No request-body limit: anyone can crash the 1 GB fleet host with one large POST, because the whole body is read before login is checked",
       "file": "control-plane/deploy/aws/Caddyfile",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-fleet-request-limits.py",
+      "note": "Bound JSON/upload bytes before parsing, including streamed/false-length bodies; total body deadline; proxy cap awaits actual Caddy validation."
     },
     {
       "id": "B8",
@@ -43,9 +43,9 @@
       "severity": "medium",
       "title": "bridge-web has no connection timeout or thread cap: any device on the venue LAN can pin unlimited handler threads and block go-live",
       "file": "pi/scripts/bridge-web.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-bridge-http-limits.py",
+      "note": "Sixteen bridge handler slots, ten-second socket timeout and 16 KiB body limit; overload returns 503."
     },
     {
       "id": "B37",
@@ -286,9 +286,9 @@
       "severity": "medium",
       "title": "No Host-header check: a DNS-rebinding page can read the app's GET endpoints, including recorded meeting audio",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-readonly-checks.py",
+      "note": "All local app GET/POST requests require a loopback Host; DNS-rebinding hostnames rejected before reading recordings or invoking handlers."
     },
     {
       "id": "B113",

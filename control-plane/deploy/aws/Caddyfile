@@ -13,6 +13,12 @@
 # which is why port 80 must stay open (the ACME challenge uses it) even though everything
 # real happens on 443.
 {$FLEET_DOMAIN} {
+	# Diagnostics are at most 5 MiB binary plus base64/JSON overhead.
+	# The application also enforces limits for direct and chunked requests.
+	request_body {
+		max_size 8MB
+	}
+
 	# A Range header reaches the app only in the one shape anything here sends: a single
 	# `bytes=N-` or `bytes=N-M` (curl -C - in bridge-update.sh resumes an OTA download with the
 	# first). Any other Range is removed, so the client gets the whole file with a 200, which every

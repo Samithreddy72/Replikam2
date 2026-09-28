@@ -21,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc, update, func
 from sqlalchemy.orm import Session
 
+from .request_limits import RequestLimits
 from .config import settings
 from .db import Base, engine, get_db
 from . import auth, models, notifier, workflow
@@ -375,6 +376,7 @@ app = FastAPI(
     openapi_url="/openapi.json" if _DOCS else None,
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(RequestLimits)
 
 # Bootstrap tables for dev/first run. For prod, switch to Alembic migrations.
 Base.metadata.create_all(engine)

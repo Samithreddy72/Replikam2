@@ -29,6 +29,8 @@ jobs:
           NB_TEST_LOG_DIR: ${{ runner.temp }}/netbridge-test-logs
           FLEET_TEST_PY: ${{ github.workspace }}/.test-venv/bin/python
         run: bash tools/run-tests.sh --suite common --python .test-venv/bin/python --media-python .test-venv/bin/python
+      - name: Validate production proxy configuration
+        run: docker run --rm -e FLEET_DOMAIN=fleet.test -v "$PWD/control-plane/deploy/aws/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: Check desktop interface
         working-directory: app/netbridge-desktop
         run: |
