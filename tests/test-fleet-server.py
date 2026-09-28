@@ -172,12 +172,18 @@ try:
           "no-PIN alert says go-live is blocked on the new image")
     check("mesh_relayed" in {a["kind"] for a in view[ids[1]]["alerts"]}, "alert: a live session is relayed")
     # An update refused before its manifest was read has no version (2026-09-28: "OS update  failed").
+    def os_alerts():
+        return [a["detail"] for a in {d["id"]: d for d in c.get("/admin/devices", headers=A).json()}[ids[2]]["alerts"]
+                if a["kind"] == "os_update_failed"]
+    tel(ids[2], ota={"state": "failed", "version": "", "ts": time.time(),
+                     "detail": "could not fetch the manifest from the fleet (HTTP 404)"})
+    det = os_alerts()
+    check(det == ["OS update failed — could not fetch the manifest from the fleet (HTTP 404)"],
+          "an OS update that failed before it had a version reads cleanly (no double space)", det)
+    # ...while one REFUSED because a meeting was on is no failure at all: nothing was installed
     tel(ids[2], ota={"state": "failed", "version": "", "ts": time.time(),
                      "detail": "the meeting laptop is attached — try again after the meeting"})
-    det = [a["detail"] for a in {d["id"]: d for d in c.get("/admin/devices", headers=A).json()}[ids[2]]["alerts"]
-           if a["kind"] == "os_update_failed"]
-    check(det == ["OS update failed — the meeting laptop is attached — try again after the meeting"],
-          "an OS update that failed before it had a version reads cleanly (no double space)", det)
+    check(os_alerts() == [], "an update refused because a meeting was on raises no 'OS update failed' alert", os_alerts())
     old = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10)
     db.get(Device, ids[0]).last_seen = old; db.commit()
     view = {d["id"]: d for d in c.get("/admin/devices", headers=A).json()}

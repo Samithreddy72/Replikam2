@@ -88,7 +88,12 @@ def publish(v, built="2026-09-28"):
     """The fleet's OS catalog, as tools/publish-ota.sh leaves it."""
     d = T / "payloads/ota" / v
     d.mkdir(parents=True, exist_ok=True)
-    (d / "manifest.txt").write_text("version=%s\nimage=rootfs.tar.zst\nsha256=00\nbuilt=%s\n" % (v, built))
+    # A whole version: the catalog lists only what a bridge can install - an image present, of the
+    # size the manifest names, with its hash (publish tools fix, 2026-09-28).
+    img = ("netbridge-os %s" % v).encode()
+    (d / "rootfs.tar.zst").write_bytes(img)
+    (d / "manifest.txt").write_text("version=%s\nimage=rootfs.tar.zst\nsha256=%s\nsize=%d\nbuilt=%s\n"
+                                    % (v, __import__("hashlib").sha256(img).hexdigest(), len(img), built))
     (d / "manifest.txt.sig").write_bytes(b"0" * 72)
 
 
@@ -516,7 +521,9 @@ try:
         check(t2.get("status") == "failed" and "not a result" in (t2.get("reason") or ""),
               "an update an older build left with a status word that is not a result ends 'failed', not 'updating'", t2)
         pull(R3)                                                           # delivered; the result is lost
-        set_cmd(target(ro5, R3)["command_id"], sent_at=utcnow() - dt.timedelta(seconds=3700))
+        # past the fleet's own time limit for an OS update (its number, not a copy: it grew from 1 h to
+        # 3 h 10 min when slow venue downloads were cut off mid-write, 2026-09-28)
+        set_cmd(target(ro5, R3)["command_id"], sent_at=utcnow() - dt.timedelta(seconds=M.TIMEOUT_S["update"] + 100))
         lst = {x["id"]: x for x in c.get("/admin/rollouts", headers=A).json()}
         fd = {f["device"]: f["reason"] for f in V(lst.get(ro5), "failed_devices", [])}
         check(any("Charlie" in k and "never reported back" in v for k, v in fd.items()),

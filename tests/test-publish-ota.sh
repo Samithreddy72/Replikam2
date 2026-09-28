@@ -230,8 +230,10 @@ rc(){ cat "$T/rc"; }
 # ago <hours> <path...>: last changed that long ago. Relative to now, because "untouched for 6 hours"
 # is measured against the real clock.
 ago(){ local h="$1"; shift; touch -t "$(python3 -c 'import sys, time; print(time.strftime("%Y%m%d%H%M", time.localtime(time.time() - float(sys.argv[1]) * 3600)))' "$h")" "$@"; }
+# What the fleet offers, as a set (sorted here): the catalog's own order is newest first, which the
+# fleet's tests check; publish-ota.sh only ever asks whether a version is in it.
 offered(){ "$REAL_CURL" -fsS -m 5 -H "Authorization: Bearer test-admin-key" "$FLEET/admin/payloads/ota" \
-             | python3 -c 'import json,sys; print(" ".join(x["version"] for x in json.load(sys.stdin) if x["signed"]))'; }
+             | python3 -c 'import json,sys; print(" ".join(sorted(x["version"] for x in json.load(sys.stdin) if x["signed"])))'; }
 leftovers(){ ls -A "$OTA" | grep -E '^\.(incoming|old)-' ; ls -A "$HT"; }
 
 A=2.2.0-aaaaaaa B=2.2.0-bbbbbbb C=2.2.0-ccccccc D=2.2.0-ddddddd
