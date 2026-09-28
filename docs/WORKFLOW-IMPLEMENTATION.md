@@ -154,3 +154,7 @@ Claiming a device refreshes its drawer actions and PIN fix without reloading. A 
 ### Diagnostics delivery and historical reconciliation
 
 Diagnostic bundles are uploaded before command success becomes visible. Upload failure produces a failed command with explicit retry guidance; an executed collector test verifies event order and both outcomes. Existing rollout and alert-delivery regressions confirm B237 and B261 were already repaired. Fresh power evidence and the owner's GPIO-plus-USB wiring description are recorded in POWER-ACCEPTANCE.md; the electrical fault remains active.
+
+## Verified continuation checkpoint
+
+Source `5e30454` passed all required jobs in CI 36482356922: common 1717, zero failed/skipped/missing; media 11 Linux + 9 Mac; desktop unit 3/build; nine Fleet/Source/Studio browser cases; Caddy validation; and native Go race checks on Windows/Mac/Linux. Earlier pending-CI notes above are superseded for this source revision. The mesh renewal classification failure in 2f54cbb/4607d04 was corrected in 5e30454. No production deployment or hardware certification is implied. Release holds remain in RELEASE-READINESS.md.

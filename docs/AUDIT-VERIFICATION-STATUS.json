@@ -61,7 +61,7 @@
       "severity": "medium",
       "title": "'Choppy for them \u2192 deepen the bridge buffer' (profile:wan) changes nothing on any bridge; it only restarts media",
       "file": "control-plane/panel-dist/index.html",
-      "status": "implemented; description corrected, full CI pending",
+      "status": "implemented; description corrected, full CI passed at 5e30454",
       "evidence": "control-plane/panel-dist/index.html",
       "note": "WAN profile accurately described as reapplying current settings with a media restart. Mesh renewal clearly warns about interrupted connectivity and room audio, and recommends idle maintenance."
     },
@@ -70,7 +70,7 @@
       "severity": "medium",
       "title": "After claiming from the drawer, the Actions tab still says 'Only reads work until this bridge is claimed'",
       "file": "control-plane/panel-dist/index.html",
-      "status": "implemented; browser regression passed, full CI pending",
+      "status": "implemented; browser regression passed, full CI passed at 5e30454",
       "evidence": "app/netbridge-desktop/tests/fleet-workflow.spec.ts",
       "note": "Drawer action visibility and alert render identity include claim state; controls refresh without reload."
     },
@@ -160,7 +160,7 @@
       "severity": "medium",
       "title": "Lifeline guard reverts PROVEN lifeline and agent overrides after any 15-minute stretch without the fleet (it never checks whether the fleet was heard from after install)",
       "file": "pi/scripts/bridge-overrides.sh",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; targeted tests; full CI passed at 5e30454",
       "evidence": "tests/test-signed-updates.sh",
       "note": "Proof is tied to exact update bytes and persisted; later outages cannot revert a proven update."
     },
@@ -169,7 +169,7 @@
       "severity": "medium",
       "title": "Lifeline guard never fires after a reboot without internet: wall-clock arithmetic on a Pi with no RTC and a clock that cannot be saved",
       "file": "pi/scripts/bridge-overrides.sh",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; targeted tests; full CI passed at 5e30454",
       "evidence": "tests/test-signed-updates.sh",
       "note": "Boot ID and monotonic uptime bound the unproven trial; future wall-clock timestamps cannot prevent rollback."
     },
@@ -178,7 +178,7 @@
       "severity": "medium",
       "title": "(e) CONFIRMED: override signatures cover the bytes only, not the name or version, so any previously signed file can be installed under another name or replayed",
       "file": "pi/scripts/bridge-deploy-script.sh",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; targeted tests; full CI passed at 5e30454",
       "evidence": "tests/test-signed-context.py; tests/test-signed-updates.sh; tests/test-publish-script.sh",
       "note": "New-image policy requires signed product/name/revision context. Persistent per-name floor refuses lower or conflicting revisions at install/use/restore. Legacy live images unchanged; legacy overrides need audited re-signing before migration."
     },
@@ -214,7 +214,7 @@
       "severity": "medium",
       "title": "`revert-all` deletes the pending restarts that its own reverts just queued, so services keep running override code while status reports 'built-in'",
       "file": "pi/scripts/bridge-overrides.sh",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; targeted tests; full CI passed at 5e30454",
       "evidence": "tests/test-signed-updates.sh",
       "note": "Revert-all preserves deferred media restarts; actual shell regression verifies no live restart."
     },
@@ -223,7 +223,7 @@
       "severity": "medium",
       "title": "Loader crash-loop trip counts deliberate restarts, so a healthy media override is quarantined after 3 ordinary restarts in 2 minutes",
       "file": "pi/scripts/bridge-run.sh",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; targeted tests; full CI passed at 5e30454",
       "evidence": "tests/test-script-override.sh",
       "note": "Use systemd automatic-restart history to reset deliberate-start sequences; four manual starts stay installed while real automatic loops quarantine."
     },
@@ -277,7 +277,7 @@
       "severity": "medium",
       "title": "The mesh helper's loopback control proxy (127.0.0.1:18080) lets any web page burn PIN tries under the presenter's mesh identity",
       "file": "app/netbridge-source/mesh/main.go",
-      "status": "implemented; Mac/Windows/Linux race tests passed; full CI pending",
+      "status": "implemented; Mac/Windows/Linux race tests passed; full CI passed at 5e30454",
       "evidence": "app/netbridge-source/mesh/control_proxy_test.go",
       "note": "Replace raw TCP forwarding with guarded HTTP. Reject browser metadata, untrusted Host, simple form writes and oversized bodies before mesh dial. Preserve native JSON calls without retrying lost PIN responses."
     },
@@ -295,7 +295,7 @@
       "severity": "medium",
       "title": "A page reloaded or reopened during a live session polls with whatever the Bridge dropdown shows, which can switch the live helper to another bridge",
       "file": "app/netbridge-source/source_app.py",
-      "status": "implemented; browser regression passed; full CI pending",
+      "status": "implemented; browser regression passed; full CI passed at 5e30454",
       "evidence": "app/netbridge-desktop/tests/source-state.spec.ts",
       "note": "Restore live host and bridge identity from engine state; disable source selectors during a session; polling remains read-only."
     },
@@ -331,7 +331,7 @@
       "severity": "high",
       "title": "nb's confirmation prompt promises that changes wait until the bridge is idle or the laptop is unplugged. Only deploy does that; reboot and restart act at once.",
       "file": "tools/nb",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; targeted tests; full CI passed at 5e30454",
       "evidence": "tests/test-nb-admin-safety.py",
       "note": "Confirmation no longer promises automatic idle/unplug deferral for arbitrary actions."
     },
@@ -394,7 +394,7 @@
       "severity": "medium",
       "title": "nb deploy signs and uploads a file before asking for confirmation, and a bare name becomes a path whenever a file of that name exists in the current directory",
       "file": "tools/nb",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; targeted tests; full CI passed at 5e30454",
       "evidence": "tests/test-nb-admin-safety.py",
       "note": "Confirmation occurs before signing/publishing; only explicit paths trigger upload, never a coincidentally matching bare catalog name."
     },
@@ -421,7 +421,7 @@
       "severity": "medium",
       "title": "The post-deploy health check passes for a crash-looping service (only 'is-failed' is checked)",
       "file": "pi/scripts/bridge-deploy-script.sh",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; targeted tests; full CI passed at 5e30454",
       "evidence": "tests/test-signed-updates.sh",
       "note": "Require stable active services or successful completed oneshots; activating units and automatic restarts fail health explicitly."
     },
@@ -448,7 +448,7 @@
       "severity": "medium",
       "title": "After claiming in the drawer, the 'No PIN set' alert loses its 'Set a PIN\u2026' button until the page is reloaded",
       "file": "control-plane/panel-dist/index.html",
-      "status": "implemented; browser regression passed, full CI pending",
+      "status": "implemented; browser regression passed, full CI passed at 5e30454",
       "evidence": "app/netbridge-desktop/tests/fleet-workflow.spec.ts",
       "note": "Drawer action visibility and alert render identity include claim state; controls refresh without reload."
     },
@@ -484,7 +484,7 @@
       "severity": "medium",
       "title": "A lockout hit while re-entering the PIN mid-session puts the presenter in a loop: the PIN dialog reopens every 4 s and hides the lockout message",
       "file": "app/netbridge-source/source_app.py",
-      "status": "implemented; browser regression passed; full CI pending",
+      "status": "implemented; browser regression passed; full CI passed at 5e30454",
       "evidence": "app/netbridge-desktop/tests/source-state.spec.ts",
       "note": "Keep lockout message and suppress automatic PIN prompts for the reported retry interval."
     },
@@ -493,7 +493,7 @@
       "severity": "medium",
       "title": "The 'ask the device' probe for bridges the fleet marks offline sends the device ID as a hostname, so stale-heartbeat bridges always show '(offline)'",
       "file": "app/netbridge-source/source_app.py",
-      "status": "implemented; targeted regression passed, full CI pending",
+      "status": "implemented; targeted regression passed, full CI passed at 5e30454",
       "evidence": "tests/test-presenter-signin.py",
       "note": "Device IDs resolve cached addresses. Sign-in normalizes Fleet URLs, uses the entered URL for fresh-install invites, distinguishes failed requests, and preserves expired-code guidance. An outage never triggers invite redemption."
     },
@@ -511,7 +511,7 @@
       "severity": "medium",
       "title": "Sign-in errors are wrong or raw: an expired code shows 'invalid or already-used invite', network failures show '<urlopen error \u2026>'",
       "file": "app/netbridge-source/source_app.py",
-      "status": "implemented; targeted regression passed, full CI pending",
+      "status": "implemented; targeted regression passed, full CI passed at 5e30454",
       "evidence": "tests/test-presenter-signin.py",
       "note": "Device IDs resolve cached addresses. Sign-in normalizes Fleet URLs, uses the entered URL for fresh-install invites, distinguishes failed requests, and preserves expired-code guidance. An outage never triggers invite redemption."
     },
@@ -520,7 +520,7 @@
       "severity": "medium",
       "title": "At go-live a revoked sign-in or an unreachable fleet is reported as 'the control plane would not issue a mesh key for this bridge'",
       "file": "app/netbridge-source/source_app.py",
-      "status": "implemented; full CI pending",
+      "status": "implemented; full CI passed at 5e30454",
       "evidence": "tests/test-presenter-signin.py; tests/test-mesh-helper-health.py",
       "note": "Mesh key creation retains a user-facing distinction between revoked credentials, connectivity failures, throttling and server failure; no LAN fallback."
     },
@@ -538,7 +538,7 @@
       "severity": "high",
       "title": "When the bridge stops answering mid-meeting, the page keeps its last green rows and 'Ready to present'; mesh-helper death is never shown",
       "file": "app/netbridge-source/source_app.py",
-      "status": "implemented; browser regression passed; full CI pending",
+      "status": "implemented; browser regression passed; full CI passed at 5e30454",
       "evidence": "app/netbridge-desktop/tests/source-state.spec.ts",
       "note": "Actual browser regression verifies lost checks erase previous green readiness. Dead mesh route produces an explicit unavailable response."
     },
@@ -547,7 +547,7 @@
       "severity": "high",
       "title": "Sign-in fails with no message for a URL without https:// and for invite codes on a fresh install; a mistyped URL says 'code on its way'",
       "file": "app/netbridge-source/source_app.py",
-      "status": "implemented; targeted regression passed, full CI pending",
+      "status": "implemented; targeted regression passed, full CI passed at 5e30454",
       "evidence": "tests/test-presenter-signin.py",
       "note": "Device IDs resolve cached addresses. Sign-in normalizes Fleet URLs, uses the entered URL for fresh-install invites, distinguishes failed requests, and preserves expired-code guidance. An outage never triggers invite redemption."
     },
@@ -556,7 +556,7 @@
       "severity": "medium",
       "title": "The go-live status line (including 'NO ROOM AUDIO') is overwritten within 4 s by 'direct mesh path \u00b7 <public IP:port>'",
       "file": "app/netbridge-source/source_app.py",
-      "status": "implemented; browser regression passed; full CI pending",
+      "status": "implemented; browser regression passed; full CI passed at 5e30454",
       "evidence": "app/netbridge-desktop/tests/source-state.spec.ts",
       "note": "Connection path has a separate status element and cannot overwrite room-audio warnings."
     },
@@ -574,7 +574,7 @@
       "severity": "medium",
       "title": "A fresh diagnostics bundle does not appear after 'SUCCEEDED': the agent reports the result before uploading, and the panel reloads the list only once",
       "file": "control-plane/panel-dist/index.html",
-      "status": "implemented; executed result-order regression passed, full CI pending",
+      "status": "implemented; executed result-order regression passed, full CI passed at 5e30454",
       "evidence": "tests/test-diagnostics-publication.py",
       "note": "Detached and immediate diagnose upload before success is reported; failed upload is an explicit failed command with retry guidance."
     },
@@ -583,7 +583,7 @@
       "severity": "medium",
       "title": "The sign-in email link uses up a presenter's one-time code in the admin panel",
       "file": "control-plane/backend/app/main.py",
-      "status": "implemented; role-specific email regression passed, full CI pending",
+      "status": "implemented; role-specific email regression passed, full CI passed at 5e30454",
       "evidence": "tests/test-presenter-email.py",
       "note": "Presenter sign-in email contains app-directed code without an admin-panel redemption link. Admin links retained; unknown-account response unchanged. Presenter invites also direct to the app."
     },
@@ -592,7 +592,7 @@
       "severity": "medium",
       "title": "The presenter app shows 'Ready to present' in the red error box",
       "file": "app/netbridge-source/source_app.py",
-      "status": "implemented; browser regression passed; full CI pending",
+      "status": "implemented; browser regression passed; full CI passed at 5e30454",
       "evidence": "app/netbridge-desktop/tests/source-state.spec.ts",
       "note": "Verified readiness uses green styling; failures reset to warning styling."
     },
@@ -610,7 +610,7 @@
       "severity": "medium",
       "title": "The golden-save dialog's 'Cancel' button saves a baseline",
       "file": "control-plane/panel-dist/index.html",
-      "status": "implemented; browser tests passed; full CI pending",
+      "status": "implemented; browser tests passed; full CI passed at 5e30454",
       "evidence": "app/netbridge-desktop/tests/fleet-workflow.spec.ts",
       "note": "Cancel closes without sending any command. Unconfirmed save has its own explicit label."
     },
@@ -655,7 +655,7 @@
       "severity": "medium",
       "title": "Presenter app: the audio diagnostics panel (raw JSON, big red 'Restart return audio' button) shows for every presenter, even on the sign-in screen",
       "file": "app/netbridge-source/source_app.py",
-      "status": "implemented; browser regression passed; full CI pending",
+      "status": "implemented; browser regression passed; full CI passed at 5e30454",
       "evidence": "app/netbridge-desktop/tests/source-state.spec.ts",
       "note": "Advanced audio diagnostics are hidden and not polled while idle; opening them during a session is explicit."
     },
@@ -727,7 +727,7 @@
       "severity": "medium",
       "title": "nb deploy/revert 'all' runs one bridge at a time and waits 1000 s on each offline bridge; commands queued for an offline bridge never expire",
       "file": "tools/nb",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; targeted tests; full CI passed at 5e30454",
       "evidence": "tests/test-nb-admin-safety.py",
       "note": "Deploy/revert queue each bridge immediately when idle with 30-minute expiry; waiting/offline results are accepted, explicitly not completion."
     },
@@ -799,7 +799,7 @@
       "severity": "medium",
       "title": "A slow /v1/provision crashes the agent tick (TimeoutError not caught), skipping the command pull",
       "file": "pi/scripts/bridge-agent.py",
-      "status": "implemented; targeted tests; full CI pending",
+      "status": "implemented; targeted tests; full CI passed at 5e30454",
       "evidence": "tests/test-agent-provision-errors.py; tests/test-agent-background.py",
       "note": "Commands already precede provisioning. Timeout, socket, truncated response and JSON failures now remain nonfatal; malformed payloads never invoke tailscale."
     },
@@ -817,7 +817,7 @@
       "severity": "medium",
       "title": "Panel's 'Re-issue mesh key' sits under 'cannot hear the ROOM - Silent' and says 'nothing is restarted', but re-keying re-logs-in tailscaled",
       "file": "control-plane/panel-dist/index.html",
-      "status": "implemented; description corrected, full CI pending",
+      "status": "implemented; description corrected, full CI passed at 5e30454",
       "evidence": "control-plane/panel-dist/index.html",
       "note": "WAN profile accurately described as reapplying current settings with a media restart. Mesh renewal clearly warns about interrupted connectivity and room audio, and recommends idle maintenance."
     },
@@ -839,5 +839,14 @@
       "evidence": "control-plane/deploy/aws/env.example",
       "note": "Mesh settings explicit; exact existing tag policy must be configured and tested."
     }
-  ]
+  ],
+  "latest_full_ci": {
+    "source_revision": "5e304541e5b556fede56e7af8333ef7571ce631e",
+    "run_id": 36482356922,
+    "common_checks": 1717,
+    "failed": 0,
+    "skipped": 0,
+    "missing_results": 0,
+    "note": "A green suite does not close open, partial, physical or excluded findings."
+  }
 }

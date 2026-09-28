@@ -16,13 +16,13 @@ No live commands, restarts, power changes, image flashes, Fleet deploys or app-c
 
 ## Automated evidence
 
-Checkpoint `38980c0` passed [CI run 36473398285](https://github.com/Samithreddy72/Replikam2/actions/runs/36473398285): common suite 1673 checks, Linux media 11, Mac video encoder 9, desktop unit checks 3, desktop build and actual Caddy configuration validation. No skipped checks or missing results. These are separate jobs, not hardware certification. Subsequent mesh control hardening adds required native Go checks on Linux, Mac and Windows; its CI result must also pass before promotion.
+Implementation revision `5e304541e5b556fede56e7af8333ef7571ce631e` passed [CI run 36482356922](https://github.com/Samithreddy72/Replikam2/actions/runs/36482356922): 1717 common checks, zero failures/skips/missing results; Linux media 11; Mac encoder 9; desktop unit 3 plus build; nine browser checks across Fleet, Source and Studio; actual Caddy configuration validation; and native Go race tests on Mac, Windows and Linux. These are software checks, not physical or native installer certification.
 
 Targeted checks cover signed update tampering and recovery, wrong-product OS manifests, sleeping-laptop guards, fresh/complete idle evidence, bounded HTTP bodies and worker threads, DNS-rebinding refusal, CLI target selection, stale/malformed telemetry, and preserved PIN/audio controls. See WORKFLOW-IMPLEMENTATION.md for exact checkpoints. AUDIT-VERIFICATION-STATUS.json conservatively tracks all 93 high/medium historical findings after reviewer severity/refutation; an open entry is not silently marked fixed by a passing unrelated suite.
 
 ## Material release holds
 
-1. Finish reconciling and testing the remaining audit findings. Examples requiring explicit engineering work include signed script name/version binding and rollback policy, owner-key revocation through rollback paths, persistent image machine identity, and trial-boot failure recovery. Existing tests do not close these by implication.
+1. Finish reconciling and testing the remaining audit findings. Sixteen historical findings remain explicitly open, with additional partial/mitigated items. Signed script identity/revision binding is now implemented; whole-OS anti-rollback, old-slot owner-key revocation migration, persistent image machine identity and early trial-boot recovery still require work. Existing tests do not close these by implication.
 2. Finish the agreed workflow scope: stable presenter identity and revocation, complete backup scheduling/off-device restore acceptance, fallback behavior and remaining UI parity. Wi-Fi and phone work stay excluded.
 3. Build actual candidate artifacts on their native platforms. Test installation, start, capture permissions, helper operation, quit/reopen, whole-package upgrade and rollback on Windows and macOS. Code signing/notarization credentials are not configured here; do not label developer/ad-hoc builds as trusted signed distribution.
 4. Boot the Pi candidate from a spare card and run the full receiver test with the real USB meeting laptop. Preserve the tested WAN/audio profile. Never restart the gadget with the laptop attached.
@@ -35,3 +35,7 @@ GitHub Actions artifact storage is currently full. Existing image draft releases
 ## Promotion order
 
 One canonical Pi candidate, one Fleet revision, and one shared Studio source revision producing native Mac/Windows packages should form a recorded compatibility set. First complete software gates and preserve checksums/signatures, then qualify one spare-card pilot, then review the exact artifact set and rollback evidence before live promotion. Until then, keep the working setup on its existing versions.
+
+## Latest power comparison — GPIO jumper supply
+
+The owner confirmed GPIO-header power through jumper wires. Connected/live baseline at 20:55:54–20:56:22 UTC: active undervoltage in 6/6 fresh readings. The owner then physically unplugged the client and ended the presenter session. Four distinct Fleet heartbeats at 20:59:02–20:59:50 UTC showed active undervoltage in 3/4 readings, temperatures 38.5–38.9 °C and no monitored service restarts. The fault therefore persists at idle on GPIO power. Media load changed too, so this does not isolate USB's contribution. The retained `configured` USB status is a known stale-reporting issue confirmed by the owner; it is not evidence the cable remained attached. Supply rating, jumper/contact quality and reverse-current isolation still need physical verification.
