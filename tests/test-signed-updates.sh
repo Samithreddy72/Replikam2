@@ -321,6 +321,32 @@ deploy bridge-web.py
 [ "$(rc)" = 0 ] && [ ! -f "$D/quarantine/bridge-web.py.9000" ] && [ -f "$D/quarantine-history/bridge-web.py.9000" ] \
   && ok "new deployment archives stale parked copies outside the active quarantine" || no "stale parked copy survived a new deployment: $(cat "$T/out")"
 
+# Strict new-image policy: name/revision are inside the signed bytes.
+export BRIDGE_SIGNATURE_POLICY="$T/strict-policy" BRIDGE_SIGNATURE_VERIFIER="$REPO/pi/scripts/bridge-verify-update.py"
+touch "$BRIDGE_SIGNATURE_POLICY"
+printf '#!/usr/bin/env python3\nprint("context v1")\n' > "$T/context-source.py"
+context_publish(){
+  NB_UPDATE_REVISION="$1" python3 "$BRIDGE_SIGNATURE_VERIFIER" prepare "$T/context-source.py" "$T/context.py" "$2"
+  publish bridge-web.py "$T/context.py"
+}
+context_publish 100 bridge-agent.py; deploy bridge-web.py
+[ "$(rc)" = 4 ] && ok "installer refuses a valid signature for another file name" || no "cross-name update accepted"
+context_publish 100 bridge-web.py; deploy bridge-web.py
+[ "$(rc)" = 0 ] && ok "bound signed update installs and records revision floor" || no "valid context refused: $(cat "$T/out")"
+context_publish 99 bridge-web.py; deploy bridge-web.py
+[ "$(rc)" = 4 ] && ok "installer refuses a previously signed lower revision" || no "rollback replay accepted"
+printf '#!/usr/bin/env python3\nprint("different content")\n' > "$T/context-source.py"
+context_publish 100 bridge-web.py; deploy bridge-web.py
+[ "$(rc)" = 4 ] && ok "same revision with different bytes is refused" || no "conflicting revision accepted"
+context_publish 101 bridge-web.py; deploy bridge-web.py
+[ "$(rc)" = 0 ] && ok "higher signed revision advances the acceptance floor" || no "higher revision refused"
+context_publish 100 bridge-web.py
+mkdir -p "$D/quarantine"; cp "$T/server/bridge-web.py" "$D/quarantine/bridge-web.py.9999"; cp "$T/server/bridge-web.py.sig" "$D/quarantine/bridge-web.py.sig.9999"
+rm -f "$D/bridge-web.py" "$D/bridge-web.py.sig"
+bash "$DEPLOY" --unquarantine bridge-web.py > "$T/out" 2>&1; context_rc=$?
+[ "$context_rc" != 0 ] && [ ! -e "$D/bridge-web.py" ] && ok "quarantine restore cannot bypass the accepted revision floor" || no "old quarantine bypassed replay guard"
+unset BRIDGE_SIGNATURE_POLICY BRIDGE_SIGNATURE_VERIFIER
+
 # Completed oneshots may be inactive, but must have succeeded.
 printf '#!/usr/bin/env python3\nprint("idle frame")\n' > "$T/render.py"
 publish render-idle-frame.py "$T/render.py"

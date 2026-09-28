@@ -45,6 +45,13 @@ LIFELINE_QUIET_S=900                        # no fleet contact this long -> reve
 CRASH_N=3; CRASH_WINDOW_S=120               # restarts within the window -> quarantine
 CORE_UNITS="bridge-uvcd bridge-feeder-net bridge-feeder-audio bridge-web"
 
+# Required on newly built images; legacy images retain their previous protocol.
+verify_context(){
+  [ -e "${BRIDGE_SIGNATURE_POLICY:-/etc/netbridge/script-signature-v2}" ] || return 0
+  python3 "${BRIDGE_SIGNATURE_VERIFIER:-/usr/local/bin/bridge-verify-update.py}" verify \
+    "$2" "$3" "$PUBKEY" "$1" "$DIR/.security-floor" "${4:-check}"
+}
+
 log(){ echo "bridge-overrides: $*" >&2; command -v logger >/dev/null 2>&1 && logger -t bridge-overrides "$*" 2>/dev/null; return 0; }
 now(){ $NOW_CMD; }
 uptime_s(){ cut -d' ' -f1 "$UPTIME_SRC" 2>/dev/null | cut -d. -f1; }
@@ -59,7 +66,7 @@ field(){ row "$1" | cut -d' ' -f"$2"; }
 units_of(){ local u; u="$(field "$1" 4)"; [ "$u" = "-" ] && u=""; echo "$u"; }
 
 verified(){ [ -f "$DIR/$1" ] && [ -f "$DIR/$1.sig" ] && [ -f "$PUBKEY" ] &&
-            openssl dgst -sha256 -verify "$PUBKEY" -signature "$DIR/$1.sig" "$DIR/$1" >/dev/null 2>&1; }
+            openssl dgst -sha256 -verify "$PUBKEY" -signature "$DIR/$1.sig" "$DIR/$1" >/dev/null 2>&1 && verify_context "$1" "$DIR/$1" "$DIR/$1.sig"; }
 sha(){ sha256sum "$1" 2>/dev/null | cut -c1-12; }
 
 is_bound(){ awk -v t="$1" '$5==t {f=1} END {exit !f}' "$MOUNTINFO" 2>/dev/null; }

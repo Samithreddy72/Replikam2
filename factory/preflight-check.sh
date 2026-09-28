@@ -29,6 +29,8 @@ need_bin tailscale        "mesh join at claim"
 need_bin python3          "agent + web + scripts"
 
 echo "== preflight: critical files =="
+need_file /usr/local/bin/bridge-verify-update.py "signed update identity and replay guard"
+need_file /etc/netbridge/script-signature-v2 "mandatory signed update policy"
 need_file /usr/local/sbin/wifi-connect                "portal binary"
 need_file /usr/local/share/wifi-connect/ui/index.html "portal UI assets"
 need_file /usr/local/bin/uvc-gadget                   "smooth-video gadget"

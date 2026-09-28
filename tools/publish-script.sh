@@ -71,7 +71,7 @@ case "$KIND" in
 esac
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-cp "$SRC" "$TMP/$NAME"
+python3 "$REPO/pi/scripts/bridge-verify-update.py" prepare "$SRC" "$TMP/$NAME" "$NAME" || exit 4
 openssl dgst -sha256 -sign "$KEY" -out "$TMP/$NAME.sig" "$TMP/$NAME" || exit 4
 openssl dgst -sha256 -verify "${KEY%-key.pem}-pubkey.pem" -signature "$TMP/$NAME.sig" "$TMP/$NAME" >/dev/null 2>&1 \
   || openssl dgst -sha256 -verify "$HOME/.netbridge/keys/script-pubkey.pem" -signature "$TMP/$NAME.sig" "$TMP/$NAME" >/dev/null \

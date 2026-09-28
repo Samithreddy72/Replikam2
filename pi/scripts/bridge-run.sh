@@ -37,6 +37,13 @@ STATE="/data/overrides/.state"
 TRIP_N="${BRIDGE_RUN_TRIP_N:-3}"
 TRIP_WINDOW_S="${BRIDGE_RUN_TRIP_WINDOW_S:-120}"
 
+# Required on newly built images; legacy images retain their previous protocol.
+verify_context(){
+  [ -e "${BRIDGE_SIGNATURE_POLICY:-/etc/netbridge/script-signature-v2}" ] || return 0
+  python3 "${BRIDGE_SIGNATURE_VERIFIER:-/usr/local/bin/bridge-verify-update.py}" verify \
+    "$2" "$3" "$PUBKEY" "$1" "$DIR/.security-floor" "${4:-check}"
+}
+
 log() { echo "bridge-run[$NAME]: $*" >&2; }
 
 # Reject anything that is not a bare filename: this argument reaches a path, and the caller
@@ -83,6 +90,11 @@ if [ ! -f "$SIG" ]; then
 fi
 if ! openssl dgst -sha256 -verify "$PUBKEY" -signature "$SIG" "$OVR" >/dev/null 2>&1; then
   log "override SIGNATURE VERIFY FAILED — running baked-in"
+  exec_baked "$@"
+fi
+
+if ! verify_context "$NAME" "$OVR" "$SIG"; then
+  log "signed context or revision refused — running built-in"
   exec_baked "$@"
 fi
 

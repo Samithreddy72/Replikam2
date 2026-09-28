@@ -7,14 +7,15 @@ class Freshness(unittest.TestCase):
   src=(ROOT/'app/netbridge-source/source_app.py').read_text()
   helper=re.search(r'function checksUnavailable\(message\)\{.*?\n\}',src,re.S)
   poll=re.search(r'async function poll\(\)\{.*?(?=\nboot\(\);)',src,re.S)
-  self.assertIsNotNone(helper);self.assertIsNotNone(poll)
+  tone=re.search(r'function setCheckTone\(ready\)\{.*?\n\}',src,re.S)
+  self.assertIsNotNone(helper);self.assertIsNotNone(poll);self.assertIsNotNone(tone)
   harness=r'''
 const assert=require('assert');
 const nodes={};const $=id=>nodes[id]||(nodes[id]={className:'ok',textContent:'Ready to present',style:{},hidden:false});
-let greenSince=1,liveHost='bridge',pinSnooze=Date.now();
+let greenSince=1,liveHost='bridge',pinSnooze=Date.now(),pinBlockedUntil=0,pinBlockedMessage='';
 const host=()=>liveHost;let mode='error';
 const j=async()=>{if(mode==='throw')throw Error('offline');if(mode==='locked')return {pin:{locked:true,protocol:2}};return {_error:'timeout'};};
-'''+helper.group(0)+'\n'+poll.group(0)+r'''
+'''+helper.group(0)+'\n'+tone.group(0)+'\n'+poll.group(0)+r'''
 (async()=>{
 for(mode of ['error','throw','locked']){
  greenSince=1;for(const id of ['c1','c2','c3','c4','c5'])$(id).className='ok';

@@ -178,9 +178,9 @@
       "severity": "medium",
       "title": "(e) CONFIRMED: override signatures cover the bytes only, not the name or version, so any previously signed file can be installed under another name or replayed",
       "file": "pi/scripts/bridge-deploy-script.sh",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-signed-context.py; tests/test-signed-updates.sh; tests/test-publish-script.sh",
+      "note": "New-image policy requires signed product/name/revision context. Persistent per-name floor refuses lower or conflicting revisions at install/use/restore. Legacy live images unchanged; legacy overrides need audited re-signing before migration."
     },
     {
       "id": "B87",
@@ -331,9 +331,9 @@
       "severity": "high",
       "title": "nb's confirmation prompt promises that changes wait until the bridge is idle or the laptop is unplugged. Only deploy does that; reboot and restart act at once.",
       "file": "tools/nb",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-nb-admin-safety.py",
+      "note": "Confirmation no longer promises automatic idle/unplug deferral for arbitrary actions."
     },
     {
       "id": "B143",
@@ -394,9 +394,9 @@
       "severity": "medium",
       "title": "nb deploy signs and uploads a file before asking for confirmation, and a bare name becomes a path whenever a file of that name exists in the current directory",
       "file": "tools/nb",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-nb-admin-safety.py",
+      "note": "Confirmation occurs before signing/publishing; only explicit paths trigger upload, never a coincidentally matching bare catalog name."
     },
     {
       "id": "B162",
@@ -727,9 +727,9 @@
       "severity": "medium",
       "title": "nb deploy/revert 'all' runs one bridge at a time and waits 1000 s on each offline bridge; commands queued for an offline bridge never expire",
       "file": "tools/nb",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; targeted tests; full CI pending",
+      "evidence": "tests/test-nb-admin-safety.py",
+      "note": "Deploy/revert queue each bridge immediately when idle with 30-minute expiry; waiting/offline results are accepted, explicitly not completion."
     },
     {
       "id": "B309",

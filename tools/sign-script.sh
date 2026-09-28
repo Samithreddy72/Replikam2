@@ -32,7 +32,7 @@ bash -n "$SRC" || { echo "refusing to sign a script that fails syntax check"; ex
 
 mkdir -p "$OUT"
 n="$(basename "$SRC")"
-cp "$SRC" "$OUT/$n"
+python3 "$(dirname "$0")/../pi/scripts/bridge-verify-update.py" prepare "$SRC" "$OUT/$n" "$n"
 openssl dgst -sha256 -sign "$KEY" -out "$OUT/$n.sig" "$OUT/$n"
 openssl dgst -sha256 -verify "$PUB" -signature "$OUT/$n.sig" "$OUT/$n" >/dev/null \
   || { echo "self-verify FAILED — do not deploy"; exit 4; }

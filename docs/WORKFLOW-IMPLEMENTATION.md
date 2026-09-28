@@ -129,3 +129,12 @@ Source retains the engine's active bridge across page reloads, keeps lockout mes
 ## Update guard corrections
 
 B84/B85: per-content proof prevents a later venue outage from reverting an update that already reached Fleet. Unproven trials use boot ID/uptime; no RTC/NTP assumptions. B91: deliberate starts reset the crash sequence using systemd NRestarts; real automatic restart sequences still quarantine. B170: active state and restart evidence are required; completed oneshots need success/zero exit status. B90's existing pending-restart preservation now has a direct revert-all/live-session regression. These are sandboxed signed-script tests, not a physical update qualification. Reference: [systemd v257 service start and restart accounting](https://github.com/systemd/systemd/blob/v257/src/core/service.c).
+
+
+## Signed context and CLI sequencing
+
+New images require `script-signature-v2` and the read-only `bridge-verify-update.py`. The publisher signs product/name/monotonic revision inside a comment; original payload bytes are otherwise preserved. Installer, loader, bind verification and quarantine restore reject mismatched names or revisions below a persistent acceptance floor; a same-revision different body is refused. Revert-all does not remove the floor. Existing legacy signatures remain usable only on legacy-policy images. Before flashing the new candidate, retained legacy overrides must be reviewed and re-signed; never silently discard a working audio override. This is not whole-OS anti-rollback. Local evidence: 5 real-signature context tests, 74 signed-update checks, 26 loader checks, 17 publisher checks.
+
+CLI now confirms before publishing, distinguishes explicit paths from bare catalog names, and queues deploy/revert for idle with a 30-minute expiry without stalling on offline bridges. Twelve CLI tests pass. A queue acceptance is explicitly not execution success.
+
+CI 36478934149 for 6b0ebe8 passed 1687 common checks but failed the extracted-JavaScript freshness harness because its copied helper list omitted the new tone function. The harness now includes the actual new function and lockout state; its behavior test passes locally. Full CI remains required for this batch.

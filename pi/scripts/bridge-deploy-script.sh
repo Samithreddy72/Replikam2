@@ -27,6 +27,13 @@ OVR="${BRIDGE_DEPLOY_OVERRIDES:-/usr/local/bin/bridge-overrides.sh}"
 BAKED_DIR="${BRIDGE_DEPLOY_BAKED_DIR:-/usr/local/bin}"
 FETCH="${BRIDGE_DEPLOY_FETCH:-curl -fsS -m 60 --retry 3 --retry-delay 3 -o}"
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/bridge-deploy.XXXXXX")"
+# Required on newly built images; legacy images retain their previous protocol.
+verify_context(){
+  [ -e "${BRIDGE_SIGNATURE_POLICY:-/etc/netbridge/script-signature-v2}" ] || return 0
+  python3 "${BRIDGE_SIGNATURE_VERIFIER:-/usr/local/bin/bridge-verify-update.py}" verify \
+    "$2" "$3" "$PUBKEY" "$1" "$DIR/.security-floor" "${4:-check}"
+}
+
 log()  { echo "bridge-deploy: $*"; }
 die()  { echo "bridge-deploy: ERROR $*" >&2; rm -rf "$STAGE"; exit "${2:-1}"; }
 trap 'rm -rf "$STAGE"' EXIT
@@ -80,7 +87,7 @@ running(){
   # The four media scripts first, in the format this command has always printed.
   local line
   for name in bridge-return-audio.sh bridge-feeder-audio.sh bridge-feeder-net.sh bridge-uvcd.sh; do
-    if [ -f "$DIR/$name" ] && openssl dgst -sha256 -verify "$PUBKEY" -signature "$DIR/$name.sig" "$DIR/$name" >/dev/null 2>&1; then
+    if [ -f "$DIR/$name" ] && openssl dgst -sha256 -verify "$PUBKEY" -signature "$DIR/$name.sig" "$DIR/$name" >/dev/null 2>&1 && verify_context "$name" "$DIR/$name" "$DIR/$name.sig"; then
       line="$name override sha256=$(sha256sum "$DIR/$name" | cut -c1-12)"
       "$OVR" superseded "$name" 2>/dev/null && line="$line NOT IN USE (installed on another OS; baked-in runs)"
     elif [ -f "$DIR/$name" ]; then
@@ -135,6 +142,7 @@ case "${1:-}" in
       if ! openssl dgst -sha256 -verify "$PUBKEY" -signature "$sig" "$f" >/dev/null 2>&1; then
         log "$base FAILED signature re-verify — leaving it quarantined"; continue
       fi
+      verify_context "$base" "$f" "$sig" accept || { log "$base: signed context refused"; continue; }
       kind="$(row "$base" | cut -d' ' -f2)"
       mode=0755; case "$kind" in keys|dropin) mode=0644 ;; esac
       install -m "$mode" "$f" "$DIR/$base" && cp -f "$sig" "$DIR/$base.sig" || continue
@@ -172,6 +180,8 @@ openssl dgst -sha256 -verify "$PUBKEY" -signature "$STAGE/$NAME.sig" "$STAGE/$NA
 log "  signature OK  sha256=$(sha256sum "$STAGE/$NAME" | cut -c1-16)"
 check_payload "$STAGE/$NAME" "$NAME" "$KIND" || die "payload fails its $KIND check — refusing to install" 5
 log "  $KIND check OK"
+
+verify_context "$NAME" "$STAGE/$NAME" "$STAGE/$NAME.sig" accept || die "signed update identity or revision refused" 4
 
 MODE=0755; case "$KIND" in keys|dropin) MODE=0644 ;; esac
 install -m "$MODE" "$STAGE/$NAME"     "$DIR/$NAME"

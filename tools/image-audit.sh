@@ -103,7 +103,8 @@ if [ $have_root -eq 1 ]; then
            /usr/local/bin/bridge-overrides.sh /usr/local/bin/bridge-ssh.sh \
            /usr/local/bin/bridge-cmd-run.sh /etc/netbridge/updatable.conf \
            /etc/netbridge/owner_ssh_authorized_keys /etc/netbridge/ota-pubkey.pem \
-           /etc/netbridge/script-pubkey.pem; do
+           /etc/netbridge/script-pubkey.pem /etc/netbridge/script-signature-v2 \
+           /usr/local/bin/bridge-verify-update.py; do
     "$DEBUGFS" -R "cat $f" "$ROOTDEV" >"$CAT/$(basename "$f")" 2>/dev/null
   done
   for u in bridge-agent bridge-web bridge-media bridge-pitch bridge-crackle-sentry bridge-identity \
@@ -593,6 +594,9 @@ grepf bridge-agent.py 'ALLOWED' && ok "agent re-validates commands against its o
 # Match the MECHANISM, not a word. The first pattern here was /minisign|signify|verify/ and
 # none of those appear — the loader spells it "verifies" and uses openssl. A check that greps
 # for a word the code never uses fails on a perfectly good image.
+has script-signature-v2 && has bridge-verify-update.py \
+  && ok "signed script identity/replay enforcement is included" \
+  || no "missing mandatory signed-script context enforcement"
 grepf bridge-run.sh 'openssl.*(dgst|verify)|script-pubkey' \
   && ok "script overrides are signature-checked (openssl against script-pubkey.pem)" \
   || no "unsigned overrides would execute"

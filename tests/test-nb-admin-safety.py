@@ -47,4 +47,30 @@ class Safety(unittest.TestCase):
    return {'pin':'1234','command_id':'c'} if method=='POST' else [{'id':'c','status':'done','output':'done'}]
   with patch.object(nb,'pick',return_value=[device]),patch.object(nb,'confirm',side_effect=confirm),patch.object(nb,'api',side_effect=api),patch.object(nb.time,'sleep'),contextlib.redirect_stdout(out):
    nb.cmd_pin(['1','1234'])
+ def test_cancelled_deployment_cannot_publish(self):
+  with tempfile.TemporaryDirectory() as td:
+   path=pathlib.Path(td)/'payload.sh';path.write_text('#!/bin/sh\nexit 0\n')
+   with patch.object(nb,'pick',return_value=[{'id':'a'}]),patch.object(nb,'confirm',side_effect=SystemExit(0)),patch.object(nb.subprocess,'run') as publish:
+    with self.assertRaises(SystemExit):nb.cmd_deploy(['a',str(path)])
+    publish.assert_not_called()
+ def test_bare_catalog_name_never_publishes_a_matching_local_file(self):
+  with patch.object(nb.pathlib.Path,'exists',return_value=True),patch.object(nb.subprocess,'run') as publish:
+   self.assertEqual(nb._publish_if_path('bridge-web.py'),'bridge-web.py')
+   publish.assert_not_called()
+ def test_bulk_deploy_and_revert_queue_all_targets_with_expiry_without_wait(self):
+  targets=[{'id':'offline','online':False},{'id':'online','online':True}]
+  for command,args in ((nb.cmd_deploy,['all','bridge-web.py']),(nb.cmd_revert,['all','bridge-web.py'])):
+   calls=[]
+   def api(method,path,body,**kw):
+    self.assertEqual(method,'POST');calls.append((path,body));return {'id':len(calls),'status':'waiting'}
+   with patch.object(nb,'pick',return_value=targets),patch.object(nb,'confirm'),patch.object(nb,'api',side_effect=api),patch.object(nb.time,'sleep') as sleep,contextlib.redirect_stdout(io.StringIO()) as out:
+    self.assertEqual(command(args),0);sleep.assert_not_called()
+   self.assertEqual(len(calls),2)
+   for _,body in calls:self.assertEqual(body['when'],'idle');self.assertEqual(body['expires_in_s'],1800)
+   self.assertIn('completion has not been verified',out.getvalue())
+ def test_confirmation_never_promises_implicit_deferral(self):
+  device={'id':'a','online':True,'latest':{'streams':{'video':True},'udc':'configured'}}
+  out=io.StringIO()
+  with patch.object(nb,'YES',False),patch('builtins.input',return_value='yes'),contextlib.redirect_stdout(out):nb.confirm('REBOOT',[device])
+  self.assertIn('may interrupt',out.getvalue());self.assertNotIn('will wait',out.getvalue())
 if __name__=='__main__':unittest.main()

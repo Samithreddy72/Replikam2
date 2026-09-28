@@ -23,7 +23,7 @@
     nb read <bridge> <path> [-n N]       read a file on the bridge (read-only; secrets are redacted)
     nb usb <bridge>                      USB camera misses, last minute
     nb diagnose <bridge>                 full diagnostics bundle -> ~/Downloads
-    nb deploy <bridge|all> <file|name> [--now]   sign + publish (if a path) + install; applies safely
+    nb deploy <bridge|all> <file|name> [--now]   confirm, publish explicit ./path, then queue when idle (30 min expiry)
     nb revert <bridge|all> <name>        back to the built-in file
     nb unquarantine <bridge> [name]      restore a file automatic rollback parked
     nb update <bridge> <version> [--force] [--allow-downgrade]
@@ -181,9 +181,9 @@ def confirm(what, targets):
         if vid is None:
             print("  %s has no current online status; meeting safety is unknown." % label(d))
         if vid:
-            print("  ⚠ %s is LIVE (presenter video flowing) — media changes will wait until it is idle." % label(d))
+            print("  ⚠ %s is LIVE (presenter video flowing) — this action may interrupt the meeting." % label(d))
         if attached:
-            print("  ⚠ %s has a meeting laptop attached — camera changes wait until it is unplugged." % label(d))
+            print("  ⚠ %s has a meeting laptop attached — camera or USB restarts can disconnect the meeting." % label(d))
     ans = input("%s on %s — continue? [y/N] " % (what, names)).strip().lower()
     if ans not in ("y", "yes"):
         die("cancelled", 0)
@@ -211,8 +211,8 @@ def run(d, ctype, args=None, wait=True, quiet=False, extra=None):
               % (label(d), ctype, cid))
     elif not quiet:
         print("  → %s: %s queued (#%s)" % (label(d), ctype, cid))
-    if not wait or cid is None:
-        return None
+    if not wait or cid is None or r.get("status") == "waiting":
+        return r
     limit = WAIT_S.get(ctype, 180)
     t0 = time.time()
     while time.time() - t0 < limit:
@@ -229,6 +229,9 @@ def run(d, ctype, args=None, wait=True, quiet=False, extra=None):
 def show_result(c):
     if not c:
         return 1
+    if c.get("status") in ("pending", "waiting", "running", "queued"):
+        print("  Accepted — %s; completion has not been verified. Check command history." % c["status"])
+        return 0
     ok = c.get("status") == "done"
     print(("  ✔ " if ok else "  ✖ ") + c.get("status", "?"))
     out = (c.get("output") or "").rstrip()
@@ -460,9 +463,16 @@ def cmd_diagnose(a):
     return rc
 
 
+def _explicit_payload_path(x):
+    # Bare catalog names remain names even if the working directory has that file.
+    return pathlib.Path(x).expanduser() if "/" in x or x.startswith("~") else None
+
+
 def _publish_if_path(x):
-    p = pathlib.Path(x).expanduser()
-    if p.exists():
+    p = _explicit_payload_path(x)
+    if p is not None:
+        if not p.is_file():
+            die("payload file does not exist: %s" % p)
         r = subprocess.run(["bash", str(REPO / "tools/publish-script.sh"), str(p)])
         if r.returncode != 0:
             die("publish failed — nothing deployed")
@@ -472,23 +482,31 @@ def _publish_if_path(x):
 
 def cmd_deploy(a):
     targets = pick(a[0], allow_all=True)
+    path = _explicit_payload_path(a[1])
+    name = path.name if path is not None else a[1]
+    if path is not None and not path.is_file():
+        die("payload file does not exist: %s" % path)
+    confirm(("Publish and schedule" if path is not None else "Schedule") +
+            " signed update %s when idle (expires in 30 minutes)" % name, targets)
     name = _publish_if_path(a[1])
     args = {"name": name, "source": FLEET + "/payloads"}
     if "--now" in a:
         args["now"] = True
-    confirm("Install signed update %s" % name, targets)
     rc = 0
+    # Queue every target promptly. An offline bridge never stalls the remaining fleet.
     for d in targets:
-        rc |= show_result(run(d, "deploy-script", args))
+        rc |= show_result(run(d, "deploy-script", args, wait=False,
+                              extra={"when":"idle", "expires_in_s":1800}))
     return rc
 
 
 def cmd_revert(a):
     targets = pick(a[0], allow_all=True)
-    confirm("Revert %s to the built-in file" % a[1], targets)
+    confirm("Schedule revert of %s when idle (expires in 30 minutes)" % a[1], targets)
     rc = 0
     for d in targets:
-        rc |= show_result(run(d, "revert-script", {"name": a[1]}))
+        rc |= show_result(run(d, "revert-script", {"name": a[1]}, wait=False,
+                              extra={"when":"idle", "expires_in_s":1800}))
     return rc
 
 

@@ -89,9 +89,10 @@ else
   for _ in $(seq 1 150); do curl -fsS -m 1 "$FLEET/healthz" >/dev/null 2>&1 && break; sleep 0.1; done
   curl -fsS -m 2 "$FLEET/healthz" >/dev/null 2>&1 && ok "fleet server started" || { echo "  FAIL  fleet server did not start"; cat "$T/server.log"; exit 1; }
 
-  served_ok(){ # served_ok <name> <source>: served bytes == source, and the signature verifies
+  served_ok(){ # served_ok <name> <source>: original bytes plus signed context; verify identity and signature
     curl -fsS -m 10 -o "$T/got" "$FLEET/payloads/$1" && curl -fsS -m 10 -o "$T/got.sig" "$FLEET/payloads/$1.sig" \
-      && cmp -s "$T/got" "$2" && openssl dgst -sha256 -verify "$K/script-pubkey.pem" -signature "$T/got.sig" "$T/got" >/dev/null 2>&1; }
+      && python3 -c 'import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); original=b"".join(x for x in b.splitlines(keepends=True) if not x.startswith(b"# NetBridge-Update: ")); sys.exit(original!=pathlib.Path(sys.argv[2]).read_bytes())' "$T/got" "$2" \
+      && python3 "$REPO/pi/scripts/bridge-verify-update.py" verify "$T/got" "$T/got.sig" "$K/script-pubkey.pem" "$1" "$T/floors" >/dev/null 2>&1; }
   for f in bridge-web.py bridge-agent.py bridge-status.sh owner_ssh_authorized_keys; do
     pub "$FLEET" "$T/src/$f"
     { [ "$(rc)" = 0 ] && served_ok "$f" "$T/src/$f"; } \
