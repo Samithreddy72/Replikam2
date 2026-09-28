@@ -8,7 +8,7 @@
 #   sign-script.sh <path/to/script.sh> [outdir]     sign into outdir (default ./signed)
 #   sign-script.sh --keygen                          create the keypair (once)
 #   sign-script.sh --pubkey                          print the public key to install on a bridge
-set -uo pipefail
+set -euo pipefail
 KEY="$HOME/.netbridge/keys/script-signing-key.pem"
 PUB="$HOME/.netbridge/keys/script-pubkey.pem"
 
@@ -19,10 +19,10 @@ if [ "${1:-}" = "--keygen" ]; then
   chmod 600 "$KEY"
   openssl ec -in "$KEY" -pubout -out "$PUB" 2>/dev/null
   echo "created $KEY (private, chmod 600)"
-  echo "created $PUB  -> install this on each bridge as /data/config/script-pubkey.pem"
+  echo "created $PUB  -> install this on each bridge as /etc/bridge/script-pubkey.pem"
   exit 0
 fi
-[ "${1:-}" = "--pubkey" ] && { cat "$PUB"; exit 0; }
+[ "${1:-}" = "--pubkey" ] && { cat "$PUB"; exit $?; }
 
 SRC="${1:?usage: sign-script.sh <script.sh> [outdir] | --keygen | --pubkey}"
 OUT="${2:-./signed}"

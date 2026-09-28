@@ -65,6 +65,16 @@ check_payload(){
   return 0
 }
 
+archive_parked(){
+  local name="$1" f
+  for f in "$DIR/quarantine/$name".*; do
+    [ -f "$f" ] || continue
+    mkdir -p "$DIR/quarantine-history" || return 1
+    mv "$f" "$DIR/quarantine-history/" || return 1
+  done
+  return 0
+}
+
 running(){
   local name
   # The four media scripts first, in the format this command has always printed.
@@ -91,7 +101,8 @@ case "${1:-}" in
   --revert)
     NAME="${2:?--revert needs a name}"; bare "$NAME" || die "bad name" 64
     [ -n "$(row "$NAME")" ] || die "$NAME is not an updatable file" 64
-    "$OVR" revert "$NAME"; exit $? ;;
+    "$OVR" revert "$NAME" || exit $?
+    archive_parked "$NAME"; exit $? ;;
   --revert-all)
     "$OVR" revert-all; exit $? ;;
   --unquarantine)
@@ -106,6 +117,19 @@ case "${1:-}" in
       case "$ts" in *[!0-9]*) continue ;; esac
       [ -n "$NAME" ] && [ "$base" != "$NAME" ] && continue
       [ -n "$(row "$base")" ] || { log "$base is no longer updatable — leaving it parked"; continue; }
+      if [ -f "$DIR/$base" ]; then
+        log "$base already has an installed override; refusing to replace it with a parked version"
+        continue
+      fi
+      newer=0
+      for candidate in "$Q/$base".*; do
+        [ -f "$candidate" ] || continue
+        suffix="${candidate##*.}"
+        case "$candidate" in *.sig.*) continue ;; esac
+        case "$suffix" in ''|*[!0-9]*) continue ;; esac
+        [ "$suffix" -gt "$ts" ] && newer=1
+      done
+      [ "$newer" = 0 ] || continue
       sig="$Q/${base}.sig.${ts}"
       [ -f "$sig" ] || { log "no signature kept for $base — refusing to restore"; continue; }
       if ! openssl dgst -sha256 -verify "$PUBKEY" -signature "$sig" "$f" >/dev/null 2>&1; then
@@ -121,7 +145,7 @@ case "${1:-}" in
       log "restored $base from quarantine (signature re-verified) — $("$OVR" policy "$base")"
       n=$((n+1))
     done
-    [ "$n" -gt 0 ] || die "nothing restored" 0
+    [ "$n" -gt 0 ] || die "nothing restored; installed overrides were preserved" 3
     rm -f "$DIR/.quarantined.json"
     log "unquarantine complete ($n restored)"
     exit 0 ;;
@@ -163,6 +187,7 @@ case "$KIND" in
   bind|keys|dropin) "$OVR" bind "$NAME" || die "could not put $NAME in place (the built-in file stays in use)" 6 ;;
 esac
 RES="$("$OVR" policy "$NAME" $NOW)" || die "$RES" 7
+archive_parked "$NAME" || die "installed but could not archive old parked copies" 7
 log "$NAME: $RES"
 case "$RES" in
   applied*)

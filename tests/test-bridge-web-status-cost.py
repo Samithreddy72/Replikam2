@@ -14,7 +14,7 @@ This counts launches through sh() and subprocess.run with a fake clock, so it ch
 
   python3 tests/test-bridge-web-status-cost.py
 """
-import importlib.util, pathlib, sys, types
+import importlib.util, pathlib, sys, types, io, builtins
 
 SRC = pathlib.Path(__file__).resolve().parent.parent / "pi" / "scripts" / "bridge-web.py"
 spec = importlib.util.spec_from_file_location("bw", SRC)
@@ -48,6 +48,24 @@ def fake_sh(cmd):
         return "ok\nALSA: Input/output error\n"
     return ""
 bw.sh = fake_sh
+
+# Model a settled Pi with both media processes alive. A fresh CI VM has a short
+# uptime and no feeder processes, which deliberately triggers different work.
+real_open = builtins.open
+def fixture_open(path, *args, **kwargs):
+    path = str(path)
+    if path == "/proc/uptime": return io.StringIO("3600.0 3600.0")
+    if path == "/proc/90001/cmdline": return io.BytesIO(b"gst-launch\0udpsrc\0port=5000")
+    if path == "/proc/90002/cmdline": return io.BytesIO(b"gst-launch\0udpsrc\0port=5002")
+    return real_open(path, *args, **kwargs)
+bw.open = fixture_open
+base_sh = bw.sh
+def process_fixture(cmd):
+    result = base_sh(cmd)
+    if calls[-1] == "pgrep -f udpsrc port=5000": return "90001"
+    if calls[-1] == "pgrep -f udpsrc port=5002": return "90002"
+    return result
+bw.sh = process_fixture
 
 logger_runs = []
 real_run = bw.subprocess.run

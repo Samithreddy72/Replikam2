@@ -86,6 +86,12 @@ class Workflow(unittest.TestCase):
   rows=c.get('/admin/devices/a/support-reports').json()
   self.assertEqual(rows[0]['id'],r.json()['id']);self.assertNotIn('SECRET',str(rows))
   self.assertEqual(c.get('/admin/devices/b/support-reports').status_code,404)
+ def test_health_understands_real_service_pairs_and_unreadable_power(self):
+  with SessionLocal() as db:
+   d=db.get(Device,'a');d.latest={'services':[['bridge-web','active'],['bridge-feeder-net','failed']],'power':{'ok':None,'summary':'unreadable'}};db.commit()
+  checks={r['key']:r for r in self.client.get('/admin/devices/a/health').json()['checks']}
+  self.assertEqual(checks['services']['status'],'warn');self.assertIn('bridge-feeder-net',checks['services']['detail'])
+  self.assertEqual(checks['power']['status'],'unknown')
  def test_stale_status_never_authorizes_disruption(self):
   with SessionLocal() as db:
    d=db.get(Device,'a');d.last_seen=utcnow()-dt.timedelta(minutes=5);d.latest={'udc':'not attached','streams':{}};db.commit()

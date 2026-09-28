@@ -28,7 +28,7 @@ jobs:
         env:
           NB_TEST_LOG_DIR: ${{ runner.temp }}/netbridge-test-logs
           FLEET_TEST_PY: ${{ github.workspace }}/.test-venv/bin/python
-        run: bash tools/run-tests.sh --python .test-venv/bin/python --media-python .test-venv/bin/python
+        run: bash tools/run-tests.sh --suite common --python .test-venv/bin/python --media-python .test-venv/bin/python
       - name: Check desktop interface
         working-directory: app/netbridge-desktop
         run: |
@@ -42,3 +42,28 @@ jobs:
           name: netbridge-test-evidence
           path: ${{ runner.temp }}/netbridge-test-logs
           retention-days: 7
+
+  linux-media:
+    # Noble explicitly disabled webrtcdsp in its package. Jammy still supplies
+    # the actual element; no stub or accepted skip may satisfy this job.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
+          gst-inspect-1.0 webrtcdsp
+          gst-inspect-1.0 webrtcechoprobe
+          bash tools/run-tests.sh --suite linux-media
+  macos-media:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: brew install ffmpeg
+      - run: bash tools/run-tests.sh --suite macos-media

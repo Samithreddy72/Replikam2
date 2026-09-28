@@ -53,7 +53,7 @@ def health(dev, alerts=(), now=None):
     row('mesh','Private connection','pass' if fresh and dev.tailscale_ip else 'unknown',
         'Bridge reports a mesh address; this is not an end-to-end connection test.' if dev.tailscale_ip else 'No mesh address reported.')
     power=t.get('power') if isinstance(t.get('power'),dict) else {}
-    row('power','Power','unknown' if not fresh or not power else 'pass' if power.get('ok') is True else 'warn',
+    row('power','Power','unknown' if not fresh or not isinstance(power.get('ok'),bool) else 'pass' if power.get('ok') is True else 'warn',
         power.get('summary','Power measurement unavailable.'))
     row('usb','USB connection','unknown' if not fresh or 'udc' not in t else 'pass' if t['udc']=='configured' else 'warn',
         'USB configured; displayed picture is not verified.' if t.get('udc')=='configured' else 'Check the meeting laptop USB connection.')
@@ -67,6 +67,8 @@ def health(dev, alerts=(), now=None):
     if pin.get('lockout'):
         row('lockout','PIN lockout','fail','Wait for lockout expiry or ask the administrator to review access attempts.')
     services=t.get('services')
+    if isinstance(services,list):
+        services={item[0]:item[1] for item in services if isinstance(item,(list,tuple)) and len(item)==2 and isinstance(item[0],str) and isinstance(item[1],str)}
     bad=[name for name,state in services.items() if state in ('failed','inactive','dead')] if isinstance(services,dict) else []
     row('services','Bridge services','unknown' if not fresh or not isinstance(services,dict) or not services else 'warn' if bad else 'pass',
         'Inspect services: '+', '.join(bad) if bad else 'Reported service states available.' if services else 'Service states unavailable.')

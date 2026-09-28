@@ -78,3 +78,9 @@ The later Mac regression checkpoint completed with 1645 passed, 0 failed, 3 skip
 Linux CI run 36466933139 failed: 1596 passed, 44 failed, 5 skipped. Identified harness gaps include shallow Git history (historical drift fixtures), BSD-only file-mode/size commands and missing media dependencies; remaining failures require individual logs. The runner now preserves per-test evidence and prints failed output. A Mac-specific VideoToolbox test still needs explicit platform coverage in the CI design. No release is approved by this result.
 
 Additional source fixes: require positive bridge peer confirmation before go-live/resume; keep diagnosis JSON complete or report a failure; busy override mounts may be lazily detached under the existing restart policy, and failed detach cannot claim rollback; image staging uses the pinned owner key, validates release identity and no longer hardcodes version 2.0.0.
+
+### Continued CI audit (29 September)
+
+Run 36467985733: 1617 passed, 32 failed, 4 skipped. Owner-key-dependent signer tests exposed a real `--pubkey` false-success bug; signer now propagates failures and all 25 override/signing checks pass using disposable keys. Status-cost test now models a settled Pi with live feeder PIDs (14 passed), rather than depending on CI host uptime. OTA test tracing added to diagnose Linux-only failures; isolated Mac run passes 39 checks.
+
+CI separates required common, Linux media and Mac encoder jobs. Ubuntu Noble disabled webrtcdsp ([distribution changelog](https://lists.ubuntu.com/archives/noble-changes/2024-February/009799.html)); the Linux media job uses Jammy's real plugin. Mac encoder gate locally passes 9 checks with real generated-video encoding. No skipped test is relabelled as passed. GitHub artifact storage quota is exhausted: run logs remain readable, but uploading test evidence/build artifacts is blocked. Existing release assets have not been deleted.

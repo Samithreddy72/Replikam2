@@ -282,6 +282,19 @@ echo "2.2.0-aaaaaaa" > "$T/image-version"; : > "$T/mountinfo"; bash "$OVR" apply
 bound "$T/root/home/pi/uvc-raw-setup.sh" && ! bound "$T/root/usr/local/bin/bridge-web.py" \
   && ok "back on 2.2.0 (a rollback): its own updates are used again; the one adopted on 2.2.1 is not" || no "rollback: wrong set bound"
 
+# A parked older version cannot overwrite a currently installed, verified override.
+mkdir -p "$D/quarantine"
+cp "$T/server/bridge-web.py" "$D/quarantine/bridge-web.py.9000"
+cp "$T/server/bridge-web.py.sig" "$D/quarantine/bridge-web.py.sig.9000"
+cp "$T/server/bridge-web.py" "$D/bridge-web.py"
+cp "$T/server/bridge-web.py.sig" "$D/bridge-web.py.sig"
+bash "$DEPLOY" --unquarantine bridge-web.py >"$T/out" 2>&1; qrc=$?
+[ "$qrc" -ne 0 ] && [ -f "$D/quarantine/bridge-web.py.9000" ] \
+  && ok "unquarantine refuses to overwrite an installed override" || no "unquarantine overwrote the installed override"
+deploy bridge-web.py
+[ "$(rc)" = 0 ] && [ ! -f "$D/quarantine/bridge-web.py.9000" ] && [ -f "$D/quarantine-history/bridge-web.py.9000" ] \
+  && ok "new deployment archives stale parked copies outside the active quarantine" || no "stale parked copy survived a new deployment: $(cat "$T/out")"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -18,7 +18,7 @@ T="$(mktemp -d)"; SRV=""
 trap '[ -z "$SRV" ] || kill "$SRV" 2>/dev/null; rm -rf "$T"' EXIT
 pass=0; fail=0
 ok(){ echo "  PASS  $1"; pass=$((pass+1)); }
-no(){ echo "  FAIL  $1"; fail=$((fail+1)); sed 's/^/        /' "$T/out" 2>/dev/null | tail -5; }
+no(){ echo "  FAIL  $1"; fail=$((fail+1)); sed 's/^/        /' "$T/out" 2>/dev/null | tail -8; tail -12 "$T/ssh.trace" 2>/dev/null || true; }
 
 PY=""
 for c in "${FLEET_TEST_PY:-}" "$HOME/netbridge/fleet-test-venv/bin/python" python3; do
@@ -78,6 +78,8 @@ cp "$T/gh/blobs/\$id" "\$out"
 EOF
 cat > "$T/bin/ssh" <<EOF
 #!/bin/bash
+exec 2>>"$T/ssh.trace"
+set -x
 for a; do cmd="\$a"; done
 n=\$(( \$(cat "$T/ssh.n" 2>/dev/null || echo 0) + 1 )); echo \$n > "$T/ssh.n"
 # stdin carries the script for "sh -s" / "bash -s". On a terminal (while --prune asks its

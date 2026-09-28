@@ -137,20 +137,25 @@ openssl ec -in "$T/evil.pem" -pubout -out "$T/data/config/script-pubkey.pem" 2>/
 rm -f "$T/data/config/script-pubkey.pem"
 
 # ===================== 10. the signing tool round-trips =====================
-if bash "$SIGNER" --pubkey >/dev/null 2>&1; then
-  tmp="$T/sig-test"; mkdir -p "$tmp"
-  printf '#!/bin/bash\necho hi\n' > "$tmp/x.sh"
-  if bash "$SIGNER" "$tmp/x.sh" "$tmp/out" >/dev/null 2>&1 && [ -f "$tmp/out/x.sh.sig" ]; then
-    ok "sign-script.sh produces a self-verifying signature"
-  else no "sign-script.sh did not produce a valid signature"; fi
-  printf 'if then fi\n' > "$tmp/bad.sh"
-  bash "$SIGNER" "$tmp/bad.sh" "$tmp/out" >/dev/null 2>&1 \
-    && no "signer accepted a syntactically broken script" \
-    || ok "signer refuses a script that fails syntax check"
-else
-  ok "signing key not present on this machine — signer checks skipped"
-  ok "(run tools/sign-script.sh --keygen to enable them)"
-fi
+# Never use the owner's keys; test missing, valid, and mismatched keys explicitly.
+SIGN_HOME="$T/sign-home"
+mkdir -p "$SIGN_HOME/.netbridge/keys"
+signer(){ HOME="$SIGN_HOME" bash "$SIGNER" "$@"; }
+signer --pubkey >/dev/null 2>&1 && no "missing public key reported success" \
+  || ok "missing public key reports failure"
+signer --keygen >/dev/null 2>&1 || { no "test key generation failed"; exit 1; }
+tmp="$T/sig-test"; mkdir -p "$tmp"
+printf '#!/bin/bash\necho hi\n' > "$tmp/x.sh"
+if signer "$tmp/x.sh" "$tmp/out" >/dev/null 2>&1 && [ -s "$tmp/out/x.sh.sig" ]; then
+  ok "sign-script.sh produces a self-verifying signature"
+else no "sign-script.sh did not produce a valid signature"; fi
+printf 'if then fi\n' > "$tmp/bad.sh"
+signer "$tmp/bad.sh" "$tmp/out" >/dev/null 2>&1 \
+  && no "signer accepted a syntactically broken script" \
+  || ok "signer refuses a script that fails syntax check"
+openssl ec -in "$T/evil.pem" -pubout -out "$SIGN_HOME/.netbridge/keys/script-pubkey.pem" 2>/dev/null
+signer "$tmp/x.sh" "$tmp/mismatch" >/dev/null 2>&1 \
+  && no "signer accepted mismatched keys" || ok "signer rejects mismatched keys"
 
 echo
 

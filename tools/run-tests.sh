@@ -22,8 +22,13 @@ cd "$(dirname "$0")/.."
 
 PY="python3"
 MEDIA_PY=""
+SUITE="all"
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --suite)
+      [ "$#" -ge 2 ] || exit 2
+      SUITE="$2"; shift 2
+      case "$SUITE" in all|common|macos-media|linux-media) ;; *) echo "invalid suite" >&2; exit 2 ;; esac ;;
     --python|--media-python)
       [ "$#" -ge 2 ] || { echo "missing interpreter after $1" >&2; exit 2; }
       if [ "$1" = "--python" ]; then PY="$2"; else MEDIA_PY="$2"; fi
@@ -39,6 +44,13 @@ FAILED_FILES=""
 for t in tests/test-*.py tests/test-*.sh; do
   [ -e "$t" ] || continue
   name=$(basename "$t")
+  # These groups are separate REQUIRED jobs in tests.yml. A platform-specific
+  # test is assigned to its real runtime, never converted from SKIP to PASS.
+  case "$SUITE:$name" in
+    common:test-video-encoder-profile.py|common:test-gst-pipelines.sh) continue ;;
+    macos-media:test-video-encoder-profile.py|linux-media:test-gst-pipelines.sh) ;;
+    macos-media:*|linux-media:*) continue ;;
+  esac
   skips_before=$SKIP
   test_py="$PY"
   # PyGObject is tied to the system GStreamer Python ABI; the backend may need a
