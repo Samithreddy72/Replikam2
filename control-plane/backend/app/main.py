@@ -18,7 +18,7 @@ import time
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, desc, update
+from sqlalchemy import select, desc, update, func
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -1955,6 +1955,18 @@ def revoke_user(uid: int, actor=Depends(auth.require_admin),
     if not u or u.org_id != actor.org:
         raise HTTPException(404, "no such user")   # cross-org: indistinguishable from absent
     email = u.email
+    # Never lock the organisation out (2026-09-28). Removing the only admin - or two admins
+    # removing each other - left a fleet that nobody could command, re-PIN or update: every
+    # admin request answered 401. And removing yourself mid-session is an accident more often
+    # than not; another admin can do it.
+    if (actor.email or "").lower() == (email or "").lower() and not getattr(actor, "is_bootstrap", False):
+        raise HTTPException(409, "you cannot remove your own account - ask another admin to do it")
+    if u.role == "admin":
+        admins = db.scalar(select(func.count()).select_from(User)
+                           .where(User.org_id == actor.org, User.role == "admin")) or 0
+        if admins <= 1:
+            raise HTTPException(409, "%s is the last admin of this organisation - invite another admin first, "
+                                     "or nobody could manage the fleet" % email)
     # Their sign-ins go in the SAME transaction (2026-09-28). This used to delete only the user
     # row: the revoked person's tokens kept pointing at their old id, SQLite gave that id to the
     # next account created, and the old token then signed in as that account - an admin, if an

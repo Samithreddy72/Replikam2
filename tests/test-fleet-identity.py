@@ -366,5 +366,25 @@ check(r.status_code == 400, "a key with a space in it is refused", r.status_code
 r = c.post("/admin/devices/%s/mesh-key" % MS, headers=A)
 check(r.status_code == 200 and len(MINTS) == n + 1, "the panel's re-key (no body) still mints one", r.text)
 
+print("  ---- the organisation is never locked out ----")
+r = c.delete("/admin/users/1", headers=A)                       # admin@test removing their own account
+check(r.status_code == 409 and "your own account" in r.text and c.get("/auth/whoami", headers=A).status_code == 200,
+      "an admin cannot remove their own account (another admin can)", r.text)
+r = c.delete("/admin/users/%d" % carol_id, headers=A)
+check(r.status_code == 200, "one of two admins can be removed", r.text)
+from fastapi import HTTPException as _HE
+from app.db import SessionLocal as _SL
+_db = _SL()
+try:
+    M.revoke_user(1, actor=M.auth.Actor("fleet-key", "default", "admin", is_bootstrap=True), db=_db)
+    last = None
+except _HE as e:
+    last = e
+finally:
+    _db.close()
+check(last is not None and last.status_code == 409 and "last admin" in str(last.detail)
+      and c.get("/auth/whoami", headers=A).status_code == 200,
+      "the last admin cannot be removed - not even with the fleet's own key - or nobody could manage it", last)
+
 print("\n  %d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
