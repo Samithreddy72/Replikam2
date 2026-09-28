@@ -487,6 +487,11 @@ const BACKEND_CONFIRM = new Set(["reboot","update","deploy-script","revert-scrip
 // does (tests/test-command-gates.py).
 const DISRUPTIVE = new Set(["restart","reset-clock","reboot","lock","stop","profile","update",
   "unquarantine","jitter-fix:3","deploy-script","revert-script","golden-restore"]);
+// Queued for an offline bridge, these expire if it does not collect them within 30 min
+// (INTERRUPTS_MEETING / STALE_UNCOLLECTED_S in main.py): a reboot must not run days later.
+// A lock is not one of them: arriving late, it still keeps people out.
+const GOES_STALE = new Set(["reboot","restart","start","stop","profile","reset-clock",
+  "golden-restore","jitter-fix","jitter-reset"]);
 // Organised by what the admin can SEE, not by what the code does: an admin arrives with a
 // symptom, never a diagnosis. The single most important distinction: the audio YOU hear from
 // the room is buffered on YOUR machine; the audio THE ROOM hears is buffered on THE BRIDGE -
@@ -730,17 +735,26 @@ function onBlock(block){
   }
   if (!data) return;
   let o; try { o = JSON.parse(data); } catch (e) { return; }
-  if (ev === "hello"){ S.seenThisConn = new Set(); S.fails = 0; S.backoff = 1000;
+  if (ev === "hello"){ S.seenThisConn = new Set(); S.cmdsThisConn = new Set(); S.fails = 0; S.backoff = 1000;
     if (o.who && !WHO){ WHO = o.who; paintWho(); } return; }
   if (ev === "device"){ if (S.seenThisConn) S.seenThisConn.add(o.id); upsertDevice(o); return; }
   if (ev === "device_removed"){ removeDevice(o.id); return; }
-  if (ev === "command"){ upsertCommand(o); return; }
+  if (ev === "command"){ if (S.cmdsThisConn) S.cmdsThisConn.add(o.id); upsertCommand(o); return; }
+  if (ev === "command_removed"){ removeCommand(o.id); return; }
   if (ev === "alert"){ onAlertEvent(o); return; }
+  if (ev === "alert_removed"){ onAlertRemoved(o.id); return; }
   if (ev === "ready"){
     // A device deleted while we were disconnected never gets a device_removed: drop what this
     // connection's snapshot did not include.
     if (S.seenThisConn) for (const id of [...S.devices.keys()]) if (!S.seenThisConn.has(id)) removeDevice(id);
-    S.seenThisConn = null; S.ready = true; AL.primed = true; setConn("live");
+    // Commands too (2026-09-28): a bridge forgotten and re-enrolled under the same id while we were
+    // away would otherwise show the previous owner's history. What the snapshot did not carry is
+    // dropped; an open History tab asks the fleet again for the older rows it still has.
+    if (S.cmdsThisConn){
+      for (const id of [...S.commands.keys()]) if (!S.cmdsThisConn.has(id)) S.commands.delete(id);
+      if (DR.id && DR.fetched && DR.fetched.history && S.devices.get(DR.id)) loadHistory(S.devices.get(DR.id));
+    }
+    S.seenThisConn = null; S.cmdsThisConn = null; S.ready = true; AL.primed = true; setConn("live");
     $("fleetSkeleton").hidden = true; schedule("fleet");
     if (DR.pending){ DR.pending = null; route(); }          // a link to a bridge opened before the data arrived
     return;
@@ -757,9 +771,18 @@ function upsertDevice(d){
 }
 function removeDevice(id){
   S.devices.delete(id);
+  // its history goes with it: the fleet deleted it, and the same card may re-enrol under this id
+  for (const [cid, c] of [...S.commands]) if (c.device_id === id) S.commands.delete(cid);
   const r = ROWS.get(id); if (r){ r.tr.remove(); ROWS.delete(id); }
   if (DR.id === id){ closeDrawer(); toast("That bridge was removed from the fleet.", "warn"); }
+  if (AL.data && AL.data.items.some(i => i.device_id === id)) AL.reload = true;   // its episodes on screen
   schedule("fleet"); alertsChanged();
+}
+function removeCommand(id){
+  const c = S.commands.get(id); S.commands.delete(id);
+  const r = DR.histRows && DR.histRows.get(id);
+  if (r){ r.tr.remove(); r.out.remove(); DR.histRows.delete(id); }
+  if (c && DR.id && c.device_id === DR.id) schedule("history");
 }
 function upsertCommand(c){
   const prev = S.commands.get(c.id) || {};
@@ -1180,6 +1203,7 @@ async function runRead(devId, type, args, outEl){
   outEl.replaceChildren(h("div", {class: "small muted", style: "margin-top:8px"}, "Asked the bridge… (it answers on its next check-in, ~15 s)"));
   try {
     const r = await queueCommand(d, type, args, false, {quietResult: true});
+    if (!r){ if (outEl.isConnected) outEl.replaceChildren(); return; }
     const c = await followCommand(d.id, devLabel(d), type, r.id, r.timeout_s, {quiet: true});
     if (outEl.isConnected) outEl.replaceChildren(resultBlock(d.id, c));
   } catch (e) { if (e.message !== "auth" && outEl.isConnected) outEl.replaceChildren(h("div", {class: "dangerline", style: "margin-top:8px"}, e.message)); }
@@ -1229,28 +1253,47 @@ function paintHistory(){
     }
     const [, tdType, tdStatus, tdAsked, tdTook] = r.tr.children;
     setText(tdType, ACTION_LABEL[c.type] ? c.type : c.type);
-    patch(tdStatus, c.status, () => pill(STATUS_PILL[c.status] || "idle", c.status === "done" ? "succeeded" : c.status));
+    // A finished OS update is only STAGED: its trial boot decides (the bridge's OS update line).
+    const staged = c.status === "done" && c.type === "update";
+    patch(tdStatus, c.status, () => pill(staged ? "info" : STATUS_PILL[c.status] || "idle",
+      staged ? "staged" : c.status === "done" ? "succeeded" : c.status));
     setText(tdAsked, clock(parseTs(c.created_at)));
     const t0 = parseTs(c.created_at), t1 = parseTs(c.completed_at);
     setText(tdTook, t0 && t1 ? dur((t1 - t0) / 1000) : c.status === "pending" ? "queued" : c.status === "sent" ? "running…" : "—");
     r.cancel.hidden = c.status !== "pending";
     if (!r.out.hidden) setText(r.out.querySelector("pre"), c.output || c.fail_reason || "(no output yet)");
   }
+  // rows whose command the fleet no longer has (a forgotten bridge, retention) leave the table
+  const keep = new Set(cmds.map(c => c.id));
+  for (const [id, r] of [...DR.histRows]) if (!keep.has(id)){ r.tr.remove(); r.out.remove(); DR.histRows.delete(id); }
   const want = cmds.map(c => c.id).join("|"), have = [...DR.f.hist.children].filter(tr => !tr.classList.contains("exp")).map(tr => tr.firstChild.textContent.slice(1)).join("|");
   if (want !== have) for (const c of cmds){ const r = DR.histRows.get(c.id); DR.f.hist.append(r.tr, r.out); }
 }
 
 // ------------------------------------------------------------------------------- commands
 async function queueCommand(d, type, args, confirmed, opt = {}){
-  const r = await api(`/admin/devices/${d.id}/commands`, {method: "POST", body: JSON.stringify({type, args, confirm: confirmed})});
+  const req = {type, args, confirm: confirmed};
+  if (opt.allowDowngrade) req.allow_downgrade = true;
+  let r;
+  try { r = await api(`/admin/devices/${d.id}/commands`, {method: "POST", body: JSON.stringify(req)}); }
+  catch (e) {
+    // Refused for THIS bridge: a different one of these is still in flight there, or the version is
+    // older than it runs. Say which and why, and let a loop over several bridges carry on.
+    const why = e.status === 409 && e.body && e.body.detail && e.body.detail.error;
+    if (why === "busy" || why === "downgrade"){ toast(devLabel(d) + ": not queued — " + e.message, "warn", {ms: 16000}); return null; }
+    throw e;
+  }
   if (r.deduplicated){
-    // The fleet handed back an EXISTING command instead of queuing a second one. Say so:
-    // silently returning an older id would read as a fresh action having been taken.
+    // The fleet handed back an EXISTING command instead of queuing a second one - the same command,
+    // same arguments. Say so: silently returning an older id would read as a fresh action.
     toast(type + " was already in flight on " + devLabel(d) + " — following #" + r.id + ", not a second one", "info");
   } else if (!opt.quietResult){
-    toast("Queued " + type + " on " + devLabel(d) + " — #" + r.id + (d.online ? "" : " (runs when it is back online)"), "info");
+    toast("Queued " + type + " on " + devLabel(d) + " — #" + r.id + (d.online ? "" : GOES_STALE.has(type) || (type === "update" && (args || {}).force)
+      ? " (runs if it is back online within 30 min, otherwise it expires)" : " (runs when it is back online)"), "info");
   }
-  upsertCommand(Object.assign({device_id: d.id, type, status: r.status || "pending", created_at: new Date().toISOString()}, r));
+  // args ride along (never a PIN) so a follower knows what was asked for - the OS version, for one
+  upsertCommand(Object.assign({device_id: d.id, type, args: type === "set-pin" ? {} : args || {},
+                               status: r.status || "pending", created_at: new Date().toISOString()}, r));
   if (!opt.quietResult) followCommand(d.id, devLabel(d), type, r.id, r.timeout_s).then(c => {
     // a fresh bundle appears in the open Diagnostics tab without a reload
     if (c && (c.status === "done" || c.status === "succeeded") && type === "diagnose" && DR.id === d.id) loadBundles(d);
@@ -1296,7 +1339,14 @@ async function followCommand(devId, devName, type, cmdId, timeoutS, opt = {}){
   }
   const detail = String(c.output || c.fail_reason || "").trim().split("\n").slice(-1)[0].slice(0, 140);
   const view = {action: "View", onAction: () => go("#/bridge/" + encodeURIComponent(devId) + "/history")};
-  if (c.status === "done" || c.status === "succeeded"){
+  if ((c.status === "done" || c.status === "succeeded") && type === "update"){
+    // "done" is only STAGED: the new OS is in the spare slot and the verdict comes from the trial boot
+    // ~45 s later - committed if healthy, rolled back if not. Never called a success here.
+    if (!opt.quiet){
+      toast("update on " + devName + ": STAGED (#" + cmdId + ") — it trial-boots in ~45 s and keeps the new OS only if it comes back healthy. The verdict follows here.", "info", view);
+      followTrial(devId, devName, c, view);
+    }
+  } else if (c.status === "done" || c.status === "succeeded"){
     if (!opt.quiet) toast(type + " on " + devName + ": SUCCEEDED (#" + cmdId + ")", "ok", view);
   } else if (c.status === "cancelled"){
     toast(type + " on " + devName + ": cancelled (#" + cmdId + ") — the bridge never received it", "info");
@@ -1306,6 +1356,35 @@ async function followCommand(devId, devName, type, cmdId, timeoutS, opt = {}){
     toast(type + " on " + devName + ": " + String(c.status).toUpperCase() + " (#" + cmdId + ")" + (detail ? " — " + detail : ""), "bad", view);
   }
   return c;
+}
+// After an OS update is STAGED the verdict is the trial boot's: bridge-ab writes "committed" or
+// "rolled back" into the bridge's OS update state, which rides its heartbeat. Only a heartbeat the
+// fleet received after the command finished counts (the rollouts' rule), so an older state is never
+// taken for this attempt's verdict (2026-09-28).
+async function followTrial(devId, devName, c, view){
+  const since = parseTs(c.completed_at) || Date.now(), want = (c.args || {}).version || "", t0 = Date.now();
+  let waited = false;
+  while (Date.now() - t0 < 20 * 60 * 1000){
+    await new Promise(res => setTimeout(res, 5000));
+    const d = S.devices.get(devId); if (!d) return;
+    const seen = parseTs(d.last_seen), ota = T(d).ota || {}, ver = ota.version || "";
+    if (!seen || seen <= since) continue;
+    if (ota.state === "committed"){
+      // a commit that names no version is this one: the bridge refused any manifest for another version
+      if (!want || !ver || ver === want) toast("update on " + devName + ": COMMITTED — it now runs " + (ver || "the new OS") + " (its trial boot came up healthy)", "ok", view);
+      else toast("update on " + devName + ": its trial committed " + ver + ", not " + want, "bad", view);
+      return;
+    }
+    if (ota.state === "rolled back"){
+      toast("update on " + devName + ": ROLLED BACK — " + (ota.detail || "the new OS did not come up healthy") + ". It is back on its previous OS.", "bad", view);
+      return;
+    }
+    if (ota.state === "failed" && want && ver === want){ toast("update on " + devName + ": FAILED — " + (ota.detail || "no detail"), "bad", view); return; }
+    // the trial reboot waits for a meeting to end (bridge-update.sh): say so once, keep following
+    if (ota.state === "waiting" && !waited){ waited = true; toast("update on " + devName + ": waiting — " + (ota.detail || "for the meeting to end before the trial boot"), "info", view); }
+  }
+  if (waited) toast("update on " + devName + ": still waiting for the meeting to end — the trial boot goes ahead by itself (or is called off after a day); its OS update line shows the verdict", "info", view);
+  else toast("update on " + devName + ": no verdict from its trial boot after 20 min — state UNKNOWN, check its OS update line", "warn", view);
 }
 async function cancelCommand(devId, cmdId, devName){
   const c = S.commands.get(cmdId);
@@ -1470,23 +1549,39 @@ async function osUpdateDialog(preselected, presetVersion){
   try { vers = (await catalog("ota")).filter(v => v.signed); } catch (e) { if (e.message !== "auth") toast("Could not read the OS versions: " + e.message, "bad"); return; }
   if (!vers.length){ openDialog({title: "No OS version published", body: [h("p", {}, "Publish a built image first."),
     h("p", {class: "hint"}, "On the Mac: bash tools/publish-ota.sh <image> — it signs the manifest and uploads it here.")], ok: null, cancel: "Close"}); return; }
-  const sel = h("select", {}, vers.map(v => h("option", {value: v.version, selected: v.version === presetVersion}, v.version + (v.bytes ? " · " + kb(v.bytes) : "") + (v.built ? " · built " + v.built : ""))));
+  // The fleet lists versions newest first (by number), so with no preset the newest is preselected.
+  const sel = h("select", {}, vers.map((v, i) => h("option", {value: v.version, selected: presetVersion ? v.version === presetVersion : i === 0}, v.version + (v.bytes ? " · " + kb(v.bytes) : "") + (v.built ? " · built " + v.built : ""))));
   const force = h("input", {type: "checkbox"});
+  const down = h("input", {type: "checkbox"});
   const pick = bridgePicker(preselected.filter(modern), modern);
   const old = [...S.devices.values()].filter(x => x.claimed && !modern(x));
+  // Say it before the fleet refuses it: which bridges already run something newer than this version.
+  const downNote = h("div", {class: "warnline", style: "margin-top:10px", hidden: true});
+  const warnDown = () => {
+    const want = verTuple(sel.value);
+    const newer = want ? [...S.devices.values()].filter(x => { const have = x.claimed && modern(x) ? verTuple(runningVersion(x)) : null; return have && verOlder(want, have); }) : [];
+    downNote.hidden = !newer.length || down.checked;
+    downNote.replaceChildren(sel.value + " is older than what " + newer.map(x => devLabel(x) + " (" + runningVersion(x) + ")").join(", ")
+      + (newer.length === 1 ? " runs" : " run") + " — installing it there is a downgrade, which the fleet refuses unless you tick the last box.");
+  };
+  sel.onchange = down.onchange = warnDown;
+  warnDown();
   let confirmed = false;
   openDialog({title: "Install an OS version", wide: true,
     body: [h("label", {class: "fl"}, "Version"), sel, h("label", {class: "fl"}, "On which bridges"), pick.el,
       old.length ? h("div", {class: "warnline", style: "margin-top:10px"}, old.map(devLabel).join(", ") + (old.length === 1 ? " runs" : " run")
         + " software older than 2.2, which cannot install an OS version remotely — flash " + (old.length === 1 ? "its card" : "their cards") + " with the 2.2 image instead.") : null,
+      downNote,
       h("p", {}, "The bridge downloads the OS into its spare slot and reboots into it once no meeting is in progress (~1 min offline). It keeps the new OS only if it comes back healthy and reaches the fleet — otherwise it switches back to the current OS by itself."),
+      h("p", {class: "hint"}, "A bridge with its meeting laptop plugged in, or with a presenter live, refuses the update. Tick the first box to install anyway."),
       h("p", {class: "hint"}, "Files updated on a bridge stay with its current OS: the new OS runs its own copies, except the voice and return-audio updates and the owner SSH key, which carry over. Deploy a file again afterwards if the new OS still needs it."),
-      h("label", {class: "check"}, force, "Install even if a presenter is live (normally refused)")],
+      h("label", {class: "check"}, force, "Install even if a meeting laptop is attached or a presenter is live (normally refused)"),
+      h("label", {class: "check"}, down, "Allow installing a version OLDER than a bridge runs (a downgrade — a 2.1 image takes a 2.2 bridge off the PIN protocol the presenter app needs)")],
     ok: "Install and reboot", okClass: "danger",
     onOk: async () => {
       const devs = pick.picked(); if (!devs.length) throw new Error("Pick at least one bridge.");
       confirmed = true;
-      for (const x of devs) await queueCommand(x, "update", Object.assign({version: sel.value}, force.checked ? {force: true} : {}), confirmed);
+      for (const x of devs) await queueCommand(x, "update", Object.assign({version: sel.value}, force.checked ? {force: true} : {}), confirmed, {allowDowngrade: down.checked});
     }});
 }
 function revertDialog(d){
@@ -1539,6 +1634,7 @@ async function runDiagnosis(d){
     h("div", {class: "small muted"}, "Measuring power, path, rates and config on the bridge. ~20 s.")));
   try {
     const r = await queueCommand(d, "jitter-diagnose", {}, false, {quietResult: true});
+    if (!r){ if (el.isConnected) el.replaceChildren(); return; }
     const c = await followCommand(d.id, devLabel(d), "jitter-diagnose", r.id, r.timeout_s, {quiet: true});
     if (!el.isConnected) return;
     if (!c){ el.replaceChildren(h("div", {class: "warnline", style: "margin-top:10px"}, "No result yet — the bridge may be busy. Try again shortly.")); return; }
@@ -1792,6 +1888,12 @@ function onAlertEvent(o){
   if (AL.data && AL.data.items.some(i => i.id === o.id)) AL.reload = true;   // a row on screen resolved
   alertsChanged();
 }
+// An episode the fleet deleted (its bridge was removed, or retention): a page showing it is re-read.
+function onAlertRemoved(id){
+  AL.known.delete(id);
+  if (AL.data && AL.data.items.some(i => i.id === id)) AL.reload = true;
+  alertsChanged();
+}
 function alertKinds(d){ return d ? (d.alerts || []).map(a => a.kind).sort().join(",") : ""; }
 function alertsChanged(){
   if (PAGE !== "alerts"){ AL.stale = true; return; }
@@ -1831,10 +1933,15 @@ async function loadUpdatesPage(){
   loadRollouts();
 }
 $("refreshCatalog").addEventListener("click", () => { S._cat_files = S._cat_ota = null; loadUpdatesPage(); });
-async function loadRollouts(){
+async function loadRollouts(auto){
   const box = $("rollouts");
   try {
     const list = await api("/admin/rollouts");
+    // A staged bridge's verdict arrives on its own schedule, so the cards refresh themselves while this
+    // page is open - rebuilt only when something changed, so a button never moves under the pointer.
+    const fp = JSON.stringify(list);
+    if (auto && fp === S.rolloutsFp) return;
+    S.rolloutsFp = fp;
     if (!list.length){ box.replaceChildren(h("div", {class: "empty", style: "padding:24px"}, "No rollouts yet. Ship an OS version to the whole fleet in waves — 10 → 25 → 50 → 100% — with automatic per-bridge rollback.")); return; }
     box.replaceChildren(...list.slice(0, 6).map(ro => {
       const pct = ro.total ? Math.round(100 * ro.updated / ro.total) : 0;
@@ -1843,19 +1950,33 @@ async function loadRollouts(){
       const mk = (label, action, danger) => h("button", {class: "btn " + (danger ? "ghost" : "secondary") + " sm", type: "button", onclick: () => rolloutAction(ro, action)}, label);
       if (ro.status === "active"){
         if (ro.next_stage != null) btns.push(mk("Widen to " + ro.next_stage + "%", "advance"));
-        else if (ro.queued || ro.in_flight) btns.push(mk("Finish", "advance"));
-        if ((ro.queued_offline || []).length) btns.push(mk("Catch up offline bridges", "dispatch"));
+        // The final wave: "Finish" once nothing is outstanding (it used to show only while something
+        // WAS outstanding - exactly when the fleet refuses to finish - so a done rollout was stuck).
+        else if (ro.finishable) btns.push(mk("Finish", "advance"));
+        else btns.push(mk("Finish anyway…", "advance"));
+        // Whenever the wave still has bridges to send - not only while one is offline or busy: a bridge
+        // that just became free must not lose its button.
+        if (ro.catch_up) btns.push(mk("Catch up waiting bridges", "dispatch"));
         btns.push(mk("Pause", "pause"), mk("Abort", "abort", true));
       } else if (ro.status === "paused") btns.push(mk("Resume", "resume"), mk("Abort", "abort", true));
+      const failed = ro.failed_devices || [], busy = ro.queued_busy || [], ready = ro.queued_ready || [],
+            excl = ro.excluded || [], ver = ro.verifying_devices || [];
       return h("div", {class: "alertrow"}, h("div", {class: "abody"},
         h("div", {class: "inline"}, h("b", {class: "mono"}, "netbridge-os " + ro.version), pill(cls, ro.status), h("span", {class: "small muted"}, "wave " + ro.stage_pct + "%" + (ro.next_stage != null ? " · next " + ro.next_stage + "%" : " · final wave"))),
         h("div", {class: "bars", style: "height:8px;margin:8px 0"}, h("i", {style: "height:8px;flex:" + Math.max(pct, 0.5) + ";background:var(--ok)"}), h("i", {style: "height:8px;flex:" + Math.max(100 - pct, 0.5) + ";background:var(--line)"})),
-        h("div", {class: "small muted"}, ro.summary + (ro.in_flight ? " · " + ro.in_flight + " updating" : "")),
-        ro.rollbacks ? h("div", {class: "small", style: "color:var(--tally)"}, "⚠ " + ro.rollbacks + " bridge(s) rolled back — widening is halted (the “0 rollbacks” guard).") : null,
+        h("div", {class: "small muted"}, ro.summary),
+        ver.length ? h("div", {class: "small muted"}, "Trial-booting the new OS (not counted as updated until it keeps it): " + ver.join(", ")) : null,
+        busy.length ? h("div", {class: "small muted"}, "Waiting until idle: " + busy.map(b => b.device + " (" + b.reason + ")").join(", ")) : null,
+        ready.length && ro.status === "active" ? h("div", {class: "small muted"}, "Free now, not sent yet: " + ready.join(", ") + (ro.catch_up ? " — “Catch up waiting bridges” sends them." : "")) : null,
+        failed.length ? h("div", {class: "small", style: "color:var(--tally)"}, "⚠ " + (failed.length === 1 ? "1 bridge did" : failed.length + " bridges did") + " not update"
+          + (ro.status === "active" ? " — widening is halted (the “0 rollbacks” guard)" : "") + ":",
+          ...failed.map(f => h("div", {class: "small"}, "• " + f.device + " — " + f.reason))) : null,
+        excl.length ? h("div", {class: "small muted"}, "Not included: " + excl.map(e => e.name + " (" + e.reason + ")").join("; ")) : null,
         btns.length ? h("div", {class: "inline", style: "margin-top:8px"}, btns) : null));
     }));
-  } catch (e) { if (e.message !== "auth") box.replaceChildren(h("div", {class: "empty"}, "Rollouts unavailable: " + e.message)); }
+  } catch (e) { if (e.message !== "auth" && !auto) box.replaceChildren(h("div", {class: "empty"}, "Rollouts unavailable: " + e.message)); }
 }
+setInterval(() => { if (ADMIN && PAGE === "updates" && !document.hidden) loadRollouts(true); }, 20000);
 async function rolloutAction(ro, action){
   const go2 = async (force) => {
     const r = await api(`/admin/rollouts/${ro.id}/${action}` + (force ? "?force=true" : ""), {method: "POST"});
@@ -1869,26 +1990,60 @@ async function rolloutAction(ro, action){
   catch (e) {
     if (e.message === "auth") return;
     if (action === "advance" && e.status === 409){
-      openDialog({title: "Widening is blocked", body: [h("p", {}, e.message), h("p", {}, "A bridge rolled back or is still updating. Force the next wave anyway?")],
-        ok: "Force the next wave", okClass: "danger", onOk: () => go2(true)});
+      const last = ro.next_stage == null;
+      openDialog({title: last ? "Finishing is blocked" : "Widening is blocked", body: [h("p", {}, e.message),
+        h("p", {}, last ? "Finish the rollout anyway? Bridges that have not updated keep the OS they run; a new rollout can reach them later."
+                        : "A bridge did not update or is still trial-booting. Force the next wave anyway?")],
+        ok: last ? "Finish anyway" : "Force the next wave", okClass: "danger", onOk: () => go2(true)});
       return;
     }
     toast(action + " failed: " + e.message, "bad");
   }
 }
+// Version order and "what a bridge runs", the same rules as the fleet (_version_tuple, _running_version):
+// a committed OS update is the better witness, because the version a bridge reports comes from a file
+// an OS update does not rewrite.
+function verTuple(v){ const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(v || "").trim()); return m ? [+m[1], +m[2], +m[3]] : null; }
+function verOlder(a, b){ for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i]; return false; }
+function runningVersion(d){ const o = T(d).ota || {}; return o.state === "committed" && o.version ? o.version : d.version; }
 $("startRolloutBtn").addEventListener("click", async () => {
   let vers = [];
   try { vers = (await catalog("ota")).filter(v => v.signed); } catch (e) { if (e.message !== "auth") toast("Could not read the OS versions: " + e.message, "bad"); return; }
   if (!vers.length){ toast("Publish an OS version first (tools/publish-ota.sh).", "warn"); return; }
-  const sel = h("select", {}, vers.map(v => h("option", {value: v.version}, v.version)));
+  // Newest first from the fleet, so the default is the newest version - never the oldest (2026-09-28).
+  const sel = h("select", {}, vers.map((v, i) => h("option", {value: v.version, selected: i === 0}, v.version)));
   const wave = h("select", {}, [10, 25, 50, 100].map(p => h("option", {value: p}, p + "%")));
+  const down = h("input", {type: "checkbox"});
+  const old = [...S.devices.values()].filter(x => x.claimed && !modern(x));
+  // Who this rollout will leave out, before it starts (the fleet names them again afterwards).
+  const note = h("div", {class: "warnline", style: "margin-top:10px", hidden: true});
+  const preview = () => {
+    const want = verTuple(sel.value), newer = [];
+    if (want && !down.checked) for (const x of S.devices.values()){
+      const have = x.claimed && modern(x) ? verTuple(runningVersion(x)) : null;
+      if (have && verOlder(want, have)) newer.push(devLabel(x) + " (runs " + runningVersion(x) + ")");
+    }
+    const lines = [];
+    if (old.length) lines.push(old.map(devLabel).join(", ") + (old.length === 1 ? " runs" : " run") + " software older than 2.2, which cannot install an OS version remotely — flash "
+      + (old.length === 1 ? "its card" : "their cards") + " with the 2.2 image.");
+    if (newer.length) lines.push(newer.join(", ") + (newer.length === 1 ? " runs a version" : " run versions") + " newer than " + sel.value
+      + " — tick the box below only for a deliberate downgrade.");
+    note.hidden = !lines.length;
+    note.replaceChildren(...lines.map(l => h("div", {}, "Not included: " + l)));
+  };
+  sel.onchange = down.onchange = preview;
+  preview();
   openDialog({title: "Start a staged rollout",
-    body: [h("label", {class: "fl"}, "OS version"), sel, h("label", {class: "fl"}, "First wave"), wave,
-      h("p", {class: "hint"}, "Online bridges in the wave update now; offline ones wait until they are back. Widening stops by itself if any bridge rolls back.")],
+    body: [h("label", {class: "fl"}, "OS version"), sel, h("label", {class: "fl"}, "First wave"), wave, note,
+      h("p", {class: "hint"}, "Online bridges in the wave update now. Offline ones, and ones with a meeting laptop attached or a presenter live, stay queued — “Catch up waiting bridges” sends them once they are free. A bridge counts as updated only when its trial boot keeps the new OS. Widening stops by itself if any bridge does not update."),
+      h("label", {class: "check"}, down, "Include bridges that run a NEWER version (a deliberate downgrade)")],
     ok: "Start rollout", okClass: "danger",
     onOk: async () => { const r = await api("/admin/rollouts", {method: "POST", body: JSON.stringify({version: sel.value,
-        source: location.origin + "/payloads/ota/" + sel.value, stage_pct: parseInt(wave.value, 10)})});
-      toast("Rollout " + r.version + " started — " + (r.dispatched_now || 0) + " bridge(s) updating now.", "ok"); loadRollouts(); }});
+        source: location.origin + "/payloads/ota/" + sel.value, stage_pct: parseInt(wave.value, 10), allow_downgrade: down.checked})});
+      const n = r.dispatched_now || 0, ex = r.excluded || [];
+      toast("Rollout " + r.version + " started — " + (n === 1 ? "1 bridge" : n + " bridges") + " updating now."
+        + (ex.length ? " Not included: " + ex.map(e => e.name).join(", ") + "." : ""), ex.length ? "warn" : "ok", {ms: ex.length ? 16000 : 6500});
+      loadRollouts(); }});
 });
 
 // ------------------------------------------------------------------------------------ team

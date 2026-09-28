@@ -17,13 +17,14 @@ import time
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, update
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import Base, engine, get_db
 from . import auth, models, notifier
-from .alerts import device_alerts, is_online, HISTORY_KINDS, history_alert, unreadable_alert
+from .alerts import (device_alerts, is_online, HISTORY_KINDS, history_alert, unreadable_alert, alert_fix,
+                     bridge_title, REFUSED_WHILE_BUSY)
 from .models import (Device, Telemetry, Command, DiagBundle, User, AuditLog,
                      Rollout, RolloutTarget, utcnow)
 from .schemas import (EnrollIn, EnrollOut, CommandOut, CommandResultIn,
@@ -107,6 +108,14 @@ CONFIRM_REQUIRED = {"reboot", "update", "deploy-script", "revert-script",
 # identical one already pending or sent is handed back rather than queued again. Read-only
 # commands are absent on purpose: asking twice is free, and an operator refreshing diagnostics
 # should get a fresh answer instead of a stale row.
+#
+# "Identical" means the same type AND the same args (2026-09-28). The guard used to match on the
+# type alone, so `deploy bridge-agent.py` while `deploy bridge-web.py` was in flight got the
+# bridge-web.py command back: nb printed "queued" and then "done", and bridge-agent.py never
+# reached the bridge. The same swapped one PIN for another and one OS version for another. A
+# DIFFERENT one of these while another is in flight is refused (409) rather than queued: the
+# bridge runs each in its own background job with no lock between them, so two OS updates or
+# two deploys would run at the same time.
 NO_DOUBLE_EXECUTE = {"reboot", "restart", "update", "deploy-script", "revert-script",
                      "golden-restore", "golden-save", "unquarantine", "reset-clock",
                      "set-pin", "profile", "gadget-tune", "gadget-tune-clear"}
@@ -115,6 +124,56 @@ NO_DOUBLE_EXECUTE = {"reboot", "restart", "update", "deploy-script", "revert-scr
 # device says afterwards may overwrite it -- see command_result(). `pending` and `sent` are the
 # only states from which a result is accepted.
 TERMINAL_STATES = models.COMMAND_TERMINAL_STATES   # one set, shared with the retention sweep
+
+# The only results a device may report. Anything else is recorded as "failed" (see
+# command_result): "pending" used to put the row back in the pull queue so it ran twice, and an
+# unknown word left it neither finished nor running, with its rollout target "updating" forever.
+DEVICE_RESULT_STATES = ("done", "failed", "rejected")
+
+# Commands that interrupt a meeting the moment they run: media restarts (with the meeting laptop
+# attached those have rebooted under-powered bridges) and a reboot. Two rules use this list
+# (2026-09-28):
+#   * one queued for a bridge that is offline goes STALE: it expires if the bridge has not
+#     collected it within STALE_UNCOLLECTED_S. Queue-until-online stays for everything else, but
+#     a reboot queued on a Friday ran on the Monday, on the bridge's first heartbeat - just as
+#     someone plugged the laptop in for a meeting.
+#   * a broadcast skips bridges with a meeting laptop attached or a presenter live.
+# A lock is deliberately NOT here: ending live sessions is what it is for, and one that reaches its
+# bridge late still does what the admin asked - keeps people out - so it neither goes stale nor
+# skips a busy bridge. Expiring it would quietly leave a bridge open that an admin locked.
+# A forced OS update counts too (_goes_stale): it skips the bridge's own "not during a meeting" check.
+INTERRUPTS_MEETING = {"reboot", "restart", "start", "stop", "profile", "reset-clock",
+                      "golden-restore", "jitter-fix", "jitter-reset"}
+STALE_UNCOLLECTED_S = 30 * 60
+
+
+def _goes_stale(ctype: str, args) -> bool:
+    """True for a command that must not run long after it was asked for (INTERRUPTS_MEETING).
+    An OS update refuses on the bridge while a meeting is on; one sent with force does not, so it
+    goes stale like a reboot."""
+    return ctype in INTERRUPTS_MEETING or (ctype == "update" and bool((args or {}).get("force")))
+
+
+def _stale_reason(ctype: str) -> str:
+    return ("never collected: the bridge did not pick it up within %d min of being asked, and a %s "
+            "that runs long after it was asked for can land in the middle of a meeting. Send it "
+            "again if it is still wanted." % (STALE_UNCOLLECTED_S // 60, ctype))
+
+
+def _move(db: Session, c, frm, **values) -> bool:
+    """Change a command's state only if it is still in one of `frm`, in ONE conditional UPDATE.
+
+    Every state change used to be read -> check -> assign -> commit, and SQLite serialises the two
+    writes without noticing that they conflict: a cancel could overwrite the "sent" the bridge's
+    poll had just committed (the panel said "cancelled, never received" while the bridge ran it),
+    and the sweeper could turn a "done" into "expired" (2026-09-28). With the WHERE the second
+    writer sees that it lost. Returns whether this caller won; the caller commits."""
+    if c.type in PIN_BEARING_COMMANDS and values.get("status") in TERMINAL_STATES:
+        values["args"] = {"_scrubbed": True}          # a PIN never outlives delivery
+    res = db.execute(update(Command).where(Command.id == c.id, Command.status.in_(tuple(frm)))
+                     .values(**values).execution_options(synchronize_session=False))
+    db.expire(c)                                      # re-read: the row is what the database says
+    return res.rowcount == 1
 
 
 def _refuse_by_policy(body) -> None:
@@ -155,32 +214,39 @@ def _timeout_for(ctype: str) -> int:
 
 
 def _sweep_expired(db: Session) -> int:
-    """Move commands that were delivered and never answered into a terminal state.
+    """Move commands that can no longer finish into a terminal state.
 
-    Called from the read paths rather than a background task: the fleet is small, the query
-    is indexed, and a sweeper that only runs when someone is looking cannot itself become a
-    silent failure. A command is only expired once it has actually been DELIVERED - a row
-    still `pending` is waiting for the device to poll, which is not a fault.
+      sent     delivered and never answered within its class timeout
+      pending  never collected, for a command that goes stale (_goes_stale): anything else
+               still waits for its bridge to come back, which is not a fault
+
+    Runs on a 30 s timer (_housekeeping_loop) AND on every path that reads or acts on command
+    state - issuing a command, the device and command views, every rollout endpoint. Until
+    2026-09-28 only the command list and the panel's stream swept, so with no panel open a reboot
+    whose result was lost stayed "sent" for ever: the next reboot was "deduplicated" onto that
+    dead row and never queued, and a rollout sat "updating" until somebody happened to look.
     """
     now = utcnow()
-    stale = db.scalars(select(Command).where(Command.status == "sent")).all()
     n = 0
-    for c in stale:
-        started = c.sent_at or c.created_at
+    for c in db.scalars(select(Command).where(Command.status.in_(("sent", "pending")))).all():
+        if c.status == "sent":
+            started, limit = c.sent_at or c.created_at, c.timeout_s or DEFAULT_TIMEOUT_S
+            reason = ("no result within %ds of delivery — the device may have rebooted, "
+                      "lost its uplink, or died mid-command" % limit)
+        elif _goes_stale(c.type, c.args):
+            started, limit, reason = c.created_at, STALE_UNCOLLECTED_S, _stale_reason(c.type)
+        else:
+            continue
         if not started:
             continue
         # tz-naive rows exist in databases written by the previous build
         if started.tzinfo is None:
             started = started.replace(tzinfo=dt.timezone.utc)
-        if (now - started).total_seconds() > (c.timeout_s or DEFAULT_TIMEOUT_S):
-            c.status = "expired"
-            _scrub_secret_args(c)
-            c.fail_reason = ("no result within %ds of delivery — the device may have rebooted, "
-                             "lost its uplink, or died mid-command" % (c.timeout_s or DEFAULT_TIMEOUT_S))
-            c.completed_at = now
-            n += 1
-    if n:
-        db.commit()
+        if (now - started).total_seconds() > limit:
+            # conditional: a result (or the bridge's poll) that lands in between wins
+            if _move(db, c, (c.status,), status="expired", fail_reason=reason, completed_at=now):
+                n += 1
+    db.commit()
     return n
 
 
@@ -378,6 +444,11 @@ def _migrate():
             # A bridge's open episodes, read every second by the panel's stream (models.AlertEvent).
             conn.execute(_text("CREATE INDEX IF NOT EXISTS ix_alert_events_device_resolved "
                                "ON alert_events (device_id, resolved_at)"))
+        # Rollouts that say who they left out and why each bridge failed (2026-09-28).
+        if "rollouts" in insp.get_table_names() and "excluded" not in cols("rollouts"):
+            conn.execute(_text("ALTER TABLE rollouts ADD COLUMN excluded JSON"))
+        if "rollout_targets" in insp.get_table_names() and "reason" not in cols("rollout_targets"):
+            conn.execute(_text("ALTER TABLE rollout_targets ADD COLUMN reason VARCHAR"))
 _migrate()
 
 
@@ -465,13 +536,15 @@ _purge_orphan_sessions()
 
 @app.on_event("startup")
 async def _start_background():
-    """Background loops: hourly retention sweep, and the alert evaluator that
-    pushes new/cleared alerts out by email/webhook (walkthrough J4)."""
+    """Background loops: hourly retention sweep, the alert evaluator that
+    pushes new/cleared alerts out by email/webhook (walkthrough J4), and the 30 s
+    command/rollout housekeeping (expiry, trial verdicts) - see _housekeeping_loop."""
     import asyncio
     from .db import SessionLocal
     from . import retention, alerting
     asyncio.create_task(retention.sweep_loop(SessionLocal))
     asyncio.create_task(alerting.evaluate_loop(SessionLocal, settings.alert_eval_interval_s))
+    asyncio.create_task(_housekeeping_loop())
 
 
 # WHAT COMMIT IS ACTUALLY LIVE?
@@ -593,17 +666,28 @@ def pull_commands(dev: Device = Depends(auth.require_device), db: Session = Depe
         select(Command).where(Command.device_id == dev.id, Command.status == "pending")
         .order_by(Command.created_at)
     ).all()
+    now = utcnow()
+    out = []
     # At-most-once delivery: mark as "sent" the instant we hand them out, so a
     # command that disrupts the device before it can POST a result is NOT
     # re-pulled every tick (that once looped reset-clock -> gadget teardown).
     for c in rows:
-        c.status = "sent"
-        # The clock the timeout runs against. Without it, "how long has this been out?" could
-        # only be answered from created_at, which includes however long the device was offline
-        # before it polled - and would expire commands that were never actually delivered late.
-        c.sent_at = utcnow()
+        cid, ctype, args, created = c.id, c.type, dict(c.args or {}), c.created_at
+        if created is not None and created.tzinfo is None:
+            created = created.replace(tzinfo=dt.timezone.utc)
+        # Checked HERE as well as by the sweep: a bridge coming back after a weekend polls within
+        # seconds, before any timer runs, and must not be handed Friday's reboot (2026-09-28).
+        if _goes_stale(ctype, args) and created and (now - created).total_seconds() > STALE_UNCOLLECTED_S:
+            _move(db, c, ("pending",), status="expired", fail_reason=_stale_reason(ctype), completed_at=now)
+            continue
+        # The clock the timeout runs against (sent_at). Without it, "how long has this been out?"
+        # could only be answered from created_at, which includes however long the device was
+        # offline before it polled - and would expire commands that were never delivered late.
+        # Conditional: a cancel that won the race keeps its word, and the bridge never sees it.
+        if _move(db, c, ("pending",), status="sent", sent_at=now):
+            out.append(CommandOut(id=cid, type=ctype, args=args))
     db.commit()
-    return [CommandOut(id=c.id, type=c.type, args=c.args or {}) for c in rows]
+    return out
 
 
 @app.post("/v1/commands/{cmd_id}/result")
@@ -625,29 +709,37 @@ def command_result(cmd_id: int, body: CommandResultIn,
     # the same event as "this succeeded", and the two must not be conflated. So the original
     # verdict stands and the late report is appended as evidence -- both facts survive, which
     # is what an operator needs to reconstruct what actually happened.
-    if c.status in TERMINAL_STATES:
-        _scrub_secret_args(c)
-        stamp = utcnow().isoformat(timespec="seconds")
-        late = ("\n--- late report from the device at %s: status=%s "
-                "(the control plane had already recorded '%s'; that verdict stands) ---\n%s"
-                % (stamp, body.status, c.status, body.output or ""))
-        c.output = (c.output or "") + late
-        db.commit()
-        return {"ok": True, "recorded": "late-report", "status": c.status,
-                "note": "command already %s; the device's later result was appended as "
-                        "evidence and did not change the verdict" % c.status}
+    #
+    # Only done / failed / rejected are results. Anything else is recorded as "failed" with the
+    # raw word kept in the output (2026-09-28): it used to be stored verbatim, so "pending" put
+    # the command back in the pull queue to run a second time, and an unknown word left it
+    # neither finished nor running - its rollout target "updating" for ever.
+    status, output = body.status, body.output
+    if status not in DEVICE_RESULT_STATES:
+        status = "failed"
+        output = ("[the device reported status %r, which is not a result the fleet knows; "
+                  "recorded as failed]\n%s" % (str(body.status)[:40], body.output or ""))
 
-    c.status = body.status
-    c.output = body.output
-    c.completed_at = utcnow()
-    # set-pin / unlock carry the PIN in args. The audit log already omits args, but the
-    # Command row kept them in PLAINTEXT FOREVER - so the fleet DB accumulated every PIN
-    # ever issued, contradicting "PINs travel offline; the panel never displays one".
-    # The device has executed it by now, so the value has no further use here: scrub it.
-    if c.type in PIN_BEARING_COMMANDS:
-        c.args = {"_scrubbed": True}
+    # Conditional, so a verdict the sweeper or a cancel reached between our read and our write
+    # stands, and this report becomes the late report below. set-pin / unlock carry the PIN in
+    # args; _move scrubs it with the result (the device has executed it, so it has no further use
+    # here - the Command row used to keep every PIN ever issued, in plaintext, for ever).
+    if c.status not in TERMINAL_STATES and _move(db, c, ("pending", "sent"), status=status,
+                                                 output=output, completed_at=utcnow()):
+        db.commit()
+        return {"ok": True}
+
+    # Already final (pending and sent are the only other states, and _move covers both).
+    _scrub_secret_args(c)
+    stamp = utcnow().isoformat(timespec="seconds")
+    late = ("\n--- late report from the device at %s: status=%s "
+            "(the control plane had already recorded '%s'; that verdict stands) ---\n%s"
+            % (stamp, body.status, c.status, body.output or ""))
+    c.output = (c.output or "") + late
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "recorded": "late-report", "status": c.status,
+            "note": "command already %s; the device's later result was appended as "
+                    "evidence and did not change the verdict" % c.status}
 
 
 @app.get("/v1/provision")
@@ -807,6 +899,19 @@ def _open_episodes(db, ids) -> dict:
     return out
 
 
+def _busy_reason(dev: Device) -> str | None:
+    """Why this bridge must not be interrupted right now, from its last heartbeat - or None.
+    The same two conditions bridge-update.sh refuses on (a presenter live, the meeting laptop
+    attached); with the laptop attached a media restart has rebooted under-powered bridges."""
+    t = dev.latest if isinstance(dev.latest, dict) else {}
+    streams = t.get("streams") if isinstance(t.get("streams"), dict) else {}
+    if streams.get("video"):
+        return "a presenter is live"
+    if t.get("udc") == "configured":
+        return "the meeting laptop is attached"
+    return None
+
+
 def _safe_alerts(dev: Device, eps=None) -> list:
     """Everything wrong with a bridge now: its snapshot alerts (with the loop's hysteresis), plus a
     restart storm the alert loop has open for it. `eps` = the _open_episodes() map when the caller
@@ -868,6 +973,7 @@ def list_devices(actor=Depends(auth.require_admin), db: Session = Depends(get_db
 def device_detail(device_id: str, actor=Depends(auth.require_admin),
                   db: Session = Depends(get_db)):
     dev = _scoped_device(db, device_id, actor)
+    _sweep_expired(db)            # its command list must not show a dead "sent" as in progress
     view = _device_view(dev)
     rows = db.scalars(
         select(Telemetry).where(Telemetry.device_id == device_id)
@@ -1025,17 +1131,21 @@ def forget_device(device_id: str, actor=Depends(auth.require_admin),
     re-enrols with the bootstrap token, so it reappears within a poll cycle as
     "Unclaimed - just joined". No reboot, no reflash.
 
-    This DELETES the device's history - telemetry, alerts, commands, diagnostics bundles -
-    because a row that outlives its device is worse than no row: it attributes the last
-    owner's incidents to the next one.
+    This DELETES the device's history - telemetry and its hourly uptime rollups, alerts,
+    commands, diagnostics bundles, its place in rollouts - because a row that outlives its
+    device is worse than no row: it attributes the last owner's incidents to the next one.
+    (Rollout places and rollups were missed until 2026-09-28: a rollout target left pointing at
+    a deleted command stayed "updating" for ever, so that rollout could never widen or finish,
+    and a re-enrolled card showed the previous owner's 90-day uptime.) Rollout places go first:
+    they reference the commands.
     """
     dev = db.get(Device, device_id)
     if not dev or dev.org_id != actor.org:
         raise HTTPException(404, "no such device")
     label = dev.name or dev.pairing_code or device_id
-    from .models import Telemetry, AlertEvent, Command, DiagBundle
+    from .models import Telemetry, TelemetryRollup, AlertEvent, Command, DiagBundle
     removed = 0
-    for model in (Telemetry, AlertEvent, Command, DiagBundle):
+    for model in (RolloutTarget, TelemetryRollup, Telemetry, AlertEvent, Command, DiagBundle):
         try:
             removed += db.query(model).filter(model.device_id == device_id).delete(
                 synchronize_session=False)
@@ -1300,6 +1410,12 @@ def list_ota_payloads(actor=Depends(auth.require_admin)):
             continue                      # still arriving, or truncated
         out.append({"version": v, "image": image, "bytes": size,
                     "signed": os.path.exists(mf + ".sig"), "built": kv.get("built")})
+    # NEWEST FIRST, by number (2026-09-28). A plain string sort listed the oldest first - and would
+    # put 2.10 before 2.2 - and both version pickers preselect the first entry, so "Start rollout"
+    # with the defaults sent 2.1 to 2.2 bridges. Two builds of one version: the later build first.
+    # Anything that is not a version goes last.
+    out.sort(key=lambda o: (_version_tuple(o["version"]) or (-1, -1, -1), str(o.get("built") or ""),
+                            str(o["version"])), reverse=True)
     return out
 
 
@@ -1362,12 +1478,14 @@ def cancel_command(device_id: str, cmd_id: int, actor=Depends(auth.require_admin
     c = db.get(Command, cmd_id)
     if not c or c.device_id != device_id:
         raise HTTPException(404, "no such command for this device")
-    if c.status == "pending":
-        c.status = "cancelled"
-        _scrub_secret_args(c)
-        c.fail_reason = "cancelled by %s before the device collected it" % (
-            getattr(actor, "email", None) or "an operator")
-        c.completed_at = utcnow()
+    # Conditional (2026-09-28): the bridge's poll can mark the row "sent" between our read and our
+    # write. The cancel used to overwrite that and answer cancelled:true while the bridge ran the
+    # command - exactly the dishonesty this endpoint exists to prevent. If the poll won, the
+    # re-read status is "sent" and the answer below is the truthful 409.
+    if c.status == "pending" and _move(
+            db, c, ("pending",), status="cancelled", completed_at=utcnow(),
+            fail_reason="cancelled by %s before the device collected it" % (
+                getattr(actor, "email", None) or "an operator")):
         db.commit()
         _audit(db, actor, "command:cancel:%s" % c.type, dev.name or device_id)
         return {"id": c.id, "status": c.status, "cancelled": True}
@@ -1384,6 +1502,69 @@ def cancel_command(device_id: str, cmd_id: int, actor=Depends(auth.require_admin
         "status": c.status,
         "detail": "completed commands are immutable history",
     })
+
+
+def _args_key(args) -> str:
+    return json.dumps(args or {}, sort_keys=True, default=str)
+
+
+def _describe(ctype: str, args) -> str:
+    """"deploy-script bridge-web.py", "update 2.2.1-abc1234" - never a PIN."""
+    if ctype in PIN_BEARING_COMMANDS:
+        return ctype
+    a = args if isinstance(args, dict) else {}
+    bits = [str(a[k]) for k in ("name", "version", "mode", "key", "value", "path") if a.get(k) not in (None, "")]
+    return " ".join([ctype] + bits)
+
+
+def _find_in_flight(db: Session, device_id: str, ctype: str, args):
+    """-> (identical, other): an identical command (same type AND args) already pending or sent
+    on this bridge, else the newest different one of the same type. Never both."""
+    rows = db.scalars(select(Command).where(Command.device_id == device_id, Command.type == ctype,
+                                            Command.status.in_(("pending", "sent")))
+                      .order_by(Command.id.desc())).all()
+    want = _args_key(args)
+    for c in rows:
+        if _args_key(c.args) == want:
+            return c, None
+    return None, (rows[0] if rows else None)
+
+
+def _busy_refusal(other, asked_args) -> HTTPException:
+    what = _describe(other.type, other.args)
+    if other.status == "pending":
+        how = ("is still queued on this bridge (it has not collected it yet). Cancel it first if "
+               "you want this one instead.")
+    else:
+        how = ("is still running on this bridge; try again when it finishes (within %d s)."
+               % (other.timeout_s or DEFAULT_TIMEOUT_S))
+    return HTTPException(409, {"error": "busy", "in_flight": other.id, "status": other.status,
+                               "detail": "%s (#%d) %s Not queued: %s." % (
+                                   what, other.id, how, _describe(other.type, asked_args))})
+
+
+_VERSION_NUM = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+def _version_tuple(v):
+    m = _VERSION_NUM.match(str(v or "").strip())
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def _running_version(dev) -> str | None:
+    """The OS a bridge actually runs. A committed A/B update is the better witness: the version a
+    bridge reports comes from a file on its shared /data partition that an OS update does not
+    rewrite, so after an update it still names the image the card was flashed with."""
+    t = dev.latest if isinstance(dev.latest, dict) else {}
+    ota = t.get("ota") if isinstance(t.get("ota"), dict) else {}
+    if ota.get("state") == "committed" and ota.get("version"):
+        return str(ota["version"])
+    return dev.version
+
+
+def _is_downgrade(dev, target) -> bool:
+    have, want = _version_tuple(_running_version(dev)), _version_tuple(target)
+    return bool(have and want and want < have)
 
 
 @app.post("/admin/devices/{device_id}/commands")
@@ -1405,6 +1586,21 @@ def issue_command(device_id: str, body: IssueCommandIn, actor=Depends(auth.requi
             "detail": ("this command interrupts service or changes what code runs; "
                        "re-issue it with confirm=true"),
         })
+    # NO SILENT DOWNGRADE (2026-09-28). Nothing compared the version asked for with the one the
+    # bridge runs, and the version pickers listed the OLDEST first. A 2.1 image installed on a 2.2
+    # bridge commits if its health check passes and drops the bridge back to PIN protocol 1: the
+    # presenter app refuses it and the fleet can no longer update it remotely - a reflash on site.
+    want = (body.args or {}).get("version") if body.type == "update" else None
+    if want and not body.allow_downgrade and _is_downgrade(dev, want):
+        raise HTTPException(409, {
+            "error": "downgrade",
+            "detail": ("%s runs %s; %s is OLDER. Installing it is a downgrade (a 2.1 image takes a 2.2 "
+                       "bridge off the PIN protocol the presenter app needs). Re-issue with "
+                       "allow_downgrade=true if that is really what you want."
+                       % (bridge_title(dev), _running_version(dev), want))})
+    # A delivered command whose result was lost must be expired BEFORE the in-flight guard
+    # below looks, or the new request is "deduplicated" onto that dead row and never queued.
+    _sweep_expired(db)
     # RETRY SAFETY.
     #
     # Nothing here used to prevent the same command being queued twice. A POST that timed out
@@ -1418,9 +1614,11 @@ def issue_command(device_id: str, body: IssueCommandIn, actor=Depends(auth.requi
     #
     #  1. An explicit idempotency_key, when the caller supplies one. Same key + same device
     #     returns the ORIGINAL command, whatever its state.
-    #  2. An in-flight guard for commands that must not double-execute: if an identical one is
-    #     already pending or sent for this device, hand back that one instead of queuing
-    #     another. This needs no client change, which is what makes it actually protective.
+    #  2. An in-flight guard for commands that must not double-execute: if an identical one
+    #     (same type, same args) is already pending or sent for this device, hand back that one
+    #     instead of queuing another. This needs no client change, which is what makes it
+    #     actually protective. A DIFFERENT one of the same type is refused, never swapped for
+    #     the one in flight (see NO_DOUBLE_EXECUTE).
     #
     # Read-only commands (diagnose, running, logs, read-file, *-show) are deliberately NOT
     # deduplicated: asking twice is harmless and an operator refreshing diagnostics should get
@@ -1435,14 +1633,12 @@ def issue_command(device_id: str, body: IssueCommandIn, actor=Depends(auth.requi
                     "deduplicated": "idempotency_key"}
 
     if body.type in NO_DOUBLE_EXECUTE:
-        inflight = db.scalars(
-            select(Command).where(Command.device_id == device_id,
-                                  Command.type == body.type,
-                                  Command.status.in_(("pending", "sent")))
-            .order_by(Command.id.desc()).limit(1)).first()
-        if inflight is not None:
-            return {"id": inflight.id, "status": inflight.status,
-                    "timeout_s": inflight.timeout_s, "deduplicated": "already_in_flight"}
+        same, other = _find_in_flight(db, device_id, body.type, body.args)
+        if same is not None:
+            return {"id": same.id, "status": same.status,
+                    "timeout_s": same.timeout_s, "deduplicated": "already_in_flight"}
+        if other is not None:
+            raise _busy_refusal(other, body.args)
 
     c = Command(device_id=device_id, type=body.type, args=body.args or {},
                 timeout_s=_timeout_for(body.type),
@@ -1475,18 +1671,53 @@ def broadcast_command(body: IssueCommandIn, actor=Depends(auth.require_admin),
             "detail": ("this command interrupts service on EVERY device in the org; "
                        "re-issue it with confirm=true"),
         })
+    # THE SAME RETRY GUARDS AS ONE BRIDGE (2026-09-28). This loop used to add a row per device with
+    # no idempotency key and no in-flight check - the "retried reboot becomes two reboots" class
+    # issue_command was fixed for, on the path with the biggest blast radius - and it included
+    # unclaimed bench cards and bridges in the middle of a meeting.
+    _sweep_expired(db)
     ids, skipped = [], []
+    want = (body.args or {}).get("version") if body.type == "update" else None
+    interrupts = _goes_stale(body.type, body.args)      # a lock is not among them (INTERRUPTS_MEETING)
     for dev in db.scalars(select(Device).where(Device.org_id == actor.org)).all():
-        if body.type in OLD_SOFTWARE_REFUSALS and _pin_protocol(dev) < 2:
-            skipped.append({"device": dev.name or dev.id, "reason": OLD_SOFTWARE_REFUSALS[body.type]})
+        name = bridge_title(dev)
+        if dev.claimed_at is None:
+            skipped.append({"device": name, "reason": "not claimed: nobody controls an unclaimed bridge"})
             continue
+        if body.type in OLD_SOFTWARE_REFUSALS and _pin_protocol(dev) < 2:
+            skipped.append({"device": name, "reason": OLD_SOFTWARE_REFUSALS[body.type]})
+            continue
+        busy = _busy_reason(dev) if is_online(dev) else None
+        if busy and interrupts:
+            skipped.append({"device": name, "reason": "%s — a broadcast does not interrupt a meeting; "
+                                                      "send it to this bridge on its own if you must" % busy})
+            continue
+        if want and not body.allow_downgrade and _is_downgrade(dev, want):
+            skipped.append({"device": name, "reason": "runs %s, newer than %s (a downgrade)"
+                                                      % (_running_version(dev), want)})
+            continue
+        if body.idempotency_key:
+            prior = db.scalars(select(Command).where(Command.device_id == dev.id,
+                                                     Command.idempotency_key == body.idempotency_key)
+                               .order_by(Command.id.desc()).limit(1)).first()
+            if prior is not None:
+                ids.append({"device": name, "command_id": prior.id, "deduplicated": "idempotency_key"})
+                continue
+        if body.type in NO_DOUBLE_EXECUTE:
+            same, other = _find_in_flight(db, dev.id, body.type, body.args)
+            if same is not None:
+                ids.append({"device": name, "command_id": same.id, "deduplicated": "already_in_flight"})
+                continue
+            if other is not None:
+                skipped.append({"device": name, "reason": _busy_refusal(other, body.args).detail["detail"]})
+                continue
         # timeout_s was omitted here, so broadcast commands fell back to the column default
         # instead of the per-class table the single-device path uses.
         c = Command(device_id=dev.id, type=body.type, args=body.args or {},
-                    timeout_s=_timeout_for(body.type))
+                    timeout_s=_timeout_for(body.type), idempotency_key=body.idempotency_key)
         db.add(c)
         db.flush()
-        ids.append({"device": dev.name or dev.id, "command_id": c.id})
+        ids.append({"device": name, "command_id": c.id})
     db.commit()
     _audit(db, actor, "broadcast:%s" % body.type, "%d device(s)" % len(ids))
     return {"queued": ids, "skipped": skipped}
@@ -2162,6 +2393,17 @@ async def admin_stream(request: Request, actor=Depends(auth.require_admin)):
     def fingerprint(v):
         return hashlib.sha1(json.dumps(v, sort_keys=True, default=str).encode()).hexdigest()
 
+    def gone(kind, keys):
+        """Of these ids that left the snapshot, the ones whose rows no longer exist (a forgotten
+        bridge, retention) - as opposed to rows that only scrolled out of the newest-80/60 window."""
+        model = Command if kind == "command" else AlertEvent
+        db = SessionLocal()
+        try:
+            still = set(db.scalars(select(model.id).where(model.id.in_(keys))).all())
+        finally:
+            db.close()
+        return [k for k in keys if k not in still]
+
     async def events():
         seen = {"device": {}, "command": {}, "alert": {}}
         last_beat = last_auth = time.monotonic()
@@ -2191,10 +2433,24 @@ async def admin_stream(request: Request, actor=Depends(auth.require_admin)):
                     if s.get(k) != f:
                         s[k] = f
                         out.append((kind, v))
+                # Whatever left the snapshot leaves `seen` too (the memory stays bounded; a row
+                # that comes back is simply sent again). Until 2026-09-28 only devices did, and
+                # the page was never told that a forgotten bridge's commands and alerts were
+                # gone: when the same card re-enrolled, its drawer showed the previous owner's
+                # history - the very mis-attribution forget_device deletes it to prevent.
+                missing = [k for k in s if k not in views]
+                for k in missing:
+                    del s[k]
+                if not missing:
+                    continue
                 if kind == "device":
-                    for k in [k for k in s if k not in views]:
-                        del s[k]
-                        out.append(("device_removed", {"id": k}))
+                    out.extend(("device_removed", {"id": k}) for k in missing)
+                else:
+                    try:
+                        dead = await asyncio.to_thread(gone, kind, missing)
+                    except Exception:
+                        dead = []
+                    out.extend((kind + "_removed", {"id": k}) for k in dead)
             if first:
                 out.append(("ready", {"devices": len(dviews)}))
                 first = False
@@ -2309,12 +2565,32 @@ def _mount_panel():
 
 ROLLOUT_STAGES = [10, 25, 50, 100]
 
+# How long a STAGED bridge may take to report the verdict of its trial boot (committed or rolled
+# back), counted from the last time the fleet saw it busy: offline, rebooting, or in a meeting.
+# The trial is 45 s to the reboot plus up to 300 s of health check (bridge-ab), so 20 minutes of
+# silence from a bridge that is online and idle means the trial never completed - a power cut
+# mid-trial lands back on the old slot and says nothing.
+ROLLOUT_TRIAL_WINDOW_S = 20 * 60
+
+# The version shape bridge-agent.py's _version() accepts. Anything else goes out as a source URL.
+_AGENT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-f]{7,40})?")
+
+# Target states. In flight: the update is on its way or running (dispatched), or the new OS is in
+# the spare slot waiting for its trial verdict (staged). Did not update: the trial rolled back
+# (rolled_back), or anything else stopped it (failed). Either kind halts widening.
+IN_FLIGHT_TARGET = ("dispatched", "staged")
+NOT_UPDATED_TARGET = ("failed", "rolled_back")
+
 
 def _next_stage(pct: int) -> int | None:
     for s in ROLLOUT_STAGES:
         if s > pct:
             return s
     return None
+
+
+def _plural(n: int, word: str) -> str:
+    return "%d %s%s" % (n, word, "" if n == 1 else "s")
 
 
 def _ro_targets(db: Session, ro: Rollout) -> list[RolloutTarget]:
@@ -2326,114 +2602,296 @@ def _ro_targets(db: Session, ro: Rollout) -> list[RolloutTarget]:
     ).all()
 
 
-def _sync_rollout(db: Session, ro: Rollout) -> None:
-    """Fold finished command results back into target state.
+def _update_in_flight(db: Session, device_id: str):
+    return db.scalars(select(Command).where(Command.device_id == device_id, Command.type == "update",
+                                            Command.status.in_(("pending", "sent")))
+                      .order_by(Command.id.desc()).limit(1)).first()
 
-    Derived on read rather than hooked into /v1/commands/{id}/result, so the hot
-    device-facing path stays untouched (and a rollout can never slow it down).
+
+def _rollout_update_args(ro: Rollout) -> dict:
+    """What the `update` command carries. For a version this fleet hosts at its own catalog path,
+    the VERSION - exactly what the single-bridge "Install an OS version" sends (2026-09-28): the
+    bridge then refuses a manifest that names any other version, and fetches from the fleet address
+    it already reaches every 15 s (the panel's own address can be a tunnel the bridge cannot route
+    to). Anything else is sent as the source, as before: bridge-update.sh lets --version override
+    --url, so the two cannot travel together."""
+    src, ver = (ro.source or "").rstrip("/"), ro.version or ""
+    if (_AGENT_VERSION.fullmatch(ver) and src.endswith("/payloads/ota/" + ver)
+            and os.path.isfile(os.path.join(PAYLOAD_DIR, "ota", ver, "manifest.txt"))):
+        return {"version": ver}
+    return {"source": ro.source}
+
+
+def _update_failure(c) -> str:
+    """One line on why an update command ended badly, for the rollout card."""
+    if c.status == "expired":
+        return "the update never reported back (%s)" % (c.fail_reason or "no result")
+    lines = [ln.strip() for ln in (c.output or "").splitlines() if ln.strip()]
+    last = re.sub(r"^\[ota\]\s*(ERROR:\s*)?", "", lines[-1] if lines else "")[:200]
+    if c.status == "rejected":
+        return "the bridge rejected the update command: %s" % (last or "no detail")
+    if c.status == "failed":
+        return "the update failed before its trial boot: %s" % (last or "no detail")
+    # a word some older build stored verbatim (results are normalised since 2026-09-28)
+    return "the update ended as %r, which is not a result the fleet knows: %s" % (c.status, last or "no detail")
+
+
+def _trial_verdict(dev: Device, ro: Rollout, since, verified: bool = False):
+    """-> (target status, reason) from the bridge's own report of its trial boot, or None while
+    there is no verdict yet.
+
+    Only a heartbeat received AFTER the update command finished counts: bridge-update.sh writes
+    "staged" before it exits and the agent reports the result after its heartbeat, so anything
+    the bridge reports after that is about this attempt, never a leftover from an earlier one.
+    Both clocks are the fleet's own (a bridge's clock can be off). Not dev.version: that is read
+    from a file an OS update does not rewrite. `verified`: the update carried the version, so the
+    bridge itself refused any manifest for another one - a commit that names no version is ours."""
+    seen, since = _utc(dev.last_seen), _utc(since)
+    if not (seen and since and seen > since):
+        return None
+    t = dev.latest if isinstance(dev.latest, dict) else {}
+    ota = t.get("ota") if isinstance(t.get("ota"), dict) else {}
+    state, ver = ota.get("state"), str(ota.get("version") or "")
+    detail = str(ota.get("detail") or "").strip()[:200]
+    if state == "committed":
+        if ver == ro.version or (not ver and verified):
+            return "succeeded", None
+        return "failed", ("its trial committed %s, not %s — the manifest it installed names another version"
+                          % (ver or "an unnamed version", ro.version))
+    if state == "rolled back":
+        return "rolled_back", "rolled back%s: %s" % (
+            " (%s)" % ver if ver and ver != ro.version else "", detail or "the new OS did not come up healthy")
+    # "failed" only when it is about THIS version: bridge-update.sh writes "failed" with no version
+    # when it refuses before reading a manifest (a later install tried while a meeting was on),
+    # which says nothing about the image this rollout staged.
+    if state == "failed" and ver == ro.version:
+        return "failed", "failed: %s" % (detail or "no detail")
+    return None
+
+
+def _sync_rollout(db: Session, ro: Rollout) -> None:
+    """Fold what the bridges report back into target state.
+
+      dispatched -> staged       the update command finished: the new OS is in the spare slot and
+                                 the bridge trial-boots it 45 s later
+      dispatched -> queued       cancelled, or refused because a meeting was on (nothing installed)
+      dispatched -> failed       the update failed before its trial, or never answered
+      staged -> succeeded        the bridge reports that the trial COMMITTED this version
+      staged -> rolled_back      it reports that the trial rolled back
+      staged -> failed           it committed another version, or says nothing for
+                                 ROLLOUT_TRIAL_WINDOW_S while online and idle
+      any -> removed             the device is no longer in the fleet
+
+    Until 2026-09-28 "done" counted as updated. But done only means STAGED - bridge-update.sh
+    --fleet exits 0 before the trial boot - so an image whose trial rolled back on every bridge
+    still read "3 of 3 updated · 0 rollbacks" and widened to the whole fleet, two reboots per
+    bridge for nothing. And a bridge refusing because its laptop was attached counted as a
+    rollback: widening halted over an image nobody had tried.
+
+    Derived on read (and every 30 s by _housekeeping_loop) rather than hooked into the device's
+    result and telemetry posts, so the hot device-facing paths stay untouched.
     """
+    now = utcnow()
     changed = False
     for t in _ro_targets(db, ro):
-        if t.status != "dispatched" or not t.command_id:
+        if t.status not in ("queued",) + IN_FLIGHT_TARGET:
             continue
-        c = db.get(Command, t.command_id)
-        if not c:
+        dev = db.get(Device, t.device_id)
+        if dev is None:
+            # Its device is gone: it can never finish, and it no longer counts (it used to stay
+            # "updating" for ever, so the rollout could never widen or finish).
+            t.status, t.reason, t.updated_at, changed = "removed", "no longer in the fleet", now, True
             continue
-        if c.status == "done":
-            t.status, t.updated_at, changed = "succeeded", utcnow(), True
-        elif c.status in ("failed", "rejected", "expired"):
-            # The device already rolled itself back into the previous slot - or it never
-            # reported back at all (expired), which must halt widening just the same rather
-            # than leave the target "updating" forever.
-            t.status, t.updated_at, changed = "failed", utcnow(), True
-        elif c.status == "cancelled":
-            # An admin recalled it before the bridge collected it: send it again next wave.
-            t.status, t.command_id, t.updated_at, changed = "queued", None, utcnow(), True
+        if t.status == "dispatched":
+            c = db.get(Command, t.command_id) if t.command_id else None
+            if c is not None and c.status in ("pending", "sent"):
+                continue                                   # on its way, or running
+            refused = (REFUSED_WHILE_BUSY.search("%s\n%s" % (c.output or "", c.fail_reason or ""))
+                       if c is not None and c.status == "failed" else None)
+            if c is None:
+                t.status, t.reason = "failed", "its update command no longer exists, so how it ended is unknown"
+            elif c.status == "done":
+                t.status, t.reason = "staged", None
+            elif c.status == "cancelled":
+                # An admin recalled it before the bridge collected it: it goes out again.
+                t.status, t.command_id, t.reason = "queued", None, "the update was cancelled before the bridge collected it"
+            elif refused:
+                # Nothing was installed: back in the queue for the next catch-up once it is idle.
+                t.status, t.command_id = "queued", None
+                t.reason = ("refused while %s — nothing was installed; it goes out again once the bridge is idle"
+                            % ("the meeting laptop was attached" if "laptop" in refused.group(0).lower()
+                               else "a presenter was live"))
+            else:
+                # Failed before any trial (download, signature, slot write), or never reported back
+                # at all (expired) - which must halt widening just the same rather than leave the
+                # target "updating" for ever. Also any status word no build writes any more.
+                t.status, t.reason = "failed", _update_failure(c)
+            t.updated_at, changed = now, True
+        if t.status == "staged":
+            c = db.get(Command, t.command_id) if t.command_id else None
+            v = _trial_verdict(dev, ro, c.completed_at if c is not None and c.completed_at else t.updated_at,
+                               verified=c is not None and (c.args or {}).get("version") == ro.version)
+            if v:
+                t.status, t.reason, t.updated_at, changed = v[0], v[1], now, True
+            elif not is_online(dev) or _busy_reason(dev):
+                t.updated_at, changed = now, True     # rebooting, or a meeting is on: the window restarts
+            elif (now - _utc(t.updated_at)).total_seconds() > ROLLOUT_TRIAL_WINDOW_S:
+                t.status, t.updated_at, changed = "failed", now, True
+                t.reason = ("no verdict from its trial boot within %d min of being online and idle — "
+                            "it may have lost power mid-trial and come back on the previous OS"
+                            % (ROLLOUT_TRIAL_WINDOW_S // 60))
     if changed:
         db.commit()
 
 
-def _dispatch_rollout(db: Session, ro: Rollout) -> int:
-    """Queue `update` commands up to the current wave, ONLINE devices only.
+def _wave_room(targets, ro: Rollout) -> int:
+    """How many more bridges the current wave may start. ceil() so a 10% wave over a small fleet
+    still moves at least one device; removed targets no longer count."""
+    live = [t for t in targets if t.status != "removed"]
+    if not live:
+        return 0
+    return max(1, -(-len(live) * ro.stage_pct // 100)) - sum(1 for t in live if t.status != "queued")
 
-    Offline devices are deliberately left `queued` (not skipped, not failed) —
-    they pick the update up on a later dispatch once they are back.
+
+def _same_update(inflight_args, ro: Rollout) -> bool:
+    """An update already on its way to a bridge installs what this rollout would: the same version,
+    however it was asked for - the panel's "Install on…" sends the version, a rollout the version or
+    its source URL, and a forced one adds force (merge of the 2026-09-28 fixes)."""
+    a = inflight_args if isinstance(inflight_args, dict) else {}
+    return a.get("version") == ro.version or bool((a.get("source") or a.get("url")) == ro.source and ro.source)
+
+
+def _hold_reason(db: Session, dev: Device, ro: Rollout) -> str | None:
+    """Why a queued bridge is not sent its update right now, or None when it can be.
+      offline                        "queued until online"
+      a meeting on                   laptop attached or a presenter live: bridge-update.sh refuses
+                                     then anyway, and that refusal used to be counted as a rollback
+                                     that halted the rollout (2026-09-28)
+      another OS update in flight    two copies of bridge-update.sh would share the staging
+                                     directory and the spare slot (the SAME update is adopted)"""
+    if not is_online(dev):
+        return "offline"
+    busy = _busy_reason(dev)
+    if busy:
+        return busy
+    other = _update_in_flight(db, dev.id)
+    if other is not None and not _same_update(other.args, ro):
+        return "another OS update is in progress (%s, #%d)" % (_describe(other.type, other.args), other.id)
+    return None
+
+
+def _dispatch_rollout(db: Session, ro: Rollout) -> int:
+    """Queue `update` commands up to the current wave, to bridges that can take one NOW.
+
+    The others are deliberately left `queued` (not skipped, not failed) and go out on a later
+    dispatch - see _hold_reason. A bridge that meanwhile got to this version another way counts
+    as updated, and one whose own page already sent this same update has that command adopted
+    rather than a second one queued beside it.
     """
     if ro.status != "active":
         return 0
-    targets = _ro_targets(db, ro)
-    total = len(targets)
-    if not total:
-        return 0
-    # ceil() so a 10% wave over a small fleet still moves at least one device.
-    allowed = max(1, -(-total * ro.stage_pct // 100))
-    started = sum(1 for t in targets if t.status != "queued")
-    room = allowed - started
-    sent = 0
+    targets = [t for t in _ro_targets(db, ro) if t.status != "removed"]
+    room = _wave_room(targets, ro)
+    args = _rollout_update_args(ro)
+    now = utcnow()
+    sent, changed = 0, False
     for t in targets:
         if room <= 0:
             break
         if t.status != "queued":
             continue
         dev = db.get(Device, t.device_id)
-        if not dev or not is_online(dev):
-            continue                      # "queued until online"
-        # An update already on its way to this bridge (an admin's "Install on…", 2026-09-28).
-        # Queuing a second one ran two OS updates at once on the bridge. The same version is
-        # adopted as this target's command; another version is left to finish first, and this
-        # target stays queued for a later dispatch.
-        inflight = db.scalars(
-            select(Command).where(Command.device_id == dev.id, Command.type == "update",
-                                  Command.status.in_(("pending", "sent")))
-            .order_by(Command.id.desc()).limit(1)).first()
-        if inflight is not None:
-            a = inflight.args if isinstance(inflight.args, dict) else {}
-            if a.get("version") == ro.version or (a.get("source") or a.get("url")) == ro.source:
-                t.command_id, t.status, t.wave, t.updated_at = inflight.id, "dispatched", ro.stage_pct, utcnow()
-                room -= 1
-                sent += 1
+        if dev is None:
+            t.status, t.reason, t.updated_at, changed = "removed", "no longer in the fleet", now, True
             continue
-        # timeout_s: an OS update may take hours over a venue uplink. Without it the command
-        # took the column default (120 s), was marked EXPIRED mid-download, the bridge's later
-        # "done" was refused, and the rollout sat "updating" forever and could never widen.
-        c = Command(device_id=dev.id, type="update", args={"source": ro.source},
-                    timeout_s=_timeout_for("update"))
-        db.add(c)
-        db.flush()
-        t.command_id, t.status, t.wave, t.updated_at = c.id, "dispatched", ro.stage_pct, utcnow()
+        if _running_version(dev) == ro.version:
+            t.status, t.reason, t.updated_at, changed = "succeeded", "already on %s" % ro.version, now, True
+            room -= 1
+            continue
+        if _hold_reason(db, dev, ro):
+            continue
+        c = _update_in_flight(db, dev.id)          # after _hold_reason: None, or this same update
+        if c is None:
+            # timeout_s: an OS update may take hours over a venue uplink. Without it the command
+            # took the column default (120 s), was marked EXPIRED mid-download, the bridge's later
+            # "done" was refused, and the rollout sat "updating" forever and could never widen.
+            c = Command(device_id=dev.id, type="update", args=args, timeout_s=_timeout_for("update"))
+            db.add(c)
+            db.flush()
+        t.command_id, t.status, t.wave, t.updated_at, t.reason = c.id, "dispatched", ro.stage_pct, now, None
         room -= 1
         sent += 1
+        changed = True
     if sent:
-        ro.updated_at = utcnow()
+        ro.updated_at = now
+    if changed:
         db.commit()
     return sent
 
 
 def _rollout_view(db: Session, ro: Rollout) -> dict:
     targets = _ro_targets(db, ro)
-    by = {"queued": 0, "dispatched": 0, "succeeded": 0, "failed": 0}
-    waiting_offline = []
+    by = {s: 0 for s in ("queued", "dispatched", "staged", "succeeded", "failed", "rolled_back", "removed")}
+    offline, waiting, ready, verifying, not_updated = [], [], [], [], []
     for t in targets:
         by[t.status] = by.get(t.status, 0) + 1
-        if t.status == "queued":
-            dev = db.get(Device, t.device_id)
-            if dev and not is_online(dev):
-                waiting_offline.append(dev.name or dev.id)
+        if t.status not in ("queued", "staged") + NOT_UPDATED_TARGET:
+            continue
+        dev = db.get(Device, t.device_id)
+        name = bridge_title(dev) if dev else t.device_id
+        if t.status in NOT_UPDATED_TARGET:
+            not_updated.append({"device": name, "status": t.status,
+                                "reason": t.reason or t.status.replace("_", " ")})
+        elif t.status == "staged":
+            verifying.append(name)
+        elif dev is None:
+            continue
+        else:
+            why = _hold_reason(db, dev, ro)
+            if why == "offline":
+                offline.append(name)
+            elif why:
+                waiting.append({"device": name, "reason": why})
+            else:
+                ready.append(name)
+    total = len(targets) - by["removed"]
+    in_flight = by["dispatched"] + by["staged"]
+    room = _wave_room(targets, ro)
+    parts = ["%d of %d updated" % (by["succeeded"], total), _plural(by["rolled_back"], "rollback")]
+    if by["failed"]:
+        parts.append("%d failed" % by["failed"])
+    if verifying:
+        parts.append("%d verifying the new OS" % len(verifying))
+    if offline:
+        parts.append("%s queued until online" % ", ".join(offline))
+    if waiting:
+        parts.append("%s queued until idle" % ", ".join(w["device"] for w in waiting))
     return {
         "id": ro.id, "version": ro.version, "source": ro.source,
         "status": ro.status, "stage_pct": ro.stage_pct,
         "next_stage": _next_stage(ro.stage_pct),
-        "total": len(targets),
-        "updated": by["succeeded"], "rollbacks": by["failed"],
-        "in_flight": by["dispatched"], "queued": by["queued"],
-        "queued_offline": waiting_offline,
+        "total": total,
+        "updated": by["succeeded"],
+        # the trial boot rolled back: the image itself did not come up healthy
+        "rollbacks": by["rolled_back"],
+        # did not update for any other reason: failed before its trial, never answered, no verdict
+        "failed": by["failed"],
+        # both kinds, each with why - any of them halts widening (the "0 rollbacks" guard)
+        "failed_devices": not_updated,
+        "in_flight": in_flight, "verifying": by["staged"], "queued": by["queued"],
+        "queued_offline": offline, "queued_busy": waiting, "queued_ready": ready,
+        "verifying_devices": verifying,
+        # left out when it started, and why (older than 2.2, unclaimed, already newer)
+        "excluded": ro.excluded or [],
+        # the current wave still has bridges to send: "Catch up" sends whichever of them can go now
+        "catch_up": ro.status == "active" and room > 0 and by["queued"] > 0,
+        # the final wave with nothing outstanding: the one moment "Finish" completes it
+        "finishable": ro.status == "active" and _next_stage(ro.stage_pct) is None
+                      and not by["queued"] and not in_flight,
         "created_by": ro.created_by,
         "created_at": ro.created_at.isoformat() if ro.created_at else None,
         # the walkthrough's one-liner, rendered server-side
-        "summary": "%d of %d updated · %d rollback%s%s" % (
-            by["succeeded"], len(targets), by["failed"],
-            "" if by["failed"] == 1 else "s",
-            " · %s queued until online" % ", ".join(waiting_offline) if waiting_offline else ""),
+        "summary": " · ".join(parts),
     }
 
 
@@ -2445,6 +2903,7 @@ def create_rollout(body: RolloutCreateIn, actor=Depends(auth.require_admin),
         raise HTTPException(400, "stage_pct must be one of %s" % ROLLOUT_STAGES)
     if db.scalar(select(Rollout).where(Rollout.org_id == actor.org, Rollout.status == "active")):
         raise HTTPException(409, "an active rollout already exists for this org")
+    _sweep_expired(db)
     ro = Rollout(org_id=actor.org, version=body.version, source=body.source,
                  stage_pct=body.stage_pct, created_by=getattr(actor, "email", "admin"))
     db.add(ro)
@@ -2453,34 +2912,44 @@ def create_rollout(body: RolloutCreateIn, actor=Depends(auth.require_admin),
     # rollout must never re-flash a device that is already there. Nor are unclaimed bridges, or
     # bridges older than 2.2: their software cannot install an OS version remotely (the update
     # is killed after 30 s, the target sits "updating" until it expires, and widening stalls) -
-    # those are flashed by hand (review, 2026-09-25). The response names them.
+    # those are flashed by hand (review, 2026-09-25). Nor, unless asked for, bridges that run a
+    # NEWER version: see issue_command's downgrade rule (2026-09-28). The rollout keeps the list.
     excluded, targets = [], 0
     for dev in db.scalars(select(Device).where(Device.org_id == actor.org)).all():
-        if (dev.version or "") == body.version:
+        running = _running_version(dev) or ""
+        if running == body.version:
             continue
-        if dev.claimed_at is None or _pin_protocol(dev) < 2:
-            excluded.append(dev.name or dev.pairing_code or dev.id)
+        why = None
+        if dev.claimed_at is None:
+            why = "not claimed"
+        elif _pin_protocol(dev) < 2:
+            why = ("runs software older than 2.2, which cannot install an OS version remotely — "
+                   "flash its card with the image")
+        elif not body.allow_downgrade and _is_downgrade(dev, body.version):
+            why = "runs %s, newer than %s — include it only as a deliberate downgrade" % (running, body.version)
+        if why:
+            excluded.append({"name": bridge_title(dev), "reason": why})
             continue
         db.add(RolloutTarget(rollout_id=ro.id, device_id=dev.id))
         targets += 1
     if not targets:
         db.rollback()                     # an empty rollout would sit "active" doing nothing
         raise HTTPException(409, "no bridge can install %s remotely%s" % (
-            body.version, (": %s run software older than 2.2 or are unclaimed - flash their cards "
-                           "with the image instead" % ", ".join(excluded)) if excluded else
-            " (they are all on it already)"))
+            body.version, (": " + "; ".join("%s (%s)" % (e["name"], e["reason"]) for e in excluded))
+            if excluded else " (they are all on it already)"))
+    ro.excluded = excluded
     db.commit()
     sent = _dispatch_rollout(db, ro)
     _audit(db, actor, "rollout:create", "%s -> %d device(s), wave %d%%" %
            (body.version, len(_ro_targets(db, ro)), ro.stage_pct))
     out = _rollout_view(db, ro)
     out["dispatched_now"] = sent
-    out["excluded"] = excluded
     return out
 
 
 @app.get("/admin/rollouts")
 def list_rollouts(actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
+    _sweep_expired(db)
     ros = db.scalars(select(Rollout).where(Rollout.org_id == actor.org)
                      .order_by(desc(Rollout.created_at))).all()
     for ro in ros:
@@ -2499,11 +2968,13 @@ def _scoped_rollout(db: Session, rollout_id: int, actor) -> Rollout:
 def get_rollout(rollout_id: int, actor=Depends(auth.require_admin),
                 db: Session = Depends(get_db)):
     ro = _scoped_rollout(db, rollout_id, actor)
+    _sweep_expired(db)
     _sync_rollout(db, ro)
     view = _rollout_view(db, ro)
+    names = {d.id: bridge_title(d) for d in db.scalars(select(Device).where(Device.org_id == ro.org_id)).all()}
     view["devices"] = [
-        {"device_id": t.device_id, "status": t.status, "wave": t.wave,
-         "command_id": t.command_id}
+        {"device_id": t.device_id, "device": names.get(t.device_id, t.device_id), "status": t.status,
+         "wave": t.wave, "command_id": t.command_id, "reason": t.reason}
         for t in _ro_targets(db, ro)
     ]
     return view
@@ -2512,8 +2983,9 @@ def get_rollout(rollout_id: int, actor=Depends(auth.require_admin),
 @app.post("/admin/rollouts/{rollout_id}/dispatch")
 def dispatch_rollout(rollout_id: int, actor=Depends(auth.require_admin),
                      db: Session = Depends(get_db)):
-    """Catch up the current wave — picks up devices that have come back online."""
+    """Catch up the current wave — picks up devices that are back online or idle again."""
     ro = _scoped_rollout(db, rollout_id, actor)
+    _sweep_expired(db)
     _sync_rollout(db, ro)
     sent = _dispatch_rollout(db, ro)
     out = _rollout_view(db, ro)
@@ -2524,30 +2996,44 @@ def dispatch_rollout(rollout_id: int, actor=Depends(auth.require_admin),
 @app.post("/admin/rollouts/{rollout_id}/advance")
 def advance_rollout(rollout_id: int, force: bool = False,
                     actor=Depends(auth.require_admin), db: Session = Depends(get_db)):
-    """Widen to the next wave — refused while the current one is unhealthy.
+    """Widen to the next wave, or finish at the last one — refused while the wave is unhealthy.
 
-    This is the "0 rollbacks" guard: any device that rolled itself back halts
-    the fleet here instead of letting a bad image reach everyone. `force=true`
-    is the deliberate operator override.
+    This is the "0 rollbacks" guard: any device that did not end up on the new version (its trial
+    rolled back, or the update failed) halts the fleet here instead of letting a bad image reach
+    everyone, and so does a device still trial-booting it. `force=true` is the deliberate operator
+    override. At the final wave `force=true` also finishes a rollout whose remaining bridges are
+    still queued (offline, or in meetings): until 2026-09-28 finishing then answered 200 and did
+    nothing, and the panel offered "Finish" only in exactly that case - so a rollout every bridge
+    had completed could not be finished, and blocked the next one.
     """
     ro = _scoped_rollout(db, rollout_id, actor)
     if ro.status != "active":
         raise HTTPException(409, "rollout is %s" % ro.status)
+    _sweep_expired(db)
     _sync_rollout(db, ro)
     view = _rollout_view(db, ro)
-    if view["rollbacks"] and not force:
-        raise HTTPException(409, "%d device(s) rolled back — halting; pass force=true to override"
-                            % view["rollbacks"])
+    if view["failed_devices"] and not force:
+        raise HTTPException(409, "%s did not update (%s) — halting; pass force=true to override" % (
+            _plural(len(view["failed_devices"]), "bridge"),
+            "; ".join("%s: %s" % (f["device"], f["reason"]) for f in view["failed_devices"])))
     if view["in_flight"] and not force:
-        raise HTTPException(409, "%d device(s) still updating" % view["in_flight"])
+        raise HTTPException(409, "%s still updating or trial-booting the new OS — wait for the verdict, "
+                                 "or pass force=true" % _plural(view["in_flight"], "bridge"))
     nxt = _next_stage(ro.stage_pct)
     if nxt is None:
-        # Already at the widest wave: finish once nothing is left outstanding.
-        if not view["queued"] and not view["in_flight"]:
-            ro.status = "completed"
-            ro.updated_at = utcnow()
-            db.commit()
-            _audit(db, actor, "rollout:complete", ro.version)
+        # Already at the widest wave: finish - at once when nothing is outstanding, and only on
+        # purpose (force) when some bridges are still queued. They keep the OS they run.
+        if (view["queued"] or view["in_flight"]) and not force:
+            waiting = (view["queued_offline"] + [w["device"] for w in view["queued_busy"]]
+                       + view["queued_ready"] + view["verifying_devices"])
+            raise HTTPException(409, "%s not updated yet (%s) — finish anyway with force=true; "
+                                     "they keep the OS they run" % (
+                                         _plural(view["queued"] + view["in_flight"], "bridge"),
+                                         ", ".join(waiting) or "still queued"))
+        ro.status = "completed"
+        ro.updated_at = utcnow()
+        db.commit()
+        _audit(db, actor, "rollout:complete", ro.version)
         done = _rollout_view(db, ro)
         done["dispatched_now"] = 0        # keep the response shape consistent
         return done
@@ -2560,19 +3046,70 @@ def advance_rollout(rollout_id: int, force: bool = False,
     return out
 
 
+# Which states each action may leave (2026-09-28). Any transition used to be accepted: "resume" on
+# an aborted or completed rollout made it active again - even beside another active rollout,
+# which create_rollout forbids - and both then sent `update` to the same bridges for different
+# versions, each staging over the other.
+_ROLLOUT_ACTIONS = {"pause": (("active",), "paused"),
+                    "resume": (("paused",), "active"),
+                    "abort": (("active", "paused"), "aborted")}
+
+
 @app.post("/admin/rollouts/{rollout_id}/{action}")
 def control_rollout(rollout_id: int, action: str, actor=Depends(auth.require_admin),
                     db: Session = Depends(get_db)):
     """pause | resume | abort. Abort stops further waves; it never un-does a
     device that already updated (that is what a new rollout is for)."""
-    if action not in ("pause", "resume", "abort"):
+    if action not in _ROLLOUT_ACTIONS:
         raise HTTPException(404, "unknown action")
     ro = _scoped_rollout(db, rollout_id, actor)
-    ro.status = {"pause": "paused", "resume": "active", "abort": "aborted"}[action]
+    frm, to = _ROLLOUT_ACTIONS[action]
+    if ro.status not in frm:
+        raise HTTPException(409, "rollout is %s — it cannot be %s" % (
+            ro.status, {"pause": "paused", "resume": "resumed", "abort": "aborted"}[action]))
+    if action == "resume":
+        other = db.scalar(select(Rollout).where(Rollout.org_id == ro.org_id, Rollout.status == "active",
+                                                Rollout.id != ro.id))
+        if other is not None:
+            raise HTTPException(409, "rollout #%d (%s) is active — finish or abort it before resuming "
+                                     "this one" % (other.id, other.version))
+    ro.status = to
     ro.updated_at = utcnow()
     db.commit()
     _audit(db, actor, "rollout:%s" % action, ro.version)
     return _rollout_view(db, ro)
+
+
+# Timers that keep command and rollout state true when nobody is looking (2026-09-28): expire the
+# commands that can no longer finish, and fold bridge reports into every rollout that still has a
+# bridge updating - including one paused or aborted mid-wave. Both used to happen only when the
+# panel or an API reader asked, so a staged bridge's trial window could not tell "waiting for a
+# meeting to end" from "silent", and expiry depended on a reader.
+HOUSEKEEPING_S = 30
+
+
+def _housekeeping_once():
+    from .db import SessionLocal
+    db = SessionLocal()
+    try:
+        _sweep_expired(db)
+        busy = select(RolloutTarget.rollout_id).where(RolloutTarget.status.in_(IN_FLIGHT_TARGET))
+        for ro in db.scalars(select(Rollout).where(Rollout.id.in_(busy))).all():
+            _sync_rollout(db, ro)
+    finally:
+        db.close()
+
+
+async def _housekeeping_loop(interval_s: int = HOUSEKEEPING_S):
+    import asyncio
+    import logging
+    log = logging.getLogger("housekeeping")
+    while True:
+        try:
+            await asyncio.to_thread(_housekeeping_once)
+        except Exception:                      # never let housekeeping kill the app
+            log.exception("command/rollout housekeeping failed; retrying next interval")
+        await asyncio.sleep(interval_s)
 
 
 # Mount the static panel LAST — after every @app route above — so its catch-all "/"

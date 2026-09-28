@@ -12,6 +12,12 @@ from .notifier import alert_title, _severity
 
 log = logging.getLogger("alerts")
 
+# What bridge-update.sh says when it refuses because a meeting is on (exit 8): "the meeting laptop
+# is attached", or "a presenter session is live" (also matched in the shorter "a presenter is live").
+# Nothing was installed. It is not an "OS update failed" alert, and main.py sends a rollout target
+# refused this way back to the queue instead of counting it as a failure (2026-09-28).
+REFUSED_WHILE_BUSY = re.compile(r"meeting laptop is attached|presenter (?:session )?is live", re.I)
+
 
 def is_online(dev: Device, now: dt.datetime | None = None) -> bool:
     if not dev.last_seen:
@@ -411,7 +417,11 @@ def device_alerts(dev: Device, db=None, now: dt.datetime | None = None, sticky=(
         ota_recent = (dt.datetime.now(dt.timezone.utc).timestamp() - float(ota.get("ts") or 0)) < 24 * 3600
     except (TypeError, ValueError):
         ota_recent = False
-    if ota.get("state") in ("failed", "rolled back") and ota_recent:
+    # A refusal because a meeting was on (laptop attached, presenter live) is not a failure: nothing
+    # was installed and the bridge did the right thing. It used to page the owner "OS update failed"
+    # for 24 h (2026-09-28).
+    refused = ota.get("state") == "failed" and REFUSED_WHILE_BUSY.search(str(ota.get("detail") or ""))
+    if ota.get("state") in ("failed", "rolled back") and ota_recent and not refused:
         # An update that failed before its manifest was read has no version: no double space.
         out.append({"kind": "os_update_failed",
                     "detail": "%s — %s" % (" ".join(str(x) for x in ("OS update", ota.get("version"), ota["state"]) if x),

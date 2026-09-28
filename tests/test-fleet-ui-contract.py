@@ -116,6 +116,16 @@ if 'confirm: confirmed' in PANEL:
 else:
     no("the panel confirms in-browser but never sends it — every destructive button would 400")
 
+print("\n  ---- a disruptive command queued for an offline bridge expires at both ends ----")
+# The panel tells the operator which commands expire if the bridge does not collect them within
+# 30 min (a reboot must not run days later, mid-meeting - 2026-09-28). Its list must be the fleet's.
+stale_ui, stale_be = jsset(PANEL, "GOES_STALE"), pyset(BE, "INTERRUPTS_MEETING")
+if stale_ui and stale_ui == stale_be:
+    ok("panel and fleet agree which queued commands go stale (%d commands)" % len(stale_be))
+else:
+    no("stale-command sets differ", "only in UI: %s | only in backend: %s"
+       % (sorted(stale_ui - stale_be), sorted(stale_be - stale_ui)))
+
 print("\n  ---- the operator must learn the OUTCOME, not just that it was queued ----")
 if "followCommand" in PANEL:
     ok("issued commands are followed to a terminal state")
