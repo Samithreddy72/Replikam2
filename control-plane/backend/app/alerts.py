@@ -86,8 +86,8 @@ _FIXES = {
         "Revert the most recent update (the usual cause), then reboot.",
         "Nothing installed recently? Collect diagnostics."]},
     "os_update_failed": {"command": None, "label": "What to do", "steps": [
-        "The bridge went back to its previous OS by itself and is running normally.",
-        "Read the reason above, fix the update, then retry it from the Updates page."]},
+        "The bridge is still running its previous OS: a failed or rolled-back update never replaces it.",
+        "Read the reason above. If a meeting was in progress, install again after it; otherwise fix the update, then retry it from the Updates page."]},
     "mesh_relayed": {"command": None, "label": "Get a direct connection", "steps": [
         "The venue network blocks a direct connection, so the session runs through a relay: expect extra delay.",
         "Try the presenter on another network (a phone hotspot usually works), or ask the venue to allow UDP."]},
@@ -285,9 +285,10 @@ def device_alerts(dev: Device, db=None) -> list[dict]:
     except (TypeError, ValueError):
         ota_recent = False
     if ota.get("state") in ("failed", "rolled back") and ota_recent:
+        # An update that failed before its manifest was read has no version: no double space.
         out.append({"kind": "os_update_failed",
-                    "detail": "OS update %s %s — %s" % (ota.get("version") or "", ota["state"],
-                                                          ota.get("detail") or "no detail")})
+                    "detail": "%s — %s" % (" ".join(str(x) for x in ("OS update", ota.get("version"), ota["state"]) if x),
+                                           ota.get("detail") or "no detail")})
     if D("streams").get("video") and D("mesh_path").get("via") == "relay":
         out.append({"kind": "mesh_relayed",
                     "detail": "the live session is relayed, not direct — expect extra delay"})

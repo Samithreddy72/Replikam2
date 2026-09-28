@@ -13,6 +13,8 @@
 #   health             timer, every 30 s: healthy-boot mark, crash-loop rollback, lifeline
 #                      guard, pending changes, status file
 #   quarantine <name> <why> / revert <name> / revert-all
+#   stamp <name>       record that the stored update was installed on the OS running now
+#   superseded <name>  exit 0 when the stored update was installed on a different OS
 #   status             one line per overridden / pending / quarantined file (fleet `running`)
 #
 # Why bind mounts: the root filesystem is read-only, and a bind-mounted file is what EVERY
@@ -35,6 +37,7 @@ UMOUNT="${BRIDGE_OVR_UMOUNT:-umount}"
 LIVE_CMD="${BRIDGE_OVR_LIVE_CMD:-}"        # tests: a command whose success means "session live"
 NOW_CMD="${BRIDGE_OVR_NOW_CMD:-date +%s}"  # tests: fixed clock
 MTIME_CMD="${BRIDGE_OVR_MTIME_CMD:-stat -c %Y}"  # tests: macOS stat differs
+IMAGE_VERSION="${BRIDGE_OVR_IMAGE_VERSION:-/etc/netbridge-image-version}"   # the running slot's own version
 BOOT_LIMIT=3                                # boots that never became healthy -> safe mode
 HEALTHY_AFTER_S=180                         # uptime + core services active = a healthy boot
 LIFELINE_QUIET_S=900                        # no fleet contact this long -> revert lifelines
@@ -59,6 +62,40 @@ verified(){ [ -f "$DIR/$1" ] && [ -f "$DIR/$1.sig" ] && [ -f "$PUBKEY" ] &&
 sha(){ sha256sum "$1" 2>/dev/null | cut -c1-12; }
 
 is_bound(){ awk -v t="$1" '$5==t {f=1} END {exit !f}' "$MOUNTINFO" 2>/dev/null; }
+
+# ---------------------------------------------------------------- which OS an update belongs to
+# An update is a replacement for ONE OS's built-in file (2026-09-28). /data survives an OS update
+# (A/B), so every stored update used to be put back on top of the NEW OS at its first boot: a
+# bridge-web.py hotfix for 2.2.0 kept running on 2.2.1 and silently undid 2.2.1's own changes, an
+# old bridge-update.sh ran the next OS update, and the trial boot was judged on that mix. Each
+# update now records the OS it was installed on (<name>.image), and on any other OS it stays on
+# /data unused - the new OS's built-in runs. Going back to the old OS (a rollback) uses it again;
+# deploying it again adopts it on the new OS. An update with no record was installed before this
+# existed, i.e. on an older OS. bridge-run.sh asks `superseded` too, so the four media scripts it
+# loads follow the same rule as the files bound here. Kept across OS updates on purpose:
+#   keys  a rotated owner SSH key must not come back as the old one after an OS update
+#   audio the voice/return pipeline and its drop-ins: the owner's standing rule is that the
+#         audio pipeline is not changed, so an OS update carries these exactly as it always did
+running_image(){ head -n1 "$IMAGE_VERSION" 2>/dev/null | tr -d '[:space:]'; }
+installed_on(){ head -n1 "$DIR/$1.image" 2>/dev/null | tr -d '[:space:]'; }
+carries_across_os(){
+  [ "$(field "$1" 2)" = keys ] && return 0
+  case "$1" in
+    bridge-feeder-audio.sh|bridge-return-audio.sh|dropin.bridge-feeder-audio|dropin.bridge-return-audio) return 0 ;;
+  esac
+  return 1
+}
+superseded(){   # the stored update was installed on another OS than the one running
+  local cur
+  carries_across_os "$1" && return 1
+  cur="$(running_image)"; [ -n "$cur" ] || return 1      # OS unknown: apply as before
+  [ "$(installed_on "$1")" != "$cur" ]                   # unrecorded = installed before 2026-09-28
+}
+stamp(){
+  local cur; cur="$(running_image)"
+  if [ -n "$cur" ]; then printf '%s\n' "$cur" > "$DIR/$1.image"; else rm -f "$DIR/$1.image"; fi
+  return 0
+}
 dropin_path(){ echo "$DROPIN_ROOT/$1.service.d/50-netbridge-override.conf"; }
 
 session_live(){
@@ -162,6 +199,7 @@ quarantine(){
   [ "$kind" = loader ] || unbind_one "$name"
   mv -f "$DIR/$name" "$q/$name.$ts" 2>/dev/null
   mv -f "$DIR/$name.sig" "$q/$name.sig.$ts" 2>/dev/null
+  rm -f "$DIR/$name.image"                                   # a restore stamps it afresh
   pending_clear "$name"
   printf '{"script":"%s","why":"%s","ts":%s}\n' "$name" "$why" "$ts" > "$DIR/.quarantined.json"
   log "QUARANTINED $name — $why; built-in restored"
@@ -176,8 +214,13 @@ quarantine(){
 revert(){
   local name="$1" kind
   kind="$(field "$name" 2)"
+  if superseded "$name"; then       # never in use on this OS: nothing to restart
+    rm -f "$DIR/$name" "$DIR/$name.sig" "$DIR/$name.image" "$DIR/.state/$name.starts"
+    pending_clear "$name"
+    echo "reverted $name (it was installed on another OS and not in use here)"; return 0
+  fi
   [ "$kind" = loader ] || unbind_one "$name"
-  rm -f "$DIR/$name" "$DIR/$name.sig" "$DIR/.state/$name.starts"
+  rm -f "$DIR/$name" "$DIR/$name.sig" "$DIR/$name.image" "$DIR/.state/$name.starts"
   pending_clear "$name"
   echo "reverted $name to the built-in version — $(policy "$name")"
 }
@@ -197,6 +240,10 @@ apply_all(){
   for name in $(names); do
     kind="$(field "$name" 2)"
     [ -f "$DIR/$name" ] || continue
+    if superseded "$name"; then
+      log "$name: installed on OS $(installed_on "$name" | grep . || echo 'unknown (before 2026-09-28)'), this is $(running_image) — the built-in runs"
+      continue
+    fi
     case "$kind" in
       bind|keys|dropin) bind_one "$name" && { n=$((n+1)); echo "$name $(sha "$DIR/$name")" >> "$RUN/booted"; } ;;
       loader) verified "$name" && echo "$name $(sha "$DIR/$name")" >> "$RUN/booted" ;;   # bridge-run.sh uses it
@@ -247,6 +294,7 @@ health(){
       if [ -e "$RUN/safe-mode" ]; then
         for name in $(names); do
           [ -f "$DIR/$name" ] || continue
+          superseded "$name" && continue          # not in use on this OS: not a suspect
           grep -qx "$name $(sha "$DIR/$name")" "$DIR/.known-good" 2>/dev/null ||
             quarantine "$name" "never part of a healthy boot, and 3 boots in a row failed while it was installed"
         done
@@ -259,6 +307,7 @@ health(){
   # 2. crash loops (bound/drop-in services; bridge-run.sh already guards the loader four)
   for name in $(names); do
     [ -f "$DIR/$name" ] || continue
+    superseded "$name" && continue            # not in place: its unit runs the built-in
     kind="$(field "$name" 2)"; apply="$(field "$name" 3)"
     case "$kind" in bind|dropin) ;; *) continue ;; esac
     case "$apply" in restart|lifeline|idle|camera|video) crash_check "$name" ;; esac
@@ -271,6 +320,7 @@ health(){
     if [ "$quiet" = 1 ]; then
       for name in $(names); do
         [ -f "$DIR/$name" ] || continue
+        superseded "$name" && continue
         case "$(field "$name" 3)" in agent|lifeline) ;; *) continue ;; esac
         age=$(( $(now) - $($MTIME_CMD "$DIR/$name" 2>/dev/null || echo 0) ))
         [ "$age" -ge "$LIFELINE_QUIET_S" ] && quarantine "$name" "no fleet contact for ${LIFELINE_QUIET_S}s after it was installed"
@@ -298,7 +348,9 @@ status_lines(){
     [ -f "$DIR/$name" ] || [ -f "$DIR/.pending/$name" ] || continue   # built-in: nothing to say
     state=""
     if [ -f "$DIR/$name" ]; then
-      if verified "$name"; then state="override sha256=$(sha "$DIR/$name")"; else state="override-UNVERIFIED (built-in runs)"; fi
+      if ! verified "$name"; then state="override-UNVERIFIED (built-in runs)"
+      elif superseded "$name"; then state="override sha256=$(sha "$DIR/$name") NOT IN USE (installed on OS $(installed_on "$name" | grep . || echo '?'); built-in runs)"
+      else state="override sha256=$(sha "$DIR/$name")"; fi
     fi
     p="$DIR/.pending/$name"; [ -f "$p" ] && state="${state:+$state; }PENDING: $(cat "$p")"
     [ -n "$state" ] && echo "$name $state"
@@ -313,9 +365,14 @@ write_status(){
       "$([ -e "$RUN/safe-mode" ] && echo true || echo false)" "$(cat "$DIR/.boot-attempts" 2>/dev/null || echo 0)"
     ls "$DIR/.pending" 2>/dev/null | awk 'BEGIN{s=""} {printf "%s\"%s\"", s, $0; s=","}'
     printf '],"active":['
-    local s="" name
-    for name in $(names); do [ -f "$DIR/$name" ] && verified "$name" && { printf '%s"%s"' "$s" "$name"; s=","; }; done
-    printf ']}\n'; } > "$RUN/status.json.tmp" && mv -f "$RUN/status.json.tmp" "$RUN/status.json"
+    local s="" name old=""
+    for name in $(names); do
+      [ -f "$DIR/$name" ] && verified "$name" || continue
+      if superseded "$name"; then old="$old${old:+,}\"$name\""; continue; fi
+      printf '%s"%s"' "$s" "$name"; s=","
+    done
+    # installed on another OS and not in use here (the panel shows them as such)
+    printf '],"superseded":[%s]}\n' "$old"; } > "$RUN/status.json.tmp" && mv -f "$RUN/status.json.tmp" "$RUN/status.json"
 }
 
 cmd="${1:-status}"; shift || true
@@ -326,9 +383,11 @@ case "$cmd" in
   policy)     row "${1:-}" >/dev/null || { echo "not updatable: ${1:-}" >&2; exit 64; }; policy "$1" "${2:-}" ;;
   quarantine) row "${1:-}" >/dev/null || exit 64; quarantine "$1" "${2:-manual}" ;;
   revert)     row "${1:-}" >/dev/null || { echo "not updatable: ${1:-}" >&2; exit 64; }; revert "$1" ;;
+  stamp)      row "${1:-}" >/dev/null || { echo "not updatable: ${1:-}" >&2; exit 64; }; stamp "$1" ;;
+  superseded) row "${1:-}" >/dev/null || exit 64; [ -f "$DIR/$1" ] && superseded "$1" ;;
   revert-all) for n in $(names); do [ -f "$DIR/$n" ] && revert "$n"; done; rm -rf "$DIR/.pending"; write_status ;;
   health)     health ;;
   status)     status_lines ;;
   row)        row "${1:-}" ;;
-  *) echo "usage: bridge-overrides.sh {apply-all|bind|unbind|policy|quarantine|revert|revert-all|health|status|row} [name]" >&2; exit 64 ;;
+  *) echo "usage: bridge-overrides.sh {apply-all|bind|unbind|policy|quarantine|revert|revert-all|stamp|superseded|health|status|row} [name]" >&2; exit 64 ;;
 esac

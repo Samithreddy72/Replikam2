@@ -33,7 +33,11 @@ SYSTEMD_RUN = os.environ.get("BRIDGE_AGENT_SYSTEMD_RUN", "/usr/bin/systemd-run")
 # TimeoutStartSec, taking its children with it — so a deploy, an update or a media restart
 # started inline could be killed half-way and its result was lost ("D2", 2026-08-08). These run
 # in their own systemd job (value = max run time, seconds) and are reported on a later tick.
-DETACHED = {"deploy-script": 900, "revert-script": 600, "unquarantine": 600, "update": 3600,
+# "update" is 3 h (2026-09-28): one hour had to cover a 1.1 GB download over venue Wi-Fi AND the
+# slot write, and systemd killed slow updates half-way through writing the slot. It also covers
+# waiting for a live meeting to end before the heavy write. bridge-update.sh BUDGET_S matches it,
+# and the fleet's TIMEOUT_S["update"] is this plus time to report.
+DETACHED = {"deploy-script": 900, "revert-script": 600, "unquarantine": 600, "update": 10800,
             "diagnose": 900, "restart": 600, "start": 600, "stop": 300, "profile": 600,
             "reset-clock": 300, "gadget-tune": 120, "gadget-tune-clear": 120,
             "jitter-diagnose": 300, "jitter-fix": 600, "jitter-reset": 600,
@@ -467,7 +471,9 @@ def collect_results(base, token):
             except OSError:
                 out = ""
             status = "done" if rc == 0 else "failed"
-        elif now - float(meta.get("t", now)) > 2 * 3600:
+        elif now - float(meta.get("t", now)) > max(2 * 3600, DETACHED.get(meta.get("type"), 0) + 600):
+            # Never before the job's own time limit is up: a 3-hour OS update still running at
+            # 2 h is not lost (2026-09-28).
             status, out = "failed", "interrupted: the background job never finished (reboot or power loss?)"
         else:
             continue                      # still running

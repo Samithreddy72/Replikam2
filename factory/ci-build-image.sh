@@ -325,6 +325,11 @@ cat > /etc/bridge/release.json <<RELEOF
 }
 RELEOF
 chmod 0644 /etc/bridge/release.json
+# ...and where it can be READ. /etc/bridge is a bind mount from /data at runtime, so the copy
+# above is hidden on every running bridge (and /data is shared by both A/B slots). The slot's own
+# root carries this one; bridge-web reads it first (2026-09-28).
+cp /etc/bridge/release.json /etc/netbridge-release.json
+chmod 0644 /etc/netbridge-release.json
 
 # ---------------- Verify no obvious secrets survived ----------------
 log "secret sweep"

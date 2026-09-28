@@ -64,7 +64,9 @@ export BRIDGE_OVR_CATALOG="$T/updatable.conf" BRIDGE_OVR_DIR="$T/data/overrides"
        BRIDGE_OVR_RUN="$T/run" BRIDGE_OVR_DROPIN_ROOT="$T/dropins" BRIDGE_OVR_MOUNTINFO="$T/mountinfo" \
        BRIDGE_OVR_UDC_GLOB="$T/udc" BRIDGE_OVR_UPTIME="$T/uptime" BRIDGE_OVR_AGENT_OK="$T/agent-ok" \
        BRIDGE_OVR_SYSTEMCTL="$T/bin/systemctl" BRIDGE_OVR_MOUNT="$T/bin/mount" BRIDGE_OVR_UMOUNT="$T/bin/umount" \
-       BRIDGE_OVR_LIVE_CMD="[ -s $T/live ]" BRIDGE_OVR_MTIME_CMD="stat -f %m"
+       BRIDGE_OVR_LIVE_CMD="[ -s $T/live ]" BRIDGE_OVR_MTIME_CMD="stat -f %m" \
+       BRIDGE_OVR_IMAGE_VERSION="$T/image-version"
+echo "2.2.0-aaaaaaa" > "$T/image-version"   # the OS this bridge runs (/etc/netbridge-image-version)
 export BRIDGE_DEPLOY_DIR="$T/data/overrides" BRIDGE_DEPLOY_PUBKEY="$T/pub.pem" \
        BRIDGE_DEPLOY_OVERRIDES="$REPO/pi/scripts/bridge-overrides.sh" BRIDGE_DEPLOY_BAKED_DIR="$T/root/usr/local/bin" \
        BRIDGE_DEPLOY_FETCH="$T/fetch.sh" BRIDGE_DEPLOY_SYSTEMCTL="$T/bin/systemctl" BRIDGE_DEPLOY_SETTLE_S=0
@@ -222,6 +224,55 @@ out="$(bash "$DEPLOY" --running)"
 echo "$out" | head -4 | grep -c -E '^bridge-(return-audio|feeder-audio|feeder-net|uvcd)\.sh ' | grep -qx 4 \
   && echo "$out" | grep -q '^bridge-web.py override sha256=' && ok "'running' = the 4 media lines + every other overridden file" || no "running output: $out"
 [ "$(echo "$out" | wc -c)" -lt 2000 ] && ok "'running' fits the fleet's 2000-character output" || no "running output too long for the fleet"
+
+# ===================== 13. an OS update: updates made for the old OS are not used on the new one =====================
+# (2026-09-28) /data survives an A/B OS update. Everything above was installed on 2.2.0; the
+# bridge now boots 2.2.1. The old bridge-web.py, video feeder, drop-ins... must not run on top of
+# it, while the owner's SSH key and the audio pipeline's updates carry across as they always have.
+# The REAL media loader runs here, asking the REAL bridge-overrides.sh (both sandboxed).
+sed -e "s#^BAKED=.*#BAKED=\"$T/root/usr/local/bin/\$NAME\"#" -e "s#^DIR=.*#DIR=\"$D\"#" \
+    -e "s#^PUBKEY=\"/etc.*#PUBKEY=\"$T/pub.pem\"#" -e "s#^STATE=.*#STATE=\"$D/.state\"#" \
+    "$REPO/pi/scripts/bridge-run.sh" > "$T/loader.sh"
+loader(){ BRIDGE_RUN_SAFE_FLAG="$T/nope" BRIDGE_RUN_OVERRIDES="$OVR" BRIDGE_RUN_TRIP_N=99 bash "$T/loader.sh" "$1" 2>/dev/null; }
+publish bridge-idle-frame.sh "$T/evil.sh"; deploy bridge-idle-frame.sh          # one more, on 2.2.0
+[ "$(cat "$D/bridge-web.py.image" 2>/dev/null)" = "2.2.0-aaaaaaa" ] && ok "a deploy records the OS it was installed on" || no "no OS recorded for bridge-web.py"
+[ "$(loader bridge-feeder-net.sh)" = FEEDER-V2 ] && ok "on the OS it was installed on, the loader runs the video feeder update" \
+  || no "loader on 2.2.0: $(loader bridge-feeder-net.sh)"
+echo "2.2.1-bbbbbbb" > "$T/image-version"                                      # the trial boot of 2.2.1
+: > "$T/mountinfo"; rm -rf "$T/dropins"/*; echo 0 > "$D/.boot-attempts"; rm -f "$T/run/safe-mode"   # /run is empty at boot
+bash "$OVR" apply-all >/dev/null 2>&1
+! bound "$T/root/usr/local/bin/bridge-web.py" && ! bound "$T/root/home/pi/uvc-raw-setup.sh" \
+  && [ ! -e "$T/dropins/bridge-web.service.d/50-netbridge-override.conf" ] \
+  && ok "first boot of the new OS: updates and drop-ins installed on the old OS are NOT put in place (its built-ins run)" \
+  || no "old-OS updates were put in place over the new OS"
+[ "$(loader bridge-feeder-net.sh)" = BUILTIN ] && ok "the media loader runs the new OS's own video feeder, not the old OS's update" \
+  || no "loader ran the old-OS feeder on the new OS: $(loader bridge-feeder-net.sh)"
+[ "$(loader bridge-feeder-audio.sh)" = VOICE-V2 ] && ! grep -q '"superseded":\[[^]]*"bridge-feeder-audio.sh"' "$T/run/status.json" \
+  && ok "the voice pipeline's update carries across exactly as before (owner's rule: audio unchanged)" \
+  || no "an audio update changed at the OS update: $(loader bridge-feeder-audio.sh)"
+bound "$T/root/etc/netbridge/owner_ssh_authorized_keys" && ok "a rotated owner SSH key still applies (an OS update must not bring the old key back)" \
+  || no "owner key rotation lost at the OS update"
+grep -q '"superseded":\[[^]]*"bridge-web.py"' "$T/run/status.json" && ! grep -q '"active":\[[^]]*"bridge-web.py"' "$T/run/status.json" \
+  && ok "telemetry lists it as not in use (superseded), not as active" || no "status.json: $(cat "$T/run/status.json")"
+out="$(bash "$DEPLOY" --running)"
+echo "$out" | grep '^bridge-web.py override sha256=.* NOT IN USE' >/dev/null && echo "$out" | grep '^bridge-feeder-net.sh .*NOT IN USE' >/dev/null \
+  && [ "$(echo "$out" | wc -c)" -lt 2000 ] && ok "'running' says the old-OS files are not in use (and still fits the fleet's 2000 characters)" || no "running: $out"
+echo failed > "$T/state/bridge-web.active"; echo 5000.00 > "$T/uptime"; bash "$OVR" health >/dev/null 2>&1; rm -f "$T/state/bridge-web.active"
+[ -e "$D/bridge-web.py" ] && ok "a failing unit does not quarantine an update that is not even in use" || no "unused update quarantined"
+reset_log; bash "$DEPLOY" --revert bridge-idle-frame.sh >"$T/out" 2>&1
+[ ! -e "$D/bridge-idle-frame.sh" ] && ! called "restart bridge-idle-frame" && ok "reverting an unused old-OS update restarts nothing" || no "revert of unused update: $(cat "$T/out")"
+publish bridge-web.py "$T/web.py"; reset_log; deploy bridge-web.py
+bound "$T/root/usr/local/bin/bridge-web.py" && [ "$(cat "$D/bridge-web.py.image")" = "2.2.1-bbbbbbb" ] \
+  && ok "deploying it again adopts it on the new OS (bound, recorded as 2.2.1)" || no "re-deploy on the new OS: rc=$(rc) $(tail -2 "$T/out")"
+publish bridge-feeder-net.sh "$T/feeder.sh"; deploy bridge-feeder-net.sh
+[ "$(loader bridge-feeder-net.sh)" = FEEDER-V2 ] && ok "...and a media script deployed again runs through the loader at once" \
+  || no "re-deployed feeder not run by the loader: $(loader bridge-feeder-net.sh)"
+printf '#!/bin/bash\necho OLD\n' > "$T/old.sh"; publish bridge-diagnose.sh "$T/old.sh"; deploy bridge-diagnose.sh; rm -f "$D/bridge-diagnose.sh.image"
+: > "$T/mountinfo"; bash "$OVR" apply-all >/dev/null 2>&1
+! bound "$T/root/usr/local/bin/bridge-diagnose.sh" && ok "an update with no OS record (installed before this change) is not put over a new OS" || no "unrecorded update bound"
+echo "2.2.0-aaaaaaa" > "$T/image-version"; : > "$T/mountinfo"; bash "$OVR" apply-all >/dev/null 2>&1
+bound "$T/root/home/pi/uvc-raw-setup.sh" && ! bound "$T/root/usr/local/bin/bridge-web.py" \
+  && ok "back on 2.2.0 (a rollback): its own updates are used again; the one adopted on 2.2.1 is not" || no "rollback: wrong set bound"
 
 echo
 echo "  $pass passed, $fail failed"

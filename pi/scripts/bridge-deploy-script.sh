@@ -72,6 +72,7 @@ running(){
   for name in bridge-return-audio.sh bridge-feeder-audio.sh bridge-feeder-net.sh bridge-uvcd.sh; do
     if [ -f "$DIR/$name" ] && openssl dgst -sha256 -verify "$PUBKEY" -signature "$DIR/$name.sig" "$DIR/$name" >/dev/null 2>&1; then
       line="$name override sha256=$(sha256sum "$DIR/$name" | cut -c1-12)"
+      "$OVR" superseded "$name" 2>/dev/null && line="$line NOT IN USE (installed on another OS; baked-in runs)"
     elif [ -f "$DIR/$name" ]; then
       line="$name override-UNVERIFIED (baked-in runs)"
     else
@@ -113,6 +114,7 @@ case "${1:-}" in
       kind="$(row "$base" | cut -d' ' -f2)"
       mode=0755; case "$kind" in keys|dropin) mode=0644 ;; esac
       install -m "$mode" "$f" "$DIR/$base" && cp -f "$sig" "$DIR/$base.sig" || continue
+      "$OVR" stamp "$base" >/dev/null 2>&1        # restored on purpose on THIS OS
       sync                                        # on the card before anything restarts
       rm -f "$DIR/.state/$base.starts" "$f" "$sig"
       case "$kind" in bind|keys|dropin) "$OVR" bind "$base" || { log "$base: could not be put in place"; continue; } ;; esac
@@ -150,6 +152,9 @@ log "  $KIND check OK"
 MODE=0755; case "$KIND" in keys|dropin) MODE=0644 ;; esac
 install -m "$MODE" "$STAGE/$NAME"     "$DIR/$NAME"
 install -m 0644    "$STAGE/$NAME.sig" "$DIR/$NAME.sig"
+# Installed for the OS running now: after an OS update it stays unused until deployed again
+# (bridge-overrides.sh, "which OS an update belongs to").
+"$OVR" stamp "$NAME" >/dev/null 2>&1
 rm -f "$DIR/.state/$NAME.starts" "$DIR/.quarantined.json"   # a fresh trial for the new version
 sync                                   # on the card BEFORE anything restarts: a reset seconds
                                        # later once left 0-byte files behind (2026-09-24)

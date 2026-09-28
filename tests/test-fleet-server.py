@@ -147,9 +147,18 @@ try:
     check(view[ids[2]]["state"] == "degraded", "NB-007 is DEGRADED (online with alerts)")
     for k in ("usb_misses", "disk_low", "update_rolled_back", "safe_mode", "os_update_failed", "pin_not_set"):
         check(k in kinds, "alert: %s" % k, kinds)
+    det = [a["detail"] for a in view[ids[2]]["alerts"] if a["kind"] == "os_update_failed"]
+    check(det == ["OS update 2.1.1-abc1234 rolled back — unhealthy"], "OS update alert text: version, state, reason", det)
     check(any("BLOCKED" in a["detail"] for a in view[ids[2]]["alerts"] if a["kind"] == "pin_not_set"),
           "no-PIN alert says go-live is blocked on the new image")
     check("mesh_relayed" in {a["kind"] for a in view[ids[1]]["alerts"]}, "alert: a live session is relayed")
+    # An update refused before its manifest was read has no version (2026-09-28: "OS update  failed").
+    tel(ids[2], ota={"state": "failed", "version": "", "ts": time.time(),
+                     "detail": "the meeting laptop is attached — try again after the meeting"})
+    det = [a["detail"] for a in {d["id"]: d for d in c.get("/admin/devices", headers=A).json()}[ids[2]]["alerts"]
+           if a["kind"] == "os_update_failed"]
+    check(det == ["OS update failed — the meeting laptop is attached — try again after the meeting"],
+          "an OS update that failed before it had a version reads cleanly (no double space)", det)
     old = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10)
     db.get(Device, ids[0]).last_seen = old; db.commit()
     view = {d["id"]: d for d in c.get("/admin/devices", headers=A).json()}
@@ -197,18 +206,39 @@ try:
              for a in {d["id"]: d for d in c.get("/admin/devices", headers=A).json()}[ids[2]]["alerts"]}
     check(fixes.get("pin_lockout") == "clear-lockout" and fixes.get("update_rolled_back") == "unquarantine",
           "PIN-lockout and rolled-back-update alerts carry their fix buttons", fixes)
+    # An admin is already installing on two bridges ("Install on…") when the rollout starts
+    # (2026-09-28): the same version on NB-001, another version on NB-002.
+    pre_same = c.post("/admin/devices/%s/commands" % ids[0], headers=A,
+                      json={"type": "update", "args": {"version": "2.1.1-abc1234"}, "confirm": True}).json().get("id")
+    pre_other = c.post("/admin/devices/%s/commands" % ids[1], headers=A,
+                       json={"type": "update", "args": {"version": "2.1.0-fff0000"}, "confirm": True}).json().get("id")
     r = c.post("/admin/rollouts", headers=A, json={"version": "2.1.1-abc1234", "source": BASE + "/payloads/ota/2.1.1-abc1234",
                                                    "stage_pct": 100})
     check(r.status_code == 200, "a rollout can be started", r.text)
     ro_id = r.json().get("id")
+    from app.models import Command as _Cmd0
+    db.expire_all()
+    per_dev = {i: [u.id for u in db.query(_Cmd0).filter(_Cmd0.type == "update", _Cmd0.device_id == i).all()] for i in ids[:3]}
+    rov = {x["device_id"]: x for x in c.get("/admin/rollouts/%s" % ro_id, headers=A).json().get("devices", [])}
+    check(per_dev[ids[0]] == [pre_same] and rov.get(ids[0], {}).get("command_id") == pre_same,
+          "a bridge already installing the same version is not sent a second update: the rollout adopts it", (per_dev, rov.get(ids[0])))
+    check(per_dev[ids[1]] == [pre_other] and rov.get(ids[1], {}).get("status") == "queued",
+          "a bridge installing another version is left to finish first (stays queued, no second update)", (per_dev, rov.get(ids[1])))
+    check(len(per_dev[ids[2]]) == 1 and rov.get(ids[2], {}).get("status") == "dispatched", "an idle bridge gets its update", per_dev)
     check(r.status_code == 200 and "BRIDGE-0004" in r.json().get("excluded", []),
           "the rollout leaves out the unclaimed bridge and names it (it cannot be updated remotely)", r.json().get("excluded"))
     from app.models import Command as _Cmd, RolloutTarget as _RT
     db.expire_all()
     ups = db.query(_Cmd).filter(_Cmd.type == "update").all()
-    check(ups and all(u.timeout_s == 3600 for u in ups),
-          "rollout OS updates get the 1-hour timeout, not 120 s (they used to expire mid-download)",
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("bridge_agent", ROOT / "pi/scripts/bridge-agent.py")
+    _agent = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_agent)
+    check(ups and all(u.timeout_s == M.TIMEOUT_S["update"] for u in ups) and M.TIMEOUT_S["update"] > 120,
+          "rollout OS updates get the OS-update timeout, not 120 s (they used to expire mid-download)",
           [u.timeout_s for u in ups])
+    check(M.TIMEOUT_S["update"] >= _agent.DETACHED["update"] + 300,
+          "the fleet waits longer for an update than the bridge lets it run, plus time to report (%d vs %d)"
+          % (M.TIMEOUT_S["update"], _agent.DETACHED["update"]))
     if ups:
         u = ups[0]; u.status = "expired"; db.commit()
         c.get("/admin/rollouts/%s" % ro_id, headers=A)

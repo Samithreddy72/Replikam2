@@ -56,8 +56,19 @@ fi
 # Version stamp. /etc/bridge is bind-mounted from /data/etc-bridge, so the copy the image
 # build writes into the rootfs is invisible at runtime; build-disk-image.sh seeds the bind
 # source instead. Only fill in a fallback if that seed is somehow absent.
+#
+# /data is shared by both A/B slots, so that seed is the version the card was FLASHED with and
+# an OS update never changed it: after 2.2.0 -> 2.2.1 everything reading it still said 2.2.0
+# (2026-09-28). The running slot's own stamp (/etc/netbridge-image-version, written at flash and
+# by bridge-update.sh) wins at every boot, after a commit and after a rollback alike.
+SLOT_VERSION="$(head -n1 /etc/netbridge-image-version 2>/dev/null | tr -d '[:space:]')"
 if [ -n "${BRIDGE_VERSION:-}" ]; then
   echo "$BRIDGE_VERSION" >/etc/bridge/version 2>/dev/null || true
+elif [ -n "$SLOT_VERSION" ]; then
+  if [ "$(cat /etc/bridge/version 2>/dev/null)" != "$SLOT_VERSION" ]; then
+    echo "$SLOT_VERSION" >/etc/bridge/version 2>/dev/null || true
+    log "version -> $SLOT_VERSION (the running slot)"
+  fi
 elif [ ! -s /etc/bridge/version ]; then
   echo dev >/etc/bridge/version 2>/dev/null || true
   log "version: no seed on /data and none provisioned -> dev"
