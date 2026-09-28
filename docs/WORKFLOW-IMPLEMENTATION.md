@@ -150,3 +150,7 @@ Sign-in now normalizes bare HTTPS Fleet addresses and reports failed requests in
 ### Fleet claim refresh, maintenance descriptions and presenter emails
 
 Claiming a device refreshes its drawer actions and PIN fix without reloading. A browser regression verifies those transitions and explicitly historical offline readings. WAN profile and mesh re-key descriptions now describe their actual effect and interruption risk. Presenter emails no longer send their one-use code into the admin panel; an executed backend test verifies role-specific destinations and identical unknown-account responses. Full CI is required for this combined revision.
+
+### Diagnostics delivery and historical reconciliation
+
+Diagnostic bundles are uploaded before command success becomes visible. Upload failure produces a failed command with explicit retry guidance; an executed collector test verifies event order and both outcomes. Existing rollout and alert-delivery regressions confirm B237 and B261 were already repaired. Fresh power evidence and the owner's GPIO-plus-USB wiring description are recorded in POWER-ACCEPTANCE.md; the electrical fault remains active.

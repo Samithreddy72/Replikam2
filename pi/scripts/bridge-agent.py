@@ -399,19 +399,28 @@ def upload_latest_bundle(base, token):
     try:
         bundles = sorted(glob.glob("/home/pi/diagnostics/bundle-*.tgz"))
         if not bundles:
-            return
+            return False
         path = bundles[-1]
         with open(path, "rb") as f:
             data = f.read()
         if len(data) > 5 * 1024 * 1024:
             syslog("bundle %s too large to upload (%d bytes)" % (path, len(data)))
-            return
+            return False
         http("POST", base + "/v1/diagnostics", token=token,
              body={"filename": os.path.basename(path),
                    "data_b64": base64.b64encode(data).decode()})
         syslog("uploaded diagnostics %s (%d bytes)" % (os.path.basename(path), len(data)))
+        return True
     except Exception as e:
         syslog("bundle upload failed: %s" % e)
+        return False
+
+
+def finish_diagnostics(base, token, command_type, status, output):
+    if command_type == "diagnose" and status == "done":
+        if not upload_latest_bundle(base, token):
+            return "failed", output + "\nDiagnostics collected locally, but upload failed. Collect again when Fleet is reachable."
+    return status, output
 
 
 def _cid_ok(cid):
@@ -511,7 +520,8 @@ def collect_results(base, token):
             meta = {}
         if os.path.exists(rc_path):
             try:
-                rc = int(open(rc_path).read().strip() or "1")
+                with open(rc_path) as result_code:
+                    rc = int(result_code.read().strip() or "1")
             except (OSError, ValueError):
                 rc = 1
             try:
@@ -532,6 +542,7 @@ def collect_results(base, token):
             status, out = "failed", "interrupted: the background job never finished (reboot or power loss?)"
         else:
             continue                      # still running
+        status, out = finish_diagnostics(base, token, meta.get("type"), status, out)
         try:
             http("POST", base + "/v1/commands/%s/result" % cid, token=token,
                  body={"status": status, "output": out})
@@ -541,8 +552,6 @@ def collect_results(base, token):
         except urllib.error.URLError:
             continue
         _forget(cid)
-        if meta.get("type") == "diagnose" and status == "done":
-            upload_latest_bundle(base, token)
 
 
 def mark_ok():
@@ -655,15 +664,12 @@ def main():
         cid, status, output = run_command(c)
         if status is None:
             continue                      # running in the background; reported by collect_results
+        status, output = finish_diagnostics(base, token, c.get("type"), status, output)
         try:
             http("POST", base + "/v1/commands/%s/result" % cid, token=token,
                  body={"status": status, "output": output})
         except urllib.error.URLError:
             pass
-        # A completed diagnose leaves a bundle on disk; ship it to the control
-        # plane so the panel's "Download bundle" works without SSH. Best-effort.
-        if c.get("type") == "diagnose" and status == "done":
-            upload_latest_bundle(base, token)
     # Apply one-time provisioning (a mesh key) LAST (2026-09-28). It used to run before the
     # command pull, so a `tailscale up` stuck on an unreachable tailnet got the tick killed by
     # systemd before commands were fetched: telemetry said "online" while logs, diagnose and

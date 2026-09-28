@@ -565,18 +565,18 @@
       "severity": "medium",
       "title": "Rollout can never finish: a bridge that was offline during its wave is never dispatched once it returns; the panel hides 'Catch up' exactly when it would help",
       "file": "control-plane/panel-dist/index.html",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "already implemented; full CI passed at 78ab473",
+      "evidence": "tests/test-fleet-rollouts.py",
+      "note": "Existing regression covers busy-to-ready transitions and catch_up remaining available while queued work exists. Explicit catch-up dispatch is the supported admin workflow."
     },
     {
       "id": "B242",
       "severity": "medium",
       "title": "A fresh diagnostics bundle does not appear after 'SUCCEEDED': the agent reports the result before uploading, and the panel reloads the list only once",
       "file": "control-plane/panel-dist/index.html",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; executed result-order regression passed, full CI pending",
+      "evidence": "tests/test-diagnostics-publication.py",
+      "note": "Detached and immediate diagnose upload before success is reported; failed upload is an explicit failed command with retry guidance."
     },
     {
       "id": "B251",
@@ -646,9 +646,9 @@
       "severity": "medium",
       "title": "Alert emails and webhooks use raw kind ids and no fleet number, and the test alert arrives as CRITICAL 'offline'",
       "file": "control-plane/backend/app/notifier.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "already implemented; full CI passed at 78ab473",
+      "evidence": "tests/test-fleet-alert-pipeline.py",
+      "note": "Existing executed tests cover human alert titles, fleet-number subjects and informational test alerts; historical finding already repaired before this continuation."
     },
     {
       "id": "B268",

@@ -8,6 +8,16 @@ The 28 September audit recorded NB-002 at approximately 41–42 °C, a `0x50005`
 
 Claude's historical notes describe a reset four seconds after go-live and an association between brownout sampling rates and audio quality across eight labelled sessions. Treat this as supporting evidence, not proof that every audio problem is electrical. The current physical wiring and supply have not been inspected in this pass.
 
+## Confirmed current wiring and latest observation
+
+On 29 September the owner confirmed simultaneous GPIO-header power and the laptop USB connection. The supply rating, exact header connection, wire/connector resistance and USB reverse-current isolation are still unknown. Do not assume either that isolation exists or that backfeeding is occurring without inspecting the hardware.
+
+At 2026-09-28 20:49:05 UTC (29 September 02:19:05 IST), the live bridge reported `0x50005`, active undervoltage in 495/500 samples (99%), 40.9 °C and zero feeder/camera/return-audio service restarts. Video, voice and return streams reported active. The presenter helper reported running. A direct read-only SSH attempt timed out, so the running CPU ceiling/governor were not independently verified in this check.
+
+Raspberry Pi's [official HAT design guide](https://github.com/raspberrypi/hats/blob/master/designguide.md#back-powering-the-pi-via-the-gpio-header) specifies regulated 5 V ±5% at the header and notes that Pi 4B has no input reverse-current blocking diode. GPIO power plus USB therefore needs a verified power-path design appropriate to the actual supply and host. A technician should check the supply output and board input under the same load, connection resistance, polarity and reverse-current protection. A purpose-designed gadget-compatible power/data arrangement must preserve USB data and required attach detection; blindly cutting USB conductors is not a qualified solution.
+
+The candidate preserves the tested 900 MHz ceiling. Lowering CPU speed, enlarging jitter buffers or hiding throttle warnings cannot certify the supply. Do not raise GPIO voltage beyond the specified range, disable undervoltage protection, or add an unqualified capacitor as the repair. These measurements call for physical power-path correction before release acceptance.
+
 ## Priorities
 
 1. **High reward: identify voltage drop in the existing power path.** In an idle maintenance window, document where power enters the Pi, the source's actual 5 V capability, cable length/gauge, connectors, and whether laptop USB VBUS is connected alongside another supply. Have a competent technician measure voltage at the board under idle, go-live and sustained full media load. Short transients may need an oscilloscope; a normal multimeter reading does not rule them out. Repair loose/high-resistance connections and test a short, known-good data/power cable. Do not join two supplies with a passive Y cable or improvise GPIO/USB backfeeding.
