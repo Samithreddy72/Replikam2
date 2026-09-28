@@ -983,7 +983,14 @@ def list_payloads(actor=Depends(auth.require_admin)):
 def list_ota_payloads(actor=Depends(auth.require_admin)):
     """Whole-OS versions a bridge can be updated to (bridge-update.sh --version <v> fetches
     /payloads/ota/<v>/manifest.txt + .sig + the image it names). Published by
-    tools/publish-ota.sh; the device verifies the signed manifest itself."""
+    tools/publish-ota.sh; the device verifies the signed manifest itself.
+
+    Lists only versions a bridge can actually install (2026-09-28). publish-ota.sh used to copy
+    straight into ota/<v>/, so for the minutes a 1.1 GB copy took the panel offered
+    "Install on..." for a version whose image was missing or half written, and a bridge that
+    fetched it failed on the hash. publish-ota.sh now stages in ota/.incoming-<v>/ and renames
+    when complete; this is the second line: skip hidden (staging) directories, a missing or
+    short image, and a manifest whose version or image name bridge-update.sh would refuse."""
     root = os.path.join(PAYLOAD_DIR, "ota")
     out = []
     try:
@@ -991,6 +998,8 @@ def list_ota_payloads(actor=Depends(auth.require_admin)):
     except FileNotFoundError:
         return out
     for v in versions:
+        if v.startswith("."):
+            continue                      # .incoming-<v> / .old-<v>: mid-publish or mid-removal
         mf = os.path.join(root, v, "manifest.txt")
         if not os.path.isfile(mf):
             continue
@@ -1000,9 +1009,21 @@ def list_ota_payloads(actor=Depends(auth.require_admin)):
                 if "=" in line:
                     k, _, val = line.strip().partition("=")
                     kv[k] = val
-        img = os.path.join(root, v, kv.get("image", ""))
-        out.append({"version": kv.get("version", v), "image": kv.get("image"),
-                    "bytes": os.path.getsize(img) if kv.get("image") and os.path.isfile(img) else None,
+        image = kv.get("image") or ""
+        # bridge-update.sh fetches <fleet>/payloads/ota/<v>/ and refuses a manifest that is
+        # incomplete, for another version, or names an image with a path in it - offering any of
+        # those is offering a failure.
+        if (kv.get("version") != v or not kv.get("sha256") or not image
+                or "/" in image or image.startswith(".")):
+            continue
+        img = os.path.join(root, v, image)
+        if not os.path.isfile(img):
+            continue
+        size = os.path.getsize(img)
+        want = kv.get("size", "")
+        if want.isdigit() and int(want) != size:
+            continue                      # still arriving, or truncated
+        out.append({"version": v, "image": image, "bytes": size,
                     "signed": os.path.exists(mf + ".sig"), "built": kv.get("built")})
     return out
 

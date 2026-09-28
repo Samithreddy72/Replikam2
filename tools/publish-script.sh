@@ -22,7 +22,10 @@
 set -uo pipefail
 SRC="" NAME=""
 while [ $# -gt 0 ]; do case "$1" in
-  --name) NAME="${2:-}"; shift 2 ;;
+  # A --name with nothing after it used to spin forever: `shift 2` fails with one word left, so
+  # the loop never moved on (2026-09-28).
+  --name) [ -n "${2:-}" ] || { echo "usage: publish-script.sh <file> [--name <catalog-name>]" >&2; exit 64; }
+          NAME="$2"; shift 2 ;;
   -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
   *) SRC="$1"; shift ;;
 esac; done
@@ -56,7 +59,11 @@ case "$KIND" in
   *)
     first="$(head -1 "$SRC")"
     case "$first" in
-      '#!'*python*) python3 -c 'import py_compile,sys; py_compile.compile(sys.argv[1], cfile="/dev/null", doraise=True)' "$SRC" \
+      # Compile in memory, write nothing. This used py_compile with cfile=/dev/null, which raises
+      # FileExistsError for ANY input (/dev/null is not a regular file) before it compiles a
+      # line, so every Python file in the catalog was refused as "does not compile" and
+      # `nb deploy <bridge> x.py` could never work (2026-09-28).
+      '#!'*python*) python3 -c 'import sys; compile(open(sys.argv[1], "rb").read(), sys.argv[1], "exec")' "$SRC" \
                       || { echo "❌ refusing to publish Python that does not compile" >&2; exit 3; } ;;
       '#!'*bash*|'#!'*/sh*) bash -n "$SRC" || { echo "❌ refusing to publish a script that fails syntax check" >&2; exit 3; } ;;
       *) echo "❌ $NAME must start with a #!/bin/bash or python3 line" >&2; exit 3 ;;
