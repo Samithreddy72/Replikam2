@@ -236,6 +236,21 @@ def _note_mesh_address(dev, ip, now) -> None:
         dev.mesh_lost_at = now
 
 
+def _key_expiry(minted) -> str:
+    """When a key the fleet minted stops working (ISO, UTC). Tailscale reports it; when it does not,
+    assume the lifetime the fleet asked for (TS_KEY_TTL_S)."""
+    exp = minted.get("expires") if isinstance(minted, dict) else None
+    return str(exp) if exp else (utcnow() + dt.timedelta(seconds=settings.ts_key_ttl_s)).isoformat()
+
+
+def _parse_iso(s):
+    try:
+        t = dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)
+
+
 def _mesh_heal_due(dev, now) -> bool:
     """Should /v1/provision mint this bridge a new mesh key right now? See MESH_HEAL_AFTER_S."""
     if LAN_ONLY or not dev.claimed_at or dev.tailscale_ip:
@@ -638,6 +653,30 @@ def pull_provision(dev: Device = Depends(auth.require_device), db: Session = Dep
     now = utcnow()
     if payload is not None:
         dev.provision = None
+        if isinstance(payload, dict):
+            payload = dict(payload)
+            expires = _parse_iso(payload.pop("_key_expires", None))      # never sent to the bridge
+            if (payload.get("tailscale_auth_key") and expires is not None
+                    and expires <= now + dt.timedelta(seconds=30)):
+                # DEAD ON ARRIVAL (2026-09-28). A key staged while the bridge was off - claimed before
+                # it was powered on at the venue, or re-keyed while offline - has expired by the time
+                # it is collected. Handing it over costs a failed join AND a full re-key gap (10 min)
+                # before self-heal tries again. Mint a live one now instead.
+                from . import mesh
+                payload.pop("tailscale_auth_key", None)
+                try:
+                    fresh = mesh.mint_ephemeral_key(
+                        "netbridge bridge %s" % (dev.pairing_code or dev.id),
+                        tags=[t.strip() for t in settings.ts_bridge_tag.split(",") if t.strip()])
+                    if fresh.get("key"):
+                        payload["tailscale_auth_key"] = fresh["key"]
+                    print("[mesh] staged key for %s had expired; issued a fresh one" % dev.id, flush=True)
+                except Exception as e:          # includes MeshNotConfigured: nothing live to hand out
+                    print("[mesh] staged key for %s had expired; no fresh one: %s" % (dev.id, str(e)[:120]), flush=True)
+                if not payload.get("tailscale_auth_key"):
+                    dev.mesh_key_at = now       # counts against the gap, like a failed self-heal
+                    db.commit()
+                    return {"provision": None}
         if isinstance(payload, dict) and (payload.get("tailscale_auth_key")
                                           or payload.get("tailscale_authkey")):
             # The bridge starts joining with this key now. Self-heal must give it time to finish:
@@ -866,6 +905,7 @@ def claim_device(device_id: str, body: ClaimIn, actor=Depends(auth.require_admin
                 tags=[t.strip() for t in settings.ts_bridge_tag.split(",") if t.strip()])
             if minted.get("key"):
                 prov["tailscale_auth_key"] = minted["key"]
+                prov["_key_expires"] = _key_expiry(minted)     # fleet-side only, see pull_provision
         except mesh.MeshNotConfigured:
             pass          # no TS credential on this fleet: claim still works, just no mesh
         except Exception as e:
@@ -1002,6 +1042,10 @@ def reissue_mesh_key(device_id: str, body: dict | None = None, actor=Depends(aut
         key = minted["key"]
     prov = dict(dev.provision or {})
     prov["tailscale_auth_key"] = key
+    if supplied:
+        prov.pop("_key_expires", None)           # a hand-made key's lifetime is unknown here
+    else:
+        prov["_key_expires"] = _key_expiry(minted)
     code = (dev.pairing_code or "").replace("BRIDGE-", "").strip()
     if code:
         prov["tailscale_hostname"] = "netbridge-%s" % code

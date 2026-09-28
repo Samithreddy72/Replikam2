@@ -245,10 +245,51 @@ try:
     tick(mtok, ip="100.64.1.5")
     backdate(MS, mesh_lost_at=5, mesh_key_at=60)
     got = [tick(mtok) for _ in range(3)]
-    check(not any(got) and len(MINTS) == n and device(MS).tailscale_ip is None,
-          "NB_LAN_ONLY: never re-keys a bridge onto the mesh, never stores a mesh address", len(MINTS) - n)
+    check(not any(got) and len(MINTS) == n, "NB_LAN_ONLY: never re-keys a bridge onto the mesh", len(MINTS) - n)
+    tick(mtok, ip="100.64.1.7")                 # the LAST report carries an address: it must still not be kept
+    check(device(MS).tailscale_ip is None, "NB_LAN_ONLY: never stores a mesh address, even from the latest report",
+          device(MS).tailscale_ip)
 finally:
     M.LAN_ONLY = False
+
+# The stamp when a bridge COLLECTS a staged key (pull_provision) is what stops a second key for a join that takes
+# longer than one tick after claim. Without it a bridge that had been off the mesh for a while is re-keyed
+# (tailscale up --reset) on the very next tick while it is still joining with the first key.
+MC = "20000000eeee0003"
+ctok = enroll(MC, "BRIDGE-E003")
+tick(ctok)                                            # enrolled, no mesh address yet
+backdate(MC, mesh_lost_at=15)                         # long enough off the mesh that self-heal would be due
+n = len(MINTS)
+r = c.post("/admin/devices/%s/claim" % MC, headers=A, json={"name": "Late Room"})
+p = tick(ctok)
+check(r.status_code == 200 and (p or {}).get("tailscale_auth_key") == "tskey-auth-TEST-%d" % (n + 1),
+      "claimed after a while off the mesh: the bridge collects its claim key", p)
+check("_key_expires" not in (p or {}), "…the fleet's private expiry note is never sent to the bridge", p)
+got = [tick(ctok) for _ in range(5)]
+check(not any(got) and len(MINTS) == n + 1,
+      "…and is NOT given a second key while it joins (collecting the key starts the re-key gap)", len(MINTS) - n)
+
+# A staged key that EXPIRED while the bridge was off is replaced on collection, instead of being handed over dead
+# and costing a failed join plus a whole re-key gap.
+MD = "20000000eeee0004"
+dtok = enroll(MD, "BRIDGE-E004")
+r = c.post("/admin/devices/%s/claim" % MD, headers=A, json={"name": "Venue Room"})
+staged = dict(device(MD).provision or {})
+check(r.status_code == 200 and staged.get("_key_expires"), "claim records when the minted key expires (fleet side)", staged)
+s = SessionLocal(); d = s.get(Device, MD)
+d.provision = dict(staged, _key_expires=(utcnow() - dt.timedelta(hours=3)).isoformat())
+s.commit(); s.close()
+n = len(MINTS)
+p = tick(dtok)
+check((p or {}).get("tailscale_auth_key") and p["tailscale_auth_key"] != staged["tailscale_auth_key"] and len(MINTS) == n + 1,
+      "powered on hours after claim: the dead staged key is replaced by a fresh one", (p, len(MINTS) - n))
+check((p or {}).get("tailscale_hostname") == "netbridge-E004" and "_key_expires" not in (p or {}),
+      "…with its hostname kept and nothing private in the payload", p)
+check(device(MD).provision is None and not any(tick(dtok) for _ in range(3)) and len(MINTS) == n + 1,
+      "…handed out once; no key flood afterwards", len(MINTS) - n)
+for serial in (MC, MD):                                # leave the fleet exactly as the tests below expect it
+    r = c.delete("/admin/devices/%s" % serial, headers=A)
+    check(r.status_code == 200, "cleanup: test bridge %s removed" % serial, r.text)
 
 print("\n  ---- 3. a bridge is claimed once ----")
 n = len(MINTS)

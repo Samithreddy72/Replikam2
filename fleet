@@ -14,7 +14,7 @@
 #    fleet set-pin <pin> <name>      lock a bridge with a PIN
 #    fleet unlock <pin> <name>       unlock a bridge
 #    fleet lock <name|all>           lock (stop until PIN)
-#    fleet provision <name> k=v ...  stage a one-time claim payload
+#    fleet provision <name> tailscale_auth_key=<key>   stage a hand-made mesh key
 #    fleet ssh <name>                shell into a bridge (tailscale)
 #    fleet alerts                    all active alerts
 #    fleet users                     list personal accounts
@@ -39,9 +39,22 @@ fi
 [ -f $RC ] || { echo "❌ no ~/.fleetrc (FLEET_URL=, FLEET_KEY=)"; exit 1; }
 . $RC
 api(){
-  R=$(curl -s -m 10 -H "Authorization: Bearer $FLEET_KEY" "$@")
-  [ -n "$R" ] || { echo "❌ fleet-brain unreachable (bridge offline or network blip) — try again shortly" >&2; exit 2; }
-  echo "$R"
+  # A refused request must never read as success (2026-09-28): this used plain `curl -s`, so a 4xx body was
+  # printed and the caller's "&& echo ✓" still ran - e.g. `fleet provision` reported "staged" for a 409.
+  local out code
+  out=$(curl -s -m 10 -w '\n%{http_code}' -H "Authorization: Bearer $FLEET_KEY" "$@")
+  code=${out##*$'\n'}; R=${out%$'\n'*}
+  [ "$code" = "000" ] && { echo "❌ the fleet is unreachable (network blip, or the fleet is down) — try again shortly" >&2; exit 2; }
+  case "$code" in
+    2??) echo "$R" ;;
+    *) echo "❌ the fleet refused this ($code): $(printf %s "$R" | python3 -c 'import json,sys
+s = sys.stdin.read()
+try:
+    d = json.loads(s).get("detail"); print(d if isinstance(d, str) else json.dumps(d))
+except Exception:
+    print(s[:300])' 2>/dev/null)" >&2
+       exit 1 ;;
+  esac
 }
 
 py(){ IN=$(cat); [ -n "$IN" ] || exit 2; printf %s "$IN" | python3 -c "$1"; }
@@ -99,14 +112,24 @@ for d in devs:
   set-pin) dispatch set-pin    "${3:?fleet set-pin <pin> <name>}" "{\"pin\":\"${2}\"}" ;;
   unlock)  dispatch unlock     "${3:?fleet unlock <pin> <name>}" "{\"pin\":\"${2}\"}" ;;
   lock)    dispatch lock       "${2:?fleet lock <name|all>}" ;;
-  provision)  # attach a one-time payload at claim; args after name become key=val pairs
-    NAME="${2:?fleet provision <name> key=val ...}"; T=$(resolve "$NAME"); shift 2
+  provision)  # stage a hand-made mesh key for a bridge: fleet provision <name> tailscale_auth_key=tskey-...
+    # A bridge is claimed ONCE now (a second claim is refused), so this no longer re-claims: it uses the fleet's
+    # re-key endpoint, which takes a hand-made key. The agent only ever acted on the mesh key in a provision
+    # payload, so anything else is refused here instead of being reported as staged and then ignored.
+    NAME="${2:?fleet provision <name> tailscale_auth_key=<key>}"; T=$(resolve "$NAME"); shift 2
     [ -n "$T" ] || { echo "❌ unknown bridge: $NAME"; exit 1; }
-    # preserve the device's existing name (claim requires a name field)
-    CUR=$(api "$FLEET_URL/admin/devices/$T" | py 'import json,sys; d=json.load(sys.stdin); print(d.get("name") or d.get("hostname") or d["id"])')
-    PAYLOAD=$(python3 -c "import json,sys; print(json.dumps(dict(a.split('=',1) for a in sys.argv[1:])))" "$@")
-    api -X POST -H "Content-Type: application/json" -d "{\"name\":\"$CUR\",\"provision\":$PAYLOAD}" \
-      "$FLEET_URL/admin/devices/$T/claim" >/dev/null && echo "  ✓ provision staged (name preserved: $CUR)" ;;
+    KEY=""
+    for kv in "$@"; do
+      case "$kv" in
+        tailscale_auth_key=*|tailscale_authkey=*) KEY="${kv#*=}" ;;
+        *) echo "❌ only tailscale_auth_key=<key> can be staged (got: ${kv%%=*}) — use the panel or nb for anything else"; exit 1 ;;
+      esac
+    done
+    [ -n "$KEY" ] || { echo "❌ usage: fleet provision <name> tailscale_auth_key=<key>"; exit 1; }
+    BODY=$(KEY="$KEY" python3 -c 'import json,os; print(json.dumps({"tailscale_auth_key": os.environ["KEY"]}))')
+    # the key travels on stdin (--data-binary @-), never on curl's command line where ps would show it
+    printf %s "$BODY" | api -X POST -H "Content-Type: application/json" --data-binary @- "$FLEET_URL/admin/devices/$T/mesh-key" >/dev/null \
+      && echo "  ✓ mesh key staged — the bridge picks it up on its next check-in" ;;
   users)
     api "$FLEET_URL/admin/users" | py '
 import json,sys
