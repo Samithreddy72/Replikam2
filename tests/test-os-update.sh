@@ -329,6 +329,13 @@ if grep -q "sync cmdline=$CMD_A new=yes" "$T/log/sync" && grep -q "sync cmdline=
 else no "cmdline commit not synced around the rename: $(tr '\n' '|' < "$T/log/sync")"; fi
 [ "$(st state)" = committed ] && [ "$(st version)" = "$V1" ] && ! armed \
   && ok "status 'committed' for $V1, trial files and auto-commit cleared" || no "after commit: state $(st state), armed=$(armed && echo yes || echo no)"
+# A committed cmdline carrying a stray trial marker (hand-edited, or older tooling) would make EVERY
+# normal boot look like a trial - and an unhealthy moment then reboots it. Commit must strip it.
+fresh; echo "$CMD_A bridge_tryboot=1" > "$T/boot/cmdline.txt"; cp "$T/boot/cmdline.txt" "$T/proc-cmdline"
+AB commit
+if [ "$(cat "$T/boot/cmdline.txt")" = "$CMD_A" ]; then
+  ok "commit strips a stray trial marker from cmdline.txt (else every normal boot would look like a trial)"
+else no "commit left: '$(cat "$T/boot/cmdline.txt")'"; fi
 
 # ===================== a restart cut the trial short =====================
 fresh; stage_trial; AB tryboot B                                            # status: rebooting, written in boot-1
