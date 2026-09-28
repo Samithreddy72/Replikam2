@@ -70,8 +70,11 @@ Body (`ClaimIn`):
   "provision": { "tailscale_auth_key": "tskey-auth-..." } }
 ```
 
-`provision` is optional; omitting it keeps claim behaviour exactly as v1. Re-claiming with a
-new `provision` restages a payload (e.g. to hand out a fresh key after a key expiry).
+`provision` is optional; omitting it keeps claim behaviour exactly as v1. `name` must be 1-64
+characters. A bridge is claimed once: claiming it again answers `409` (since 2026-09-28), because
+the new key it staged made the bridge reset its mesh node and drop live sessions. To hand out a
+fresh key, `POST /admin/devices/{device_id}/mesh-key` (optionally with
+`{"tailscale_auth_key": "..."}` to stage a key made by hand); to rename, `PATCH /admin/devices/{device_id}`.
 
 ### `GET /v1/provision`  (device token)
 

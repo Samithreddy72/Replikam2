@@ -90,6 +90,13 @@ try:
           [view[i]["label"] for i in ids])
     check(view[ids[3]]["number"] is None and view[ids[3]]["state"] == "new",
           "an unclaimed bridge has no number and shows as NEW")
+    # claimed once (2026-09-28): a second claim staged a new mesh key and reset the bridge's mesh
+    r = c.post("/admin/devices/%s/claim" % ids[1], headers=A, json={"name": "Renamed by claim"})
+    check(r.status_code == 409 and "already claimed" in r.text, "claiming a claimed bridge again is refused (409)", r.text)
+    check({d["id"]: d for d in c.get("/admin/devices", headers=A).json()}[ids[1]]["name"] == "Studio B",
+          "…and its name is unchanged")
+    r = c.post("/admin/devices/%s/claim" % ids[3], headers=A, json={"name": ""})
+    check(r.status_code == 400, "claim refuses an empty name, like rename does", r.text)
 
     # ---- backfill for fleets older than numbering -------------------------------------------------
     for sid in ids[:3]:
@@ -129,6 +136,18 @@ try:
     check(r.status_code == 200 and len(r.json()) == 3, "an admin who presents gets the same list")
     check(c.get("/auth/whoami", headers=P).json().get("role") == "presenter", "whoami still answers presenters")
     check(c.get("/auth/bridges").status_code == 401, "no token, no bridges")
+    # revoking ends the sign-in, and it never becomes the next account's (2026-09-28)
+    r = c.post("/admin/users", headers=A, json={"email": "temp@example.test", "role": "presenter"})
+    ttok = c.post("/auth/redeem", json={"invite": r.json().get("invite", "")}).json().get("token", "")
+    TT = {"Authorization": "Bearer " + ttok}
+    check(c.get("/auth/whoami", headers=TT).status_code == 200, "an invited presenter signs in")
+    tid = next(u["id"] for u in c.get("/admin/users", headers=A).json() if u["email"] == "temp@example.test")
+    c.delete("/admin/users/%d" % tid, headers=A)
+    check(c.get("/auth/whoami", headers=TT).status_code == 401, "…revoked, their token is refused")
+    c.post("/admin/users", headers=A, json={"email": "next-admin@example.test", "role": "admin"})
+    r = c.get("/auth/whoami", headers=TT)
+    check(r.status_code == 401 and c.get("/admin/devices", headers=TT).status_code == 401,
+          "…and it does not come back as the admin added next", r.text)
 
     # ---- states and alerts -----------------------------------------------------------------------
     tel(ids[1], streams={"video": True, "voice": True, "return": True}, udc="configured",

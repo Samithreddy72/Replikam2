@@ -201,6 +201,51 @@ def _scrub_secret_args(c) -> None:
 # unset the env var and let the next telemetry re-populate the mesh IP once mesh works.
 LAN_ONLY = os.getenv("NB_LAN_ONLY", "").strip().lower() not in ("", "0", "false", "no", "off")
 
+# MESH SELF-HEAL LIMITS (2026-09-28). /v1/provision mints a fresh tailnet key for a claimed
+# bridge that reports no mesh address. It used to do so on EVERY 15 s poll, with no memory:
+#   - a venue that blocks the mesh cost ~5,760 Tailscale API calls and ~5,760 audit rows a day
+#     per bridge (kept 365 days), pushing every admin action out of the panel's audit view;
+#   - the bridge ran `tailscale up --reset` every tick, and a single empty sample (tailscaled
+#     restarting, or a join slower than one tick after claim) re-keyed a WORKING node - new
+#     identity, new address, live mesh sessions dropped;
+#   - with NB_LAN_ONLY=1 the address is always blank, so every claimed bridge was re-keyed
+#     forever onto the mesh that LAN-only mode exists to avoid.
+# Now: the address must have been missing for MESH_HEAL_AFTER_S (four reports), no bridge gets
+# a second key within _mesh_rekey_gap_s() of the last one (claim, admin re-key or automatic),
+# LAN-only mode never re-keys, and only the first automatic key of an outage is audited.
+MESH_HEAL_AFTER_S = 60
+MESH_REKEY_MIN_GAP_S = 600
+
+
+def _mesh_rekey_gap_s() -> int:
+    # Never replace a key the bridge could still be joining with: it is valid for ts_key_ttl_s.
+    return max(MESH_REKEY_MIN_GAP_S, settings.ts_key_ttl_s)
+
+
+def _note_mesh_address(dev, ip, now) -> None:
+    """Record the mesh address a bridge reports, and when it started having none."""
+    if LAN_ONLY:
+        # Keep the dead mesh IP from creeping back in, and do not start an outage clock for a
+        # mesh this deployment deliberately does not use.
+        dev.tailscale_ip, dev.mesh_lost_at = None, None
+        return
+    dev.tailscale_ip = ip or None
+    if dev.tailscale_ip:
+        dev.mesh_lost_at, dev.mesh_autokeys = None, 0      # on the mesh: any outage is over
+    elif dev.mesh_lost_at is None:
+        dev.mesh_lost_at = now
+
+
+def _mesh_heal_due(dev, now) -> bool:
+    """Should /v1/provision mint this bridge a new mesh key right now? See MESH_HEAL_AFTER_S."""
+    if LAN_ONLY or not dev.claimed_at or dev.tailscale_ip:
+        return False
+    lost = auth.as_utc(dev.mesh_lost_at)
+    if lost is None or (now - lost).total_seconds() < MESH_HEAL_AFTER_S:
+        return False
+    last = auth.as_utc(dev.mesh_key_at)
+    return last is None or (now - last).total_seconds() >= _mesh_rekey_gap_s()
+
 # INTERACTIVE API DOCS ARE OFF UNLESS SOMEBODY ASKS FOR THEM.
 #
 # FastAPI serves /docs, /redoc and /openapi.json to anyone, with no authentication, by default.
@@ -227,6 +272,29 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 # Bootstrap tables for dev/first run. For prod, switch to Alembic migrations.
 Base.metadata.create_all(engine)
 
+def _ensure_fleet_number_index(conn) -> bool:
+    """Make the database refuse a second bridge with the same fleet number in one org
+    (2026-09-28; the model declares the same index for new databases).
+
+    If the fleet ALREADY has duplicates, creating the index would fail and take the control
+    plane down at start-up. Renumbering a bridge automatically is not an option either: a
+    number changes only when an admin changes it. So the index waits, the duplicates are named
+    in the log, and it is created on the first start after an admin renumbers them."""
+    from sqlalchemy import text as _text
+    dups = conn.execute(_text(
+        "SELECT org_id, number, COUNT(*) FROM devices WHERE number IS NOT NULL "
+        "GROUP BY org_id, number HAVING COUNT(*) > 1")).fetchall()
+    if dups:
+        print("[migrate] fleet numbers used by more than one bridge: %s. Renumber one of each "
+              "(PATCH /admin/devices/{id}); uniqueness is enforced from the next start after that."
+              % ", ".join("NB-%03d in org %s (%d bridges)" % (n, org, k) for org, n, k in dups),
+              flush=True)
+        return False
+    conn.execute(_text("CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_org_number "
+                       "ON devices (org_id, number)"))
+    return True
+
+
 # Tiny in-code migration: create_all() never ALTERs existing tables, so add the
 # columns that shipped after first deploy. Idempotent; sqlite-friendly.
 def _migrate():
@@ -251,6 +319,15 @@ def _migrate():
             # Fleet numbers (NB-001 …), 2026-09-24.
             if "number" not in cols("devices"):
                 conn.execute(_text("ALTER TABLE devices ADD COLUMN number INTEGER"))
+            _ensure_fleet_number_index(conn)
+            # Mesh self-heal bookkeeping (2026-09-28): see models.Device.
+            dcols = cols("devices")
+            if "mesh_lost_at" not in dcols:
+                conn.execute(_text("ALTER TABLE devices ADD COLUMN mesh_lost_at DATETIME"))
+            if "mesh_key_at" not in dcols:
+                conn.execute(_text("ALTER TABLE devices ADD COLUMN mesh_key_at DATETIME"))
+            if "mesh_autokeys" not in dcols:
+                conn.execute(_text("ALTER TABLE devices ADD COLUMN mesh_autokeys INTEGER DEFAULT 0"))
         # M6 magic-link sign-in: one-time login code on the user row.
         if "users" in insp.get_table_names():
             ucols = cols("users")
@@ -334,6 +411,32 @@ def _scrub_old_secrets():
 _scrub_old_secrets()
 
 
+def _purge_orphan_sessions():
+    """Once per start: sign-ins left behind by users revoked before 2026-09-28.
+
+    revoke_user() used to delete the user and keep their sessions, and on a database created
+    before that date SQLite gives the next new user the revoked user's id - so the leftover
+    token signed its old owner in as the new person. Drop every session whose user is gone, and
+    every session older than the account it now points at (the id was already reused)."""
+    from .db import SessionLocal
+    from .models import Session as _S
+    db = SessionLocal()
+    try:
+        users = {u.id: u for u in db.scalars(select(User)).all()}
+        stale = [s for s in db.scalars(select(_S)).all()
+                 if s.user_id not in users or auth.session_outlived_user(db, s, users[s.user_id])]
+        for s in stale:
+            db.delete(s)
+        if stale:
+            db.commit()
+            print("[auth] removed %d sign-in(s) left behind by revoked users" % len(stale), flush=True)
+    finally:
+        db.close()
+
+
+_purge_orphan_sessions()
+
+
 @app.on_event("startup")
 async def _start_background():
     """Background loops: hourly retention sweep, and the alert evaluator that
@@ -395,7 +498,7 @@ def enroll(body: EnrollIn, db: Session = Depends(get_db)):
         db.add(dev)
     dev.pairing_code = body.pairing_code
     dev.version = body.version
-    dev.tailscale_ip = None if LAN_ONLY else body.tailscale_ip
+    _note_mesh_address(dev, body.tailscale_ip, utcnow())
     dev.hostname = body.hostname
     dev.token_hash = token_hash  # re-enroll rotates the token
     db.commit()
@@ -444,17 +547,14 @@ def telemetry(body: dict, dev: Device = Depends(auth.require_device),
     dev.latest = body
     if body.get("version"):
         dev.version = body["version"]
-    if LAN_ONLY:
-        dev.tailscale_ip = None      # keep the dead mesh IP from creeping back in
-    else:
-        # The DEVICE is authoritative about its own mesh identity, including its ABSENCE.
-        # This used to only write a truthy value, so a bridge that lost its tailnet node
-        # (ephemeral nodes are garbage-collected after an outage) kept advertising its old
-        # 100.x address forever: the panel showed it "on the mesh", the presenter app was
-        # handed a dead IP, and nothing could tell the difference between a healthy bridge
-        # and one that had silently fallen off. Clearing it makes the state honest — and is
-        # what lets /v1/provision notice the device needs a fresh key and self-heal.
-        dev.tailscale_ip = body.get("tailscale_ip") or None
+    # The DEVICE is authoritative about its own mesh identity, including its ABSENCE.
+    # This used to only write a truthy value, so a bridge that lost its tailnet node
+    # (ephemeral nodes are garbage-collected after an outage) kept advertising its old
+    # 100.x address forever: the panel showed it "on the mesh", the presenter app was
+    # handed a dead IP, and nothing could tell the difference between a healthy bridge
+    # and one that had silently fallen off. Clearing it makes the state honest — and is
+    # what lets /v1/provision notice the device needs a fresh key and self-heal.
+    _note_mesh_address(dev, body.get("tailscale_ip"), now)
     db.add(Telemetry(device_id=dev.id, ts=now, metrics=body))
     # Retention is NOT done here any more — see retention.py. Pruning on the
     # write path meant a device that stopped reporting never got cleaned up.
@@ -535,8 +635,14 @@ def pull_provision(dev: Device = Depends(auth.require_device), db: Session = Dep
     "nothing to do", making it safe to poll every tick.
     """
     payload = dev.provision
+    now = utcnow()
     if payload is not None:
         dev.provision = None
+        if isinstance(payload, dict) and (payload.get("tailscale_auth_key")
+                                          or payload.get("tailscale_authkey")):
+            # The bridge starts joining with this key now. Self-heal must give it time to finish:
+            # re-keying on the next poll is what used to reset a node still joining after claim.
+            dev.mesh_key_at = now
         db.commit()
         return {"provision": payload}
 
@@ -545,28 +651,43 @@ def pull_provision(dev: Device = Depends(auth.require_device), db: Session = Dep
     # control plane to garbage-collect the node leaves the device with no key and no way
     # to rejoin. It used to take a manual re-key (or SD-card surgery) every single time,
     # which is absurd for a device that is plainly online and authenticated right here.
-    # Mint one for it automatically; it applies the key on this same poll cycle (~15 s).
-    if dev.claimed_at and not dev.tailscale_ip:
-        from . import mesh
-        try:
-            minted = mesh.mint_ephemeral_key(
-                "netbridge bridge %s" % (dev.pairing_code or dev.id),
-                tags=[t.strip() for t in settings.ts_bridge_tag.split(",") if t.strip()])
-        except mesh.MeshNotConfigured:
-            return {"provision": None}          # fleet has no tailnet: nothing to hand out
-        except Exception:
-            return {"provision": None}          # tailnet unreachable: retry on the next poll
-        if minted.get("key"):
-            prov = {"tailscale_auth_key": minted["key"]}
-            code = (dev.pairing_code or "").replace("BRIDGE-", "").strip()
-            if code:
-                prov["tailscale_hostname"] = "netbridge-%s" % code
-            # Audited as the system, not a person — nobody clicked anything.
-            _audit(db, auth.Actor("system", dev.org_id, "admin"),
-                   "mesh-key:auto-reissue", dev.name or dev.pairing_code or dev.id)
-            db.commit()
-            return {"provision": prov}
-    return {"provision": None}
+    # Mint one for it automatically, within the limits described at MESH_HEAL_AFTER_S.
+    if not _mesh_heal_due(dev, now):
+        return {"provision": None}
+    from . import mesh
+    try:
+        minted = mesh.mint_ephemeral_key(
+            "netbridge bridge %s" % (dev.pairing_code or dev.id),
+            tags=[t.strip() for t in settings.ts_bridge_tag.split(",") if t.strip()])
+    except mesh.MeshNotConfigured:
+        return {"provision": None}              # fleet has no tailnet: nothing to hand out
+    except Exception as e:
+        # Tailnet unreachable. The attempt counts against the gap, so a Tailscale outage costs
+        # one API call per bridge per gap instead of one per bridge every 15 s.
+        dev.mesh_key_at = now
+        db.commit()
+        print("[mesh] could not re-issue a key for %s: %s" % (dev.id, str(e)[:160]), flush=True)
+        return {"provision": None}
+    dev.mesh_key_at = now
+    if not minted.get("key"):
+        db.commit()
+        return {"provision": None}
+    prov = {"tailscale_auth_key": minted["key"]}
+    code = (dev.pairing_code or "").replace("BRIDGE-", "").strip()
+    if code:
+        prov["tailscale_hostname"] = "netbridge-%s" % code
+    first_of_outage = not dev.mesh_autokeys
+    dev.mesh_autokeys = (dev.mesh_autokeys or 0) + 1
+    db.commit()
+    if first_of_outage:
+        # Audited as the system, not a person — nobody clicked anything. Once per outage: the
+        # retries that follow are the same event, and 144 rows a day would bury real actions.
+        _audit(db, auth.Actor("system", dev.org_id, "admin"),
+               "mesh-key:auto-reissue", dev.name or dev.pairing_code or dev.id)
+    else:
+        print("[mesh] re-issued a key for %s again (%d since it lost its mesh address)"
+              % (dev.id, dev.mesh_autokeys), flush=True)
+    return {"provision": prov}
 
 
 @app.post("/v1/diagnostics")
@@ -703,7 +824,14 @@ def update_device(device_id: str, body: DeviceUpdateIn, actor=Depends(auth.requi
             changes.append("number %s -> %s" % (fleet_label(dev.number), fleet_label(body.number)))
             dev.number = body.number
     if changes:
-        db.commit()
+        from sqlalchemy.exc import IntegrityError
+        try:
+            db.commit()
+        except IntegrityError:
+            # Another renumber or claim took this number after the check above; the unique
+            # index refused ours. Same answer as the check, not a 500.
+            db.rollback()
+            raise HTTPException(409, "%s was just taken by another bridge" % fleet_label(body.number))
         _audit(db, actor, "device:update", "%s: %s" % (dev.name or dev.id, "; ".join(changes)))
     return _device_view(dev)
 
@@ -712,17 +840,24 @@ def update_device(device_id: str, body: DeviceUpdateIn, actor=Depends(auth.requi
 def claim_device(device_id: str, body: ClaimIn, actor=Depends(auth.require_admin),
                  db: Session = Depends(get_db)):
     dev = _scoped_device(db, device_id, actor)
-    dev.name = body.name
-    if dev.claimed_at is None:
-        dev.claimed_at = utcnow()
-    if not dev.number:
-        dev.number = _next_number(db, dev.org_id)
+    # CLAIM HAPPENS ONCE (2026-09-28). A second claim used to be accepted, and it minted a new
+    # mesh key: the bridge then ran `tailscale up --reset`, took a new node and address, and
+    # dropped any live mesh session - which is what a script "renaming" a bridge through claim
+    # did in the middle of a meeting. Renaming and re-keying have their own endpoints.
+    if dev.claimed_at is not None:
+        raise HTTPException(409, _already_claimed(dev))
+    # The same rule as PATCH: an empty or page-long name was accepted here and nowhere else.
+    name = (body.name or "").strip()
+    if not 1 <= len(name) <= 64:
+        raise HTTPException(400, "name must be 1-64 characters")
     prov = dict(body.provision) if body.provision is not None else {}
     # "Claiming binds it to your org, names it, AND ISSUES ITS MESH-NETWORK KEY. That's the
     # whole enrollment ceremony." (walkthrough J4 step 2). Until now claim only passed
     # through whatever an admin hand-made, so every bridge needed a key minted by hand -
     # the ceremony was three steps, not one. Mint it here when the fleet has mesh
-    # configured and the caller did not supply one.
+    # configured and the caller did not supply one. Minted BEFORE any database write, so the
+    # Tailscale round trip never holds SQLite's write lock while bridges are reporting.
+    mint_failed = None
     if not prov.get("tailscale_auth_key"):
         from . import mesh
         try:
@@ -736,20 +871,55 @@ def claim_device(device_id: str, body: ClaimIn, actor=Depends(auth.require_admin
         except Exception as e:
             # Never fail a claim because the tailnet is unreachable - the device is claimed
             # either way and can be given a key later.
-            _audit(db, actor, "claim:mesh-mint-failed", str(e)[:120])
-    if prov:
-        # Name the tailnet node too. Without this every bridge joins as "raspberrypi"
-        # and Tailscale de-duplicates with -1/-2 suffixes, so a fleet of bridges is
-        # unidentifiable on the mesh. Use the pairing code - the same identifier on the
-        # label, in the SSID and in this panel.
-        if prov.get("tailscale_auth_key") and not prov.get("tailscale_hostname"):
-            code = (dev.pairing_code or "").replace("BRIDGE-", "").strip()
-            if code:
-                prov["tailscale_hostname"] = "netbridge-%s" % code
-        dev.provision = prov
-    db.commit()
-    _audit(db, actor, "claim", "%s -> %s" % (dev.pairing_code or device_id, body.name))
+            mint_failed = str(e)[:120]
+    # Name the tailnet node too. Without this every bridge joins as "raspberrypi"
+    # and Tailscale de-duplicates with -1/-2 suffixes, so a fleet of bridges is
+    # unidentifiable on the mesh. Use the pairing code - the same identifier on the
+    # label, in the SSID and in this panel.
+    if prov.get("tailscale_auth_key") and not prov.get("tailscale_hostname"):
+        code = (dev.pairing_code or "").replace("BRIDGE-", "").strip()
+        if code:
+            prov["tailscale_hostname"] = "netbridge-%s" % code
+    from sqlalchemy import update as _update
+    from sqlalchemy.exc import IntegrityError
+    for _attempt in range(5):
+        now = utcnow()
+        # Take the claim atomically: of two admins claiming the same bridge at the same moment,
+        # exactly one matches `claimed_at IS NULL`; the other is told it is already claimed.
+        won = db.execute(_update(Device).where(Device.id == dev.id, Device.claimed_at.is_(None))
+                         .values(claimed_at=now)).rowcount
+        if not won:
+            db.rollback()
+            dev = db.get(Device, device_id)
+            if dev is None:
+                raise HTTPException(404, "device not found")     # forgotten meanwhile
+            raise HTTPException(409, _already_claimed(dev))
+        dev.claimed_at = now
+        dev.name = name
+        if not dev.number:
+            dev.number = _next_number(db, dev.org_id)
+        if prov:
+            dev.provision = prov
+        try:
+            db.commit()
+            break
+        except IntegrityError:
+            # Another claim in this org took the same next number between our read and our
+            # write; the unique index refused the second. Read the numbers again and retry.
+            db.rollback()
+    else:
+        raise HTTPException(503, "could not assign a fleet number; try the claim again")
+    if mint_failed:
+        _audit(db, actor, "claim:mesh-mint-failed", mint_failed)
+    _audit(db, actor, "claim", "%s -> %s" % (dev.pairing_code or device_id, name))
     return _device_view(dev)
+
+
+def _already_claimed(dev) -> str:
+    who = " ".join(x for x in (fleet_label(dev.number), dev.name) if x) or dev.pairing_code or dev.id
+    return ("This bridge is already claimed (%s). Rename it (PATCH /admin/devices/{id}) or re-issue "
+            "its mesh key (POST /admin/devices/{id}/mesh-key) instead: claiming it again would reset "
+            "its mesh connection." % who)
 
 
 @app.delete("/admin/devices/{device_id}")
@@ -791,7 +961,7 @@ def forget_device(device_id: str, actor=Depends(auth.require_admin),
 
 
 @app.post("/admin/devices/{device_id}/mesh-key")
-def reissue_mesh_key(device_id: str, actor=Depends(auth.require_admin),
+def reissue_mesh_key(device_id: str, body: dict | None = None, actor=Depends(auth.require_admin),
                      db: Session = Depends(get_db)):
     """Mint a FRESH mesh key for an already-claimed device.
 
@@ -804,21 +974,34 @@ def reissue_mesh_key(device_id: str, actor=Depends(auth.require_admin),
 
     Re-keying is safe to repeat: keys are ephemeral, preauthorized and short-TTL, and the
     device simply picks up whichever one is waiting on its next poll (~15 s).
+
+    An optional body {"tailscale_auth_key": "..."} stages a key made by hand instead of minting
+    one. That used to be done by claiming the bridge again, which is refused since 2026-09-28
+    (see claim_device); a fleet with no Tailscale API credential still needs a way to do it.
     """
     dev = _scoped_device(db, device_id, actor)
-    from . import mesh
-    try:
-        minted = mesh.mint_ephemeral_key(
-            "netbridge bridge %s" % (dev.pairing_code or device_id),
-            tags=[t.strip() for t in settings.ts_bridge_tag.split(",") if t.strip()])
-    except mesh.MeshNotConfigured:
-        raise HTTPException(409, "this fleet has no tailnet credential configured")
-    except Exception as e:
-        raise HTTPException(502, "could not mint a mesh key: %s" % str(e)[:160])
-    if not minted.get("key"):
-        raise HTTPException(502, "tailnet returned no key")
+    supplied = str((body or {}).get("tailscale_auth_key") or "").strip()
+    if supplied:
+        # Handed to `tailscale up` as one argument on the bridge: no spaces, a sane length.
+        if len(supplied) > 256 or any(ch.isspace() for ch in supplied) or not supplied.isprintable():
+            raise HTTPException(400, "tailscale_auth_key must be a single key of at most 256 characters")
+        key = supplied
+    else:
+        from . import mesh
+        try:
+            minted = mesh.mint_ephemeral_key(
+                "netbridge bridge %s" % (dev.pairing_code or device_id),
+                tags=[t.strip() for t in settings.ts_bridge_tag.split(",") if t.strip()])
+        except mesh.MeshNotConfigured:
+            raise HTTPException(409, "this fleet has no tailnet credential configured; supply a key "
+                                     "as {\"tailscale_auth_key\": \"...\"}")
+        except Exception as e:
+            raise HTTPException(502, "could not mint a mesh key: %s" % str(e)[:160])
+        if not minted.get("key"):
+            raise HTTPException(502, "tailnet returned no key")
+        key = minted["key"]
     prov = dict(dev.provision or {})
-    prov["tailscale_auth_key"] = minted["key"]
+    prov["tailscale_auth_key"] = key
     code = (dev.pairing_code or "").replace("BRIDGE-", "").strip()
     if code:
         prov["tailscale_hostname"] = "netbridge-%s" % code
@@ -1411,6 +1594,12 @@ def revoke_user(uid: int, actor=Depends(auth.require_admin),
     if not u or u.org_id != actor.org:
         raise HTTPException(404, "no such user")   # cross-org: indistinguishable from absent
     email = u.email
+    # Their sign-ins go in the SAME transaction (2026-09-28). This used to delete only the user
+    # row: the revoked person's tokens kept pointing at their old id, SQLite gave that id to the
+    # next account created, and the old token then signed in as that account - an admin, if an
+    # admin was added next. Revoking must end every session, not just hide the name.
+    from .models import Session as _S
+    db.query(_S).filter(_S.user_id == u.id).delete(synchronize_session=False)
     db.delete(u)
     db.commit()
     _audit(db, actor, "user:revoke", email)

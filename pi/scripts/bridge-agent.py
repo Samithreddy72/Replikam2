@@ -500,6 +500,11 @@ def syslog(msg):
         pass
 
 
+# How long one tick waits for `tailscale up`. With the CLI's own margin it stays inside the
+# agent unit's TimeoutStartSec=45 (pi/systemd/bridge-agent.service).
+TAILSCALE_UP_WAIT_S = 20
+
+
 def apply_provision(base, token):
     """Pull the one-time provisioning payload issued at claim and apply it.
     Safe to call every tick: the server returns {"provision": null} once consumed.
@@ -519,12 +524,16 @@ def apply_provision(base, token):
     # nothing and the bridge never joined the mesh. Take either, canonical first.
     key = payload.get("tailscale_auth_key") or payload.get("tailscale_authkey")
     if key:
-        argv = ["tailscale", "up", "--authkey", key, "--reset"]
+        # --timeout (2026-09-28): `tailscale up` otherwise blocks until the node is Running. When
+        # the tailnet's control server is unreachable (a venue or ISP that blocks it) that is
+        # forever, and the old 60 s cap outlived the unit's TimeoutStartSec=45, so systemd killed
+        # every tick here. tailscaled keeps joining with the key after the CLI gives up waiting.
+        argv = ["tailscale", "up", "--authkey", key, "--reset", "--timeout=%ds" % TAILSCALE_UP_WAIT_S]
         host = payload.get("tailscale_hostname") or payload.get("tailscale_host")
         if host:
             argv += ["--hostname", host]
         try:
-            p = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=TAILSCALE_UP_WAIT_S + 10)
             syslog("provision: tailscale up rc=%d %s" % (p.returncode, (p.stderr or "")[:120]))
         except Exception as e:
             syslog("provision: tailscale up failed: %s" % e)
@@ -574,8 +583,6 @@ def main():
             raise SystemExit("telemetry failed: %s" % e)
     except urllib.error.URLError as e:
         raise SystemExit("telemetry failed: %s" % e)
-    # apply one-time provisioning issued at claim
-    apply_provision(base, token)
     # report background commands that finished since the last tick
     collect_results(base, token)
     # pull + run queued commands
@@ -596,6 +603,11 @@ def main():
         # plane so the panel's "Download bundle" works without SSH. Best-effort.
         if c.get("type") == "diagnose" and status == "done":
             upload_latest_bundle(base, token)
+    # Apply one-time provisioning (a mesh key) LAST (2026-09-28). It used to run before the
+    # command pull, so a `tailscale up` stuck on an unreachable tailnet got the tick killed by
+    # systemd before commands were fetched: telemetry said "online" while logs, diagnose and
+    # reboot never reached the bridge. A stuck mesh must never starve the command path.
+    apply_provision(base, token)
 
 
 if __name__ == "__main__":
