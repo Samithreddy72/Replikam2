@@ -16,9 +16,9 @@
       "severity": "medium",
       "title": "Nothing limits disk use on the 40 GB fleet disk (deploy DB copies, OTA images, container logs); a full disk breaks the fleet and blocks deploys",
       "file": "control-plane/deploy/aws/deploy.sh",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "partial; local log and daily backup retention implemented",
+      "evidence": "tests/test-fleet-daily-backup.py",
+      "note": "Container logs capped; 14 verified local daily backups retained. OTA image and deploy-copy storage remain unbounded; off-host restore acceptance pending."
     },
     {
       "id": "B20",
@@ -304,18 +304,18 @@
       "severity": "medium",
       "title": "On macOS the start-up orphan sweep misses the GStreamer voice leg, so after a crash the mic stays captured and the next go-live sends a second voice stream",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "partial; scoped microphone startup cleanup implemented",
+      "evidence": "tests/test-audio-engine.py; app/netbridge-source/source_app.py",
+      "note": "New Mac microphone pipelines carry a unique NetBridge marker used by startup cleanup. Old unmarked orphans and immediate child termination after engine SIGKILL are not certified; native lifecycle acceptance remains."
     },
     {
       "id": "B115",
       "severity": "medium",
       "title": "A dead or absent local return player makes the page tear down and rebuild the whole session, then show a false 'This app stopped sending' message",
       "file": "app/netbridge-source/source_app.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; full CI passed at b249acf",
+      "evidence": "tests/test-status-freshness.py; tests/test-video-session-binding.py; app/netbridge-source/mesh/media_relay_test.go",
+      "note": "Local return/transport repair no longer tears down the entire UI session. Missing local processes can repair even when all legs have died. Actual audible acceptance remains separate."
     },
     {
       "id": "B116",
@@ -457,9 +457,9 @@
       "severity": "medium",
       "title": "A presenter kicked off by someone else's PIN (superseded) is never told; the app shows wrong camera advice, then all green",
       "file": "pi/scripts/bridge-web.py",
-      "status": "open; reconcile current code and prior tests",
-      "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "status": "implemented; full CI passed at b249acf",
+      "evidence": "tests/test-video-session-binding.py",
+      "note": "Compare public session epoch with own ticket; superseded or admin-locked presenter stops local capture and displays interruption instead of claiming healthy readiness."
     },
     {
       "id": "B195",
@@ -468,7 +468,7 @@
       "file": "app/netbridge-source/source_app.py",
       "status": "open; reconcile current code and prior tests",
       "evidence": "",
-      "note": "Historical finding is not proof the defect remains; no closure inferred here."
+      "note": "Socket repair now preserves the running helper identity. Full helper-process recreation and persistent identity/revocation remain open."
     },
     {
       "id": "B197",
@@ -841,12 +841,12 @@
     }
   ],
   "latest_full_ci": {
-    "source_revision": "5e304541e5b556fede56e7af8333ef7571ce631e",
-    "run_id": 36482356922,
-    "common_checks": 1717,
+    "source_revision": "b249acfc2ac6900e70f28ee56d9b8aee11772659",
+    "run_id": 36558756631,
+    "common_checks": 1760,
     "failed": 0,
     "skipped": 0,
     "missing_results": 0,
-    "note": "A green suite does not close open, partial, physical or excluded findings."
+    "note": "Green software checks do not close partial, physical, excluded or remaining historical findings."
   }
 }

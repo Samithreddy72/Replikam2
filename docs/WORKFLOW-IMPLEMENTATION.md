@@ -158,3 +158,10 @@ Diagnostic bundles are uploaded before command success becomes visible. Upload f
 ## Verified continuation checkpoint
 
 Source `5e30454` passed all required jobs in CI 36482356922: common 1717, zero failed/skipped/missing; media 11 Linux + 9 Mac; desktop unit 3/build; nine Fleet/Source/Studio browser cases; Caddy validation; and native Go race checks on Windows/Mac/Linux. Earlier pending-CI notes above are superseded for this source revision. The mesh renewal classification failure in 2f54cbb/4607d04 was corrected in 5e30454. No production deployment or hardware certification is implied. Release holds remain in RELEASE-READINESS.md.
+
+
+## Verified fallback candidate
+
+Implementation revision `b249acfc2ac6900e70f28ee56d9b8aee11772659` passed [CI run 36558756631](https://github.com/Samithreddy72/Replikam2/actions/runs/36558756631): 1760 common checks, zero failures/skips/missing results; Linux media 11; Mac encoder 9; desktop unit 3 plus build; nine browser checks; Caddy validation; native Go race tests on Mac, Windows and Linux; actual native sleep-notification registration on Mac/Windows; and UVC compilation plus a standalone test with no V4L2 device. These are software checks, not physical or native installer certification.
+
+See VIDEO-FALLBACK.md for the exact room contract, isolated recovery and platform changes. The source candidate is not deployed. Hardware acceptance, native packages, off-host recovery, persistent identity/revocation and unresolved historical audit scope remain release holds.
