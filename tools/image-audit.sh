@@ -33,13 +33,16 @@ echo "  image  $(basename "$IMG")  ($(du -h "$IMG" | cut -f1))"
 # macOS cannot mount ext4, so the root filesystem is read with debugfs if available and
 # otherwise reported as unreadable rather than silently skipped — a skipped check that prints
 # nothing is how a missing fix ships.
-ATTACH=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$IMG" 2>/dev/null)
+ATTACH=$(hdiutil attach -readonly -imagekey diskimage-class=CRawDiskImage -nomount "$IMG" 2>/dev/null)
 DISK=$(echo "$ATTACH" | head -1 | awk '{print $1}')
 [ -n "$DISK" ] || { echo "could not attach image"; exit 2; }
 trap 'hdiutil detach "$DISK" -force >/dev/null 2>&1' EXIT
 BOOTDEV=$(echo "$ATTACH" | grep -i -m1 'Windows_FAT_32\|DOS_FAT_32' | awk '{print $1}')
 MNT=$(mktemp -d)
-mount -t msdos "$BOOTDEV" "$MNT" 2>/dev/null || diskutil mount -mountPoint "$MNT" "$BOOTDEV" >/dev/null 2>&1
+[ -n "$BOOTDEV" ] && diskutil mount readOnly -mountPoint "$MNT" "$BOOTDEV" >/dev/null 2>&1 || {
+  rmdir "$MNT" 2>/dev/null
+  echo "could not mount the boot partition read-only"; exit 2;
+}
 trap 'diskutil unmount force "$MNT" >/dev/null 2>&1; hdiutil detach "$DISK" -force >/dev/null 2>&1; rmdir "$MNT" 2>/dev/null' EXIT
 
 DEBUGFS=$(command -v debugfs || echo /opt/homebrew/opt/e2fsprogs/sbin/debugfs)
@@ -96,7 +99,7 @@ if [ $have_root -eq 1 ]; then
            /usr/local/bin/bridge-status.sh /usr/local/bin/bridge-diagnose.sh \
            /usr/local/bin/bridge-crackle-sentry.sh /usr/local/bin/flight-recorder.sh \
            /usr/local/bin/flight-recorder.py /usr/local/bin/bridge-feeder-net.sh \
-           /usr/local/bin/render-idle-frame.py /usr/local/bin/bridge-deploy-script.sh \
+           /usr/local/bin/bridge-video-receiver.py /usr/local/bin/render-idle-frame.py /usr/local/bin/bridge-deploy-script.sh \
            /etc/systemd/journald.conf.d/no-kmsg.conf \
            /usr/local/bin/wifi-guardian.sh /usr/lib/os-release /etc/default/bridge-agent \
            /etc/netbridge/control-url /etc/bridge/control-url \
@@ -143,6 +146,9 @@ grep -q "dwc2" "$MNT/config.txt" 2>/dev/null && ok "dwc2 overlay enabled (USB ga
   || no "no dwc2 overlay — it cannot be a USB device"
 grep -q "modules-load=dwc2" "$MNT/cmdline.txt" 2>/dev/null && ok "dwc2 loads at boot" \
   || warn "dwc2 not in modules-load — relies on the overlay alone"
+INITRD=$(awk '/^[[:space:]]*initramfs[[:space:]]/{value=$2} END {print value}' "$MNT/config.txt")
+[ "$INITRD" = initramfs612-overlay ] && [ -s "$MNT/$INITRD" ] \
+  && ok "overlay-capable initramfs selected" || no "A/B image does not select initramfs612-overlay"
 # The LAST gpu_mem line wins. The feeder decodes in software (hardware path measured worse live on
 # 2026-09-22), so the minimum is right; anything else is an unexplained change.
 GPU=$(grep -E '^gpu_mem=' "$MNT/config.txt" 2>/dev/null | tail -1 | cut -d= -f2)
@@ -302,7 +308,7 @@ has bridge-watchdog.sh && ok "watchdog present" || warn "no watchdog script"
 UW=$(grep -oE 'create_frame \$FUNCTION [0-9]+ [0-9]+ uncompressed' "$CAT/uvc-raw-setup.sh" 2>/dev/null | awk '{print $3"x"$4}')
 UMP=$(grep -oE 'echo [0-9]+ > functions/\$FUNCTION/streaming_maxpacket' "$CAT/uvc-raw-setup.sh" 2>/dev/null | awk '{print $2}')
 LCAP=$(grep -oE 'YUYV:[0-9]+x[0-9]+@' "$CAT/bridge-gadget-setup.sh" 2>/dev/null | head -1 | sed 's/YUYV://; s/@//')
-FCAP=$(grep -oE 'format=YUY2,width=[0-9]+,height=[0-9]+' "$CAT/bridge-feeder-net.sh" 2>/dev/null | sed -E 's/.*width=([0-9]+),height=([0-9]+)/\1x\2/')
+FCAP=$(grep -oE 'format=YUY2,width=[0-9]+,height=[0-9]+' "$CAT/bridge-video-receiver.py" 2>/dev/null | sed -E 's/.*width=([0-9]+),height=([0-9]+)/\1x\2/')
 ICAP=$(grep -oE '^W, H = [0-9]+, [0-9]+' "$CAT/render-idle-frame.py" 2>/dev/null | sed -E 's/W, H = ([0-9]+), ([0-9]+)/\1x\2/')
 [ "$UW" = 424x240 ] && ok "USB camera advertises 424x240 (fits one packet per microframe at 30 fps)" \
   || no "USB camera advertises ${UW:-?} — expected 424x240"
@@ -318,7 +324,7 @@ fi
 UI=$(awk '/dwFrameInterval$/{getline; print; exit}' "$CAT/uvc-raw-setup.sh" 2>/dev/null | tr -d ' ')
 UFPS=$([ -n "$UI" ] && [ "$UI" -gt 0 ] 2>/dev/null && echo $(( (10000000 + UI/2) / UI )))
 LFPS=$(grep -oE 'YUYV:[0-9]+x[0-9]+@[0-9]+/1' "$CAT/bridge-gadget-setup.sh" 2>/dev/null | head -1 | sed -E 's/.*@([0-9]+)\/1/\1/')
-FFPS=$(grep -oE 'format=YUY2,width=[0-9]+,height=[0-9]+,framerate=[0-9]+/1' "$CAT/bridge-feeder-net.sh" 2>/dev/null | sed -E 's/.*framerate=([0-9]+)\/1/\1/')
+FFPS=$(grep -oE 'framerate=[0-9]+/1' "$CAT/bridge-video-receiver.py" 2>/dev/null | sed -E 's/.*framerate=([0-9]+)\/1/\1/')
 if [ "${UFPS:-x}" = 30 ] && [ "$UFPS" = "$LFPS" ] && [ "$UFPS" = "$FFPS" ]; then
   ok "frame rate agrees everywhere: descriptor, loopback, feeder (30 fps)"
 else
@@ -353,10 +359,10 @@ has flight-recorder.py && grepf flight-recorder.sh 'exec /usr/bin/python3 /usr/l
 grepf bridge-uvcd.sh '^  > >\(exec grep --line-buffered -v' \
   && ok "camera EAGAIN flood filtered on stdout (where libuvcgadget prints it)" \
   || no "camera EAGAIN flood not filtered on stdout — journald floods again"
-grepf bridge-feeder-net.sh 'avdec_h264' && ! grep -vE '^[[:space:]]*#' "$CAT/bridge-feeder-net.sh" | grep -q 'v4l2h264dec' \
+grepf bridge-feeder-net.sh '^exec /usr/bin/python3 /usr/local/bin/bridge-video-receiver.py' && grepf bridge-video-receiver.py 'avdec_h264' && ! grep -vE '^[[:space:]]*#' "$CAT/bridge-video-receiver.py" | grep -q 'v4l2h264dec' \
   && ok "video feeder decodes in software (the hardware path measured worse live)" \
   || no "video feeder uses the hardware decoder path (74% vs 51% of a core live)"
-grepf bridge-feeder-net.sh 'latency=\$VLAT' && grepf bridge-feeder-net.sh '"\$VLAT" -gt 100\ ' \
+grepf bridge-video-receiver.py 'latency=%d' && grepf bridge-feeder-net.sh '"\$VLAT" -gt 100\ ' \
   && ok "video jitter buffer capped at 100 ms (profile stays WAN)" \
   || no "video jitter buffer follows the 300 ms WAN profile — ~200 ms extra lag"
 grepf bridge-agent.py 'LOCAL_STATUS = "http://127.0.0.1:8080/api/status"' \
@@ -764,6 +770,12 @@ else
 fi
 
 printf '\033[1m  %d passed, %d failed, %d warnings\033[0m\n' "$PASS" "$FAIL" "$WARN"
-[ "$FAIL" -eq 0 ] && echo "  → safe to flash" || echo "  → DO NOT FLASH"
+if [ "$FAIL" -ne 0 ]; then
+  echo "  → DO NOT FLASH: file audit failed"
+elif [ "$WARN" -ne 0 ]; then
+  echo "  → File checks completed with warnings; review them before spare-card testing"
+else
+  echo "  → File checks passed; boot and physical USB/media acceptance still required"
+fi
 rm -rf "$IDX" "$CAT"
 exit $([ "$FAIL" -eq 0 ] && echo 0 || echo 1)

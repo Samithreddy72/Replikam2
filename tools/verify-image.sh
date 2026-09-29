@@ -47,7 +47,7 @@ cleanup(){
 trap cleanup EXIT
 attach(){   # attach IMAGE -> A_BOOT, A_ROOT (slot A: the first root with bridge-web.py), A_MNT (boot, read-only)
   local out p
-  out=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$1" 2>/dev/null) || return 1
+  out=$(hdiutil attach -readonly -imagekey diskimage-class=CRawDiskImage -nomount "$1" 2>/dev/null) || return 1
   DISKS="$DISKS $(echo "$out" | head -1 | awk '{print $1}')"
   A_BOOT=$(echo "$out" | awk '/Windows_FAT|DOS_FAT|FAT_32/{print $1; exit}')
   A_ROOT=""
@@ -55,7 +55,7 @@ attach(){   # attach IMAGE -> A_BOOT, A_ROOT (slot A: the first root with bridge
     "$DEBUGFS" -R "stat /usr/local/bin/bridge-web.py" "$p" 2>/dev/null | grep -q Inode && { A_ROOT=$p; break; }
   done
   A_MNT=$(mktemp -d); MOUNTS="$MOUNTS $A_MNT"
-  diskutil mount readOnly -mountPoint "$A_MNT" "$A_BOOT" >/dev/null 2>&1
+  [ -n "$A_BOOT" ] && diskutil mount readOnly -mountPoint "$A_MNT" "$A_BOOT" >/dev/null 2>&1 || return 1
   [ -n "$A_ROOT" ]
 }
 attach "$IMG" || { echo "could not attach $IMG (or no root filesystem with bridge-web.py)"; exit 2; }
@@ -106,10 +106,27 @@ pi/configs/no-kmsg.conf /etc/systemd/journald.conf.d/no-kmsg.conf
 pi/configs/kit-watchdog.conf /etc/systemd/system.conf.d/99-watchdog.conf
 pi/configs/wifi-powersave-off.conf /etc/NetworkManager/conf.d/wifi-powersave-off.conf
 pi/configs/no-mac-rand.conf /etc/NetworkManager/conf.d/no-mac-rand.conf
-restore/binaries/uvc-gadget /usr/local/bin/uvc-gadget
-restore/binaries/libuvcgadget.so.0.4.0 /usr/local/lib/aarch64-linux-gnu/libuvcgadget.so.0.4.0
 MAP
-[ $bad -eq 0 ] && ok "$n configs, keys and camera binaries identical to git" || no "$bad of $n configs/keys/binaries differ"
+[ $bad -eq 0 ] && ok "$n configs and keys identical to git" || no "$bad of $n configs/keys differ"
+
+# Fresh source builds cannot match the historical retained binaries byte-for-byte.
+cat_img /usr/local/bin/uvc-gadget > "$T/uvc-elf"
+cat_img /usr/local/lib/aarch64-linux-gnu/libuvcgadget.so.0.4.0 > "$T/uvc-lib"
+if python3 - "$T/uvc-elf" "$T/uvc-lib" <<'PYELF'
+from pathlib import Path
+import hashlib, struct, sys
+for name in sys.argv[1:]:
+    data = Path(name).read_bytes()
+    if len(data) < 64 or data[:6] != b'\x7fELF\x02\x01' or struct.unpack_from('<H', data, 18)[0] != 183:
+        raise SystemExit('Missing or non-AArch64 ELF')
+    print('        compiled ELF sha256=' + hashlib.sha256(data).hexdigest())
+lib = Path(sys.argv[2]).read_bytes()
+for marker in (b'/run/bridge-pin/video-session', b'/run/bridge-video/frame', b'NBV1'):
+    if marker not in lib: raise SystemExit('Missing current session-bound frame reader')
+PYELF
+then ok "camera executable/library are AArch64; session-bound frame reader present"
+else no "compiled camera binary structure or session-bound reader missing"; fi
+note "ELF checks do not prove runtime behavior; require source-build provenance and spare-card USB acceptance"
 
 owner_shell=$(cat_img /etc/passwd | awk -F: '$1=="pi" {print $7}')
 [ "$owner_shell" = /bin/bash ] && cat_img /etc/shells | grep -qxF "$owner_shell" \
@@ -155,7 +172,7 @@ if [ -f "$CFG" ]; then
   [ "$KV" = "$PINNED_KERNEL" ] && ok "boots $KF = Linux $KV (the pinned kernel)" || no "boots $KF = Linux ${KV:-unreadable}, expected $PINNED_KERNEL"
   INITRD=$(grep -E '^initramfs ' "$CFG" | tail -1 | awk '{print $2}')
   if [ -n "$INITRD" ]; then
-    [ -s "$BMNT/$INITRD" ] && ok "initramfs $INITRD present" || no "config.txt names initramfs $INITRD but it is missing"
+    [ "$INITRD" = initramfs612-overlay ] && [ -s "$BMNT/$INITRD" ] && ok "overlay initramfs selected and present" || no "expected initramfs612-overlay, selected ${INITRD:-none}"
   fi
   exists "/usr/lib/modules/$KV/modules.dep" && ok "modules for $KV are installed (modules.dep present)" || no "no /usr/lib/modules/$KV - the booted kernel has no modules"
 else
@@ -188,8 +205,9 @@ done
 
 echo; echo "--- 5. the video/audio chain is what Everything-good shipped ---"
 cat_img /usr/local/bin/bridge-feeder-net.sh > "$T/fn"
-g fn 'avdec_h264' && ! grep -vE '^[[:space:]]*#' "$T/fn" | grep -q v4l2h264dec && ok "video: software decoder only (hardware path measured worse)" || no "video decoder not software-only"
-g fn 'latency=\$VLAT' && g fn '"\$VLAT" -gt 100 ' && ok "video: jitter buffer capped at 100 ms (profile stays WAN)" || no "video buffer cap missing"
+cat_img /usr/local/bin/bridge-video-receiver.py > "$T/receiver"
+g fn '^exec /usr/bin/python3 /usr/local/bin/bridge-video-receiver.py' && g receiver 'avdec_h264' && ! grep -vE '^[[:space:]]*#' "$T/receiver" | grep -q v4l2h264dec && ok "video: software decoder only (hardware path measured worse)" || no "video decoder not software-only"
+g receiver 'latency=%d' && g fn '"\$VLAT" -gt 100 ' && ok "video: jitter buffer capped at 100 ms (profile stays WAN)" || no "video buffer cap missing"
 cat_img /etc/systemd/journald.conf.d/no-kmsg.conf > "$T/kmsg"; g kmsg '^ReadKMsg=no' && ok "journald: kernel messages not ingested (ReadKMsg=no)" || no "journald no-kmsg drop-in missing"
 cat_img /usr/local/bin/flight-recorder.py > "$T/frpy"; g frpy '^PULL_WINDOW = 4.0' && ok "flight recorder: 4 s camera window" || no "flight recorder window not 4 s"
 cat_img /usr/local/bin/bridge-uvcd.sh > "$T/uvcd"; g uvcd '^  > >\(exec grep --line-buffered -v' && ok "camera: EAGAIN flood filtered on stdout" || no "camera filter missing/wrong stream"
@@ -202,7 +220,7 @@ g uvc 'create_frame \$FUNCTION 424 240 uncompressed u' && ok "UVC descriptor fra
 awk '/dwFrameInterval$/{getline; print; exit}' "$T/uvc" | grep -qx 333333 && ok "UVC frame interval 333333 = 30 fps" || no "UVC frame interval is not 30 fps"
 g uvc 'echo 1024 > functions/\$FUNCTION/streaming_maxpacket' && ok "streaming_maxpacket 1024 (one packet per microframe)" || no "streaming_maxpacket is not 1024"
 g gs '"YUYV:424x240@30/1"' && ok "loopback caps 424x240@30" || no "loopback caps wrong"
-g fn 'format=YUY2,width=424,height=240,framerate=30/1' && ok "feeder output 424x240@30" || no "feeder output wrong"
+g receiver 'format=YUY2,width=424,height=240' && g receiver 'framerate=30/1' && ok "feeder output 424x240@30" || no "feeder output wrong"
 g idl '^W, H = 424, 240' && ok "idle frame 424x240" || no "idle frame size wrong"
 g web 'dwFrameInterval' && ok "status page reads fps from the descriptor" || no "status page expected-fps fix missing"
 cat_img /usr/local/bin/bridge-return-audio.sh > "$T/ret"; cat_img /usr/local/bin/bridge > "$T/cli"

@@ -141,6 +141,8 @@ dtoverlay=disable-bt
 arm_freq=900
 CFG
 fi
+# Always select the overlay boot chain, even if the intermediate image already has dwc2.
+python3 "$(dirname "$0")/configure-boot.py" "$MNT/p1"
 # FAIL LOUD: the pinned kernel + overlay initramfs MUST be on the boot partition, else the card
 # boots the wrong kernel and read-only root never engages (the 2026-07-24 flash-test defect).
 for _bf in kernel612.img initramfs612-overlay; do

@@ -39,7 +39,8 @@ def parse(buf, out):
 
 def load(path):
     out = {}
-    parse(open(path, "rb").read(), out)
+    with open(path, "rb") as stream:
+        parse(stream.read(), out)
     if not out:
         raise ValueError("no files in %s" % path)
     return out
