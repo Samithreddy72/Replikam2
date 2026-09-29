@@ -2,11 +2,11 @@ import {test,expect} from '@playwright/test';
 test('browser preview shows honest states and navigates without overflow',async({page})=>{
  const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto('/');
- await expect(page.getByRole('heading',{name:'Ready when you are.'})).toBeVisible();
+ await expect(page.getByRole('heading',{name:'Set up your session'})).toBeVisible();
  await expect(page.getByRole('button',{name:'Go live',exact:true})).toBeDisabled();
  await page.screenshot({path:'test-results/studio.png',fullPage:true});
  await page.getByRole('button',{name:/Personas/}).first().click();
- await expect(page.getByRole('heading',{name:'Show up your way.'})).toBeVisible();
+ await expect(page.getByRole('heading',{name:'Avatar preview lab'})).toBeVisible();
  await page.getByRole('button',{name:'Robot',exact:true}).click();
  await expect(page.getByRole('img',{name:'robot persona preview'}).first()).toBeVisible();
  await page.screenshot({path:'test-results/personas.png',fullPage:true});
@@ -16,6 +16,10 @@ test('browser preview shows honest states and navigates without overflow',async(
  for(const name of ['Bridges','Sessions','Settings']){await page.getByRole('button',{name,exact:true}).first().click();await expect(page.locator('h1')).toBeVisible()}
  await page.setViewportSize({width:960,height:680});
  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBeTruthy();
+ await page.getByRole('button',{name:'Studio',exact:true}).first().click();
+ const action=await page.getByRole('button',{name:'Go live',exact:true}).boundingBox();
+ expect(action).not.toBeNull();expect(action!.y+action!.height).toBeLessThanOrEqual(680);
+ await page.screenshot({path:'test-results/studio-compact.png',fullPage:true});
  expect(errors).toEqual([]);
 });
 
@@ -43,6 +47,9 @@ test('desktop UI unlocks before streaming, handles mute, and ends session',async
  });
  await page.goto('/');
  await expect(page.getByRole('button',{name:'Go live',exact:true})).toBeEnabled();
+ await expect(page.getByRole('list',{name:'Session setup progress'})).toBeVisible();
+ await expect(page.getByRole('button',{name:'Go live',exact:true})).toHaveCount(1);
+ await page.screenshot({path:'test-results/studio-ready.png',fullPage:true});
  await page.getByPlaceholder('Enter your bridge PIN').fill('000000');
  await page.getByRole('button',{name:'Go live',exact:true}).click();
  await expect(page.getByText('Wrong PIN',{exact:true})).toBeVisible();
@@ -58,6 +65,7 @@ test('desktop UI unlocks before streaming, handles mute, and ends session',async
  await page.getByPlaceholder('Enter your bridge PIN').fill('123456');
  await page.getByRole('button',{name:'Go live',exact:true}).click();
  await expect(page.getByRole('button',{name:'End session',exact:true})).toBeEnabled();
+ await page.screenshot({path:'test-results/studio-live.png',fullPage:true});
  await page.getByRole('button',{name:'Close diagnostics'}).click();
  await page.getByRole('button',{name:'Mute microphone',exact:true}).click();
  await expect(page.getByRole('button',{name:'Unmute microphone',exact:true})).toBeEnabled();

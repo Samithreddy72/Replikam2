@@ -455,7 +455,7 @@ function App() {
               : "Preview only"}
         </span>
         <span className="glass">
-          {live ? "640 × 360 · 20 fps" : "Not broadcasting"}
+          {live ? "Room picture not verified" : "Not broadcasting"}
         </span>
       </div>
       {personaOnly || source === "Avatar" ? (
@@ -475,14 +475,14 @@ function App() {
           </div>
           <h2>
             {live
-              ? "You’re connected."
+              ? "Session running"
               : source === "Screen"
                 ? "Your work, center stage."
-                : "Your space. Your presence."}
+                : "Camera preview"}
           </h2>
           <p>
             {live
-              ? "Camera capture is owned by the media engine."
+              ? "Your selected camera is sending to the bridge."
               : source === "Screen"
                 ? "Screen transmission is planned for a future release."
                 : "Check your camera and sound before joining the room."}
@@ -507,7 +507,7 @@ function App() {
           {personaOnly || source === "Avatar"
             ? "Avatar lab · not transmitted to the bridge"
             : live
-              ? "Local preview released to avoid competing for the camera"
+              ? "Preview pauses during the session to keep camera capture reliable"
               : "Your preview stays on this device"}
         </span>
         {preview && (
@@ -633,9 +633,9 @@ function App() {
               {(state?.email || "D")[0].toUpperCase()}
             </div>
             <div>
-              <strong>{state?.email?.split("@")[0] || "Developer"}</strong>
+              <strong>{state?.email?.split("@")[0] || "Presenter"}</strong>
               <span>
-                {state?.signed_in ? "Personal workspace" : "Not signed in"}
+                {state?.signed_in ? "Fleet account" : "Not signed in"}
               </span>
             </div>
             <span className={`dot ${state?.signed_in ? "green" : ""}`} />
@@ -694,7 +694,7 @@ function App() {
             <div>
               <div className="eyebrow">
                 {page === "Studio"
-                  ? "MAKE YOURSELF PRESENT"
+                  ? "PRESENTER"
                   : page === "Personas"
                     ? "A LITTLE MORE YOU"
                     : "NETBRIDGE WORKSPACE"}
@@ -702,19 +702,19 @@ function App() {
               <h1>
                 {page === "Studio"
                   ? live
-                    ? "You’re in the room."
-                    : "Ready when you are."
+                    ? "Live session"
+                    : "Set up your session"
                   : page === "Personas"
-                    ? "Show up your way."
+                    ? "Avatar preview lab"
                     : page === "Bridges"
-                      ? "Your connection to anywhere."
+                      ? "Meeting bridges"
                       : page === "Sessions"
-                        ? "A little history. Less guesswork."
-                        : "Make yourself at home."}
+                        ? "Session history"
+                        : "Settings"}
               </h1>
               <p>
                 {page === "Studio"
-                  ? "Your camera, your voice, your connection. All in one place."
+                  ? live ? "Control your microphone and meeting audio here." : "Choose your room, check your devices, then go live."
                   : page === "Personas"
                     ? "Explore a voice-reactive persona in a private, local preview."
                     : page === "Bridges"
@@ -772,8 +772,8 @@ function App() {
                     <div className="small-icon">
                       <LockKeyhole size={19} />
                     </div>
-                    <h3>Your workspace is one sign-in away.</h3>
-                    <p>Connect to your fleet to find your bridges.</p>
+                    <h3>1. Sign in to your fleet</h3>
+                    <p>Use your work email to access the rooms shared with you.</p>
                   </div>
                   <div className="signin-fields">
                     <label>
@@ -852,37 +852,15 @@ function App() {
                   </div>
                 </section>
               )}
-              <div className="studio-top">
-                <div className="source-tabs">
-                  {[
-                    { name: "Camera", icon: Video },
-                    { name: "Avatar", icon: UserRound },
-                    { name: "Screen", icon: Monitor },
-                  ].map(({ name, icon: Icon }) => (
-                    <button
-                      key={name}
-                      disabled={live}
-                      className={source === name ? "active" : ""}
-                      onClick={() => changeSource(name)}
-                    >
-                      <Icon size={16} />
-                      {name}
-                      {name !== "Camera" && (
-                        <span className="tab-lab">LAB</span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-                <div className="bridge-name">
-                  <span className={`dot ${bridge?.online ? "green" : ""}`} />
-                  {bridge?.name || "No bridge selected"}
-                  <ChevronDown size={14} />
-                </div>
-              </div>
+              <ol className="setup-progress" aria-label="Session setup progress">
+                <li className={state?.signed_in ? "complete" : "current"}><span>{state?.signed_in ? <Check size={14}/> : "1"}</span><div><strong>Sign in</strong><small>{state?.signed_in ? "Fleet account connected" : "Use your work email"}</small></div></li>
+                <li className={state?.signed_in && !live ? "current" : live ? "complete" : ""}><span>{live ? <Check size={14}/> : "2"}</span><div><strong>Choose room & devices</strong><small>{bridge?.name || "Select your meeting bridge"}</small></div></li>
+                <li className={live ? "current" : ""}><span>3</span><div><strong>{live ? "Session running" : "Go live"}</strong><small>{live ? "You control when to stop" : "Camera and microphone start only when you choose"}</small></div></li>
+              </ol>
               <div className="studio-grid">
                 <section className="stage">
                   {previewPanel()}
-                  <div className="toolbar">
+                  {live && <div className="toolbar" aria-label="Live audio controls">
                     <div className="toolbar-item">
                       <button
                         className={`round ${live && !state?.voice_muted ? "mint" : ""}`}
@@ -941,42 +919,7 @@ function App() {
                       </button>
                       <span>Meeting audio</span>
                     </div>
-                    <div className="toolbar-item">
-                      <button
-                        className="round"
-                        aria-label="Toggle connection diagnostics"
-                        onClick={() => setHealth((v) => !v)}
-                      >
-                        <Activity size={22} />
-                      </button>
-                      <span>Diagnostics</span>
-                    </div>
-                    <span className="toolbar-divider" />
-                    <div className="toolbar-item">
-                      <button
-                        className={`round ${live ? "coral" : "mint"}`}
-                        disabled={
-                          !!busy ||
-                          !desktop ||
-                          (!live &&
-                            (!state?.signed_in ||
-                              !host ||
-                              !camera ||
-                              source !== "Camera"))
-                        }
-                        aria-label={live ? "End session" : "Go live"}
-                        onClick={() =>
-                          void action(
-                            live ? "Ending session" : "Connecting",
-                            live ? endSession : goLive,
-                          )
-                        }
-                      >
-                        {live ? <Square size={19} /> : <Play size={21} />}
-                      </button>
-                      <span>{live ? "End session" : "Go live"}</span>
-                    </div>
-                  </div>
+                  </div>}
                   <div className="stage-foot">
                     <LockKeyhole size={13} />
                     Media travels over your private mesh.
@@ -985,11 +928,9 @@ function App() {
                 </section>
                 <aside className="setup-card">
                   <div className="card-heading">
-                    <h3>{live ? "Session setup" : "Before you go live"}</h3>
+                    <h3>{live ? "Your session" : "2. Room & devices"}</h3>
                     <span className={`dot ${live ? "green" : ""}`} />
                   </div>
-                  {deviceFields}
-                  <div className="separator" />
                   <label>
                     Meeting bridge
                     <select
@@ -1022,20 +963,39 @@ function App() {
                       </div>
                     </label>
                   )}
+                  <div className="separator" />
+                  {deviceFields}
                   {button(
                     "Refresh devices",
                     loadDevices,
                     <RefreshCw size={14} />,
                     "text-button wide",
                   )}
-                  {source !== "Camera" && (
-                    <div className="lab-note">
-                      {source === "Avatar"
-                        ? "Avatar animation is local-only in this build."
-                        : "Screen transmission is not yet available."}{" "}
-                      Choose Camera to go live.
-                    </div>
-                  )}
+                  <div className="session-action-area">
+                    <p>{live ? "Ending the session stops your camera and microphone." : !state?.signed_in ? "Sign in above to continue." : !host ? "Choose a meeting bridge to continue." : !camera ? "Connect and select a camera to continue." : "3. Enter the bridge PIN above, then start your session."}</p>
+                      <button
+                        className={`session-action ${live ? "end-action" : "primary"}`}
+                        disabled={
+                          !!busy ||
+                          !desktop ||
+                          (!live &&
+                            (!state?.signed_in ||
+                              !host ||
+                              !camera ||
+                              source !== "Camera"))
+                        }
+                        aria-label={live ? "End session" : "Go live"}
+                        onClick={() =>
+                          void action(
+                            live ? "Ending session" : "Connecting",
+                            live ? endSession : goLive,
+                          )
+                        }
+                      >
+                        {live ? <Square size={18} /> : <Play size={18} />}
+                        {live ? "End session" : "Go live"}
+                      </button>
+                  </div>
                 </aside>
               </div>
             </>

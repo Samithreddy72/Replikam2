@@ -340,8 +340,8 @@ try:
         r = c.post("/admin/rollouts/%s/advance?force=true" % ro1, headers=A)        # 50 -> 100: Charlie's turn
         v = r.json()
         check(r.status_code == 200 and V(v, "stage_pct") == 100 and V(v, "dispatched_now") == 0
-              and any("Charlie" in w["device"] and "laptop" in w["reason"] for w in V(v, "queued_busy", [])),
-              "a bridge with its meeting laptop attached is not sent the update - queued until idle", v)
+              and any("Charlie" in w["device"] and "USB attachment is unverified" in w["reason"] for w in V(v, "queued_busy", [])),
+              "a bridge with uncertain USB attachment is not sent the update - queued until idle", v)
         check("queued until idle" in V(v, "summary", "") and V(v, "catch_up") is True,
               "…the summary says so, and catch-up is offered", v)
         tel(R3, udc="not attached")
