@@ -102,19 +102,20 @@ class Workflow(unittest.TestCase):
   first=c.get('/admin/devices/a/timeline').json();self.assertEqual(len(first['entries']),30)
   second=c.get('/admin/devices/a/timeline',params={'cursor':first['next_cursor']}).json()
   self.assertTrue(second['entries']);self.assertFalse({(r['kind'],r['id']) for r in first['entries']} & {(r['kind'],r['id']) for r in second['entries']})
- def test_owner_recovery_is_one_time_and_preserves_device(self):
+ def test_replacement_card_enrolls_automatically_and_preserves_device(self):
   c=self.client
-  self.assertEqual(c.post('/admin/devices/a/recovery-grant',json={'confirm':True}).status_code,409)
   with SessionLocal() as db:
-   d=db.get(Device,'a');d.latest={'udc':'not attached','streams':{'video':False,'voice':False}};d.name='Room A';db.commit()
-  r=c.post('/admin/devices/a/recovery-grant',json={'confirm':True});self.assertEqual(r.status_code,200,r.text)
-  token=r.json()['recovery_token']
-  body={'device_id':'a','pairing_code':'A','bootstrap_token':'factory','recovery_token':token}
+   d=db.get(Device,'a');d.name='Room A';db.commit()
+  body={'device_id':'a','pairing_code':'A','bootstrap_token':'factory'}
+  self.assertEqual(c.post('/v1/enroll',json=dict(body,bootstrap_token='wrong')).status_code,401)
   self.assertEqual(c.post('/v1/enroll',json=dict(body,device_id='b')).status_code,403)
   restored=c.post('/v1/enroll',json=body);self.assertEqual(restored.status_code,200,restored.text)
-  self.assertEqual(c.post('/v1/enroll',json=body).status_code,401)
+  token=restored.json()['device_token']
   self.assertEqual(c.post('/v1/telemetry',headers={'Authorization':'Bearer device-a'},json={}).status_code,401)
+  self.assertEqual(c.get('/v1/commands',headers={'Authorization':'Bearer '+token}).status_code,200)
   with SessionLocal() as db:self.assertEqual(db.get(Device,'a').name,'Room A')
+  fresh=c.post('/v1/enroll',json=dict(body,device_id='new-card'));self.assertEqual(fresh.status_code,200,fresh.text)
+  self.assertEqual(c.post('/admin/devices/a/recovery-grant',json={'confirm':True}).status_code,410)
  def test_support_report_is_scoped_and_rejects_secrets(self):
   c=self.client
   self.assertEqual(c.post('/auth/support-reports',json={'device_id':'b'}).status_code,404)

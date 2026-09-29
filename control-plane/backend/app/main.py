@@ -620,23 +620,11 @@ def enroll(body: EnrollIn, request: Request, db: Session = Depends(get_db)):
     dev = db.get(Device, body.device_id)
     is_new = dev is None
     if not is_new:
-        # A factory/bootstrap credential admits NEW devices, not an existing device's
-        # identity. Otherwise any holder can rotate its token and collect its PIN/mesh key.
+        # Fleet owner policy: a valid organization bootstrap credential permits
+        # replacement cards to re-enroll automatically after joining Wi-Fi.
+        # Preserve identity/history, but never transfer a device between organizations.
         if dev.org_id != settings.bootstrap_tokens[body.bootstrap_token]:
             raise HTTPException(403, "bootstrap organization does not own this device")
-        header = request.headers.get("Authorization", "")
-        current = auth._bearer(header) if header.startswith("Bearer ") else ""
-        if not dev.token_hash or not auth.secrets.compare_digest(auth.hash_token(current), dev.token_hash):
-            recovered = False
-            if body.recovery_token and len(body.recovery_token) <= 256:
-                claimed = db.execute(update(models.RecoveryGrant).where(
-                    models.RecoveryGrant.token_hash==auth.hash_token(body.recovery_token),
-                    models.RecoveryGrant.device_id==dev.id,
-                    models.RecoveryGrant.used_at.is_(None),models.RecoveryGrant.expires_at>utcnow())
-                    .values(used_at=utcnow()))
-                recovered = claimed.rowcount == 1
-            if not recovered:
-                raise HTTPException(401, "existing device credential required; contact the fleet owner for recovery")
     if is_new:
         # The bootstrap token decides which org the device enrolls into, so a
         # customer's cards land directly in their org (never visible to others).
@@ -2812,17 +2800,9 @@ def workflow_bulk(body:dict,actor=Depends(auth.require_admin),db:Session=Depends
 
 @app.post("/admin/devices/{device_id}/recovery-grant")
 def workflow_recovery_grant(device_id:str,body:dict,actor=Depends(auth.require_admin),db:Session=Depends(get_db)):
-    dev=_scoped_device(db,device_id,actor)
-    if body.get('confirm') is not True:raise HTTPException(400,'Confirm replacement-card recovery explicitly')
-    activity=workflow.activity(dev)
-    if activity.get('live') or activity.get('laptop'):raise HTTPException(409,'End the meeting and disconnect the laptop before recovery')
-    token=auth.secrets.token_urlsafe(32)
-    db.query(models.RecoveryGrant).filter(models.RecoveryGrant.device_id==device_id,models.RecoveryGrant.used_at.is_(None)).delete(synchronize_session=False)
-    expires=utcnow()+dt.timedelta(minutes=15)
-    db.add(models.RecoveryGrant(device_id=device_id,token_hash=auth.hash_token(token),expires_at=expires));db.commit()
-    _audit(db,actor,'recovery:issued',device_id)
-    return {'recovery_token':token,'expires_at':expires.isoformat(),
-            'instructions':'Shown once. With the original card offline, place this token in /data/netbridge-recovery.token on the replacement card (root-owned, mode 0600). Successful enrollment rotates the old device credential and preserves Fleet history.'}
+    _scoped_device(db,device_id,actor)
+    raise HTTPException(410, "Recovery tokens are no longer required. Connect the replacement card to Wi-Fi; it enrolls automatically using this Fleet's image credential.")
+
 
 def _mount_panel():
     # The built panel has lived at control-plane/panel-dist, but an earlier version only

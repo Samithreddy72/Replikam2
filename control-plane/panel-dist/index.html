@@ -1184,12 +1184,8 @@ function buildDiagnostics(p, d){
     h("div", {class: "inline"}, h("button", {class: "btn primary sm", type: "button", onclick: () => doAction(d.id, "jitter-diagnose")}, "Run the diagnosis"),
       h("span", {class: "small muted"}, "Measures power, path, rates and config, names the most likely cause and offers its fix. Changes nothing.")),
     DR.f.diagOut,
-    h("h3", {}, "Replacement-card recovery"),
-    h("button",{class:"btn secondary sm",type:"button",onclick:()=>{
-      openDialog({title:'Recover this bridge identity',ok:'Issue 15-minute recovery token',body:h('p',{},'Use only for a replacement card. End the meeting, disconnect the laptop and keep the original card offline. This preserves Fleet history; successful recovery revokes the old card credential.'),onOk:async()=>{
-        const r=await api(`/admin/devices/${encodeURIComponent(d.id)}/recovery-grant`,{method:'POST',body:JSON.stringify({confirm:true})});
-        openDialog({title:'Recovery token — shown once',cancel:'Close',body:[h('p',{},r.instructions),h('pre',{style:'white-space:pre-wrap'},r.recovery_token),h('p',{},'Expires '+r.expires_at)]});return true;
-      }});}},"Recover a replacement card…"),
+    h("h3", {}, "Replacement cards"),
+    h("p", {class:"small muted"}, "Flash this Fleet’s image and connect to Wi-Fi. The bridge automatically rejoins with its existing name and history. No recovery token is needed. Keep the previous card offline."),
     h("h3", {}, "Alert ownership"),
     h("button",{class:"btn secondary sm",type:"button",onclick:()=>workflowAlerts(d)},"Acknowledge or snooze alerts"),
     h("h3", {}, "Session and incident history"),
