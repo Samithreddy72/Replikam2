@@ -75,7 +75,7 @@ impl Engine {
             std::fs::create_dir_all(&logs)?;
             let log = std::fs::File::create(logs.join("desktop-engine.log"))?;
             command.env("NB_DESKTOP_TOKEN", &engine.token).env("NB_DESKTOP_PORT", port.to_string()).env("PYTHONUNBUFFERED", "1")
-                .stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log).spawn().map_err(Into::into)
+                .env("NB_DESKTOP_OWNER_PIPE", "1").stdin(Stdio::piped()).stdout(log.try_clone()?).stderr(log).spawn().map_err(Into::into)
         })();
         match result { Ok(child) => *engine.child.lock().unwrap() = Some(child), Err(e) => engine.startup_error = Some(format!("Unable to start the bundled media engine: {e}")) }
         engine

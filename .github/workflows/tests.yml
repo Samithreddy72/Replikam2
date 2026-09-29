@@ -27,7 +27,9 @@ jobs:
         run: go test -race ./...
       - name: Register native sleep notifications without suspending the runner
         if: runner.os != 'Linux'
-        run: python tests/native-power-observer.py
+        run: |
+          python tests/native-power-observer.py
+          python tests/test-process-lifecycle.py
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

@@ -3,7 +3,7 @@
 set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo 'Run with sudo on the Fleet host' >&2; exit 1; }
 cd /opt/netbridge
-docker compose exec -T fleet python -m app.backup
+docker compose exec -T fleet python -m app.backup </dev/null
 install -d /etc/systemd/system
 cat > /etc/systemd/system/netbridge-backup.service <<'EOF'
 [Unit]

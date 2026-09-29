@@ -12,6 +12,12 @@ import sys
 import threading
 import urllib.parse
 
+from process_guard import Lifecycle, guard_main
+
+if __name__ == '__main__' and len(sys.argv) == 3 and sys.argv[1] == '--netbridge-process-guard':
+    guard_main(int(sys.argv[2]))
+    raise SystemExit(0)
+
 import source_app as engine
 
 TOKEN = os.environ.get('NB_DESKTOP_TOKEN', '')
@@ -97,8 +103,14 @@ def main():
     engine.check_for_update = lambda url: None
     engine._kill_orphan_media = lambda: None
     engine._kill_orphan_mesh = lambda **kwargs: None
-    engine.main()
-    lock.close()
+    lifecycle = Lifecycle()
+    lifecycle.start()
+    lifecycle.watch_owner()
+    try:
+        engine.main()
+    finally:
+        lifecycle.finish()
+        lock.close()
 
 
 if __name__ == '__main__':
