@@ -1,4 +1,5 @@
 """Download archives must not leak temporary or AppleDouble files into signed runtimes."""
+import hashlib
 import importlib.util
 from pathlib import Path
 import shutil
@@ -16,7 +17,7 @@ class Archive(unittest.TestCase):
             root=Path(temp); archive=root/'input.zip'; destination=root/'runtime'
             with zipfile.ZipFile(archive,'w') as zipped:
                 for name,body in entries.items():zipped.writestr(name,body)
-            with patch.object(build.platform,'system',return_value='Darwin'), patch.object(build.platform,'machine',return_value='arm64'), patch.object(build,'IS_WIN',False), patch.object(build.urllib.request,'urlretrieve',side_effect=lambda url,path:shutil.copyfile(archive,path)):
+            with patch.object(build.platform,'system',return_value='Darwin'), patch.object(build.platform,'machine',return_value='arm64'), patch.object(build,'IS_WIN',False), patch.object(build,'FFMPEG_SHA256',{'Darwin-arm64':hashlib.sha256(b'executable').hexdigest()}), patch.object(build.urllib.request,'urlretrieve',side_effect=lambda url,path:shutil.copyfile(archive,path)):
                 result=build.fetch_ffmpeg(destination)
             return result is not None,{p.name:p.read_bytes() for p in destination.iterdir()}
 
@@ -31,5 +32,15 @@ class Archive(unittest.TestCase):
     def test_ambiguous_executable_is_refused(self):
         success,files=self.run_archive({'one/ffmpeg':b'one','two/ffmpeg':b'two'})
         self.assertFalse(success);self.assertEqual(files,{})
+
+    def test_changed_upstream_executable_is_refused(self):
+        success,files=self.run_archive({'bin/ffmpeg':b'changed upstream executable'})
+        self.assertFalse(success);self.assertEqual(files,{})
+
+    def test_unverified_cached_binary_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest=Path(temp);(dest/'ffmpeg').write_bytes(b'changed')
+            with patch.object(build.platform,'system',return_value='Darwin'), patch.object(build.platform,'machine',return_value='arm64'), patch.object(build,'IS_WIN',False):
+                self.assertIsNone(build.fetch_ffmpeg(dest))
 
 if __name__=='__main__':unittest.main()

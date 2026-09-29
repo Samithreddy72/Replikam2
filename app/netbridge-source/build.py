@@ -41,6 +41,14 @@ FFMPEG_URLS = {
 }
 
 
+# Reviewed native binaries from the successful 0.1.2 runtime manifests. Mutable
+# upstream URLs may move, but a release must never silently ship different bytes.
+FFMPEG_SHA256 = {
+    "Darwin-arm64": "6d175a4743ca50256e89a8cdd731100f9cee33bd79aeea46894d209410dc6617",
+    "Windows-AMD64": "3256173f3f8bffd7df12227c68adf68025edb1832273a9530688a7bb1ed8edec",
+}
+
+
 def log(*a):
     print("[build]", *a, flush=True)
 
@@ -49,13 +57,17 @@ def fetch_ffmpeg(dest: pathlib.Path) -> pathlib.Path | None:
     """Download a static ffmpeg next to the app. Returns the binary path, or None."""
     key = "%s-%s" % (platform.system(), platform.machine())
     url = FFMPEG_URLS.get(key)
-    if not url:
-        log("no bundled ffmpeg for %s — the app will fall back to one on PATH" % key)
+    expected = FFMPEG_SHA256.get(key)
+    if not url or not expected:
+        log("no reviewed FFmpeg digest for %s; bundled release unavailable" % key)
         return None
     dest.mkdir(parents=True, exist_ok=True)
     out = dest / ("ffmpeg.exe" if IS_WIN else "ffmpeg")
     if out.exists():
-        log("ffmpeg already fetched")
+        if _sha256(out) != expected:
+            log("cached FFmpeg failed its pinned digest check")
+            return None
+        log("cached ffmpeg digest verified")
         return out
     log("downloading ffmpeg for %s" % key)
     # Keep archives and AppleDouble metadata outside the shipped runtime. Extract only
@@ -83,6 +95,8 @@ def fetch_ffmpeg(dest: pathlib.Path) -> pathlib.Path | None:
                         raise ValueError('Expected exactly one FFmpeg executable')
                     with archive.extractfile(matches[0]) as source, out.open('wb') as target:
                         shutil.copyfileobj(source, target)
+            if _sha256(out) != expected:
+                raise ValueError("FFmpeg executable does not match the reviewed digest")
             out.chmod(0o755)
         log("bundled ffmpeg -> %s (%.1f MB)" % (out, out.stat().st_size / 1e6))
         return out
