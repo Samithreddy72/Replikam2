@@ -408,7 +408,7 @@ def render(s=None, gate=None):
         tries = int(read(TRIES) or 0)
     except ValueError:
         tries = 0
-    st = {"protocol": PROTOCOL, "required": True, "video_binding": "ssrc-sha256-v1",
+    st = {"protocol": PROTOCOL, "required": True, "video_binding": "ssrc-sha256-31-v1",
           "pin_set": bool(stored), "hash": hash_kind(stored),
           "locked": not bool(s), "lockout": left > 0, "lockout_remaining": left,
           "wrong_tries": tries,

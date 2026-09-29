@@ -53,15 +53,21 @@ func relayForwardPolicy(local net.PacketConn, mesh net.Conn, dial func(context.C
 			continue
 		}
 		if mesh == nil {
-			if failures >= 3 || time.Now().Before(retryAt) {
+			if time.Now().Before(retryAt) {
 				continue
 			}
+			if failures >= 3 {
+				failures = 0
+			} // one new burst after the circuit cooldown
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			next, err := dial(ctx)
 			cancel()
 			if err != nil {
 				retryAt = time.Now().Add(delays[failures])
 				failures++
+				if failures == 3 {
+					retryAt = time.Now().Add(time.Minute)
+				}
 				continue
 			}
 			failures++
@@ -76,6 +82,8 @@ func relayForwardPolicy(local net.PacketConn, mesh net.Conn, dial func(context.C
 			healthySince = time.Time{}
 			if failures < 3 {
 				retryAt = time.Now().Add(delays[failures])
+			} else {
+				retryAt = time.Now().Add(time.Minute)
 			}
 			fmt.Fprintln(os.Stderr, "Media transport unavailable; affected leg only")
 			continue
@@ -86,5 +94,59 @@ func relayForwardPolicy(local net.PacketConn, mesh net.Conn, dial func(context.C
 		if time.Since(healthySince) >= time.Minute {
 			failures = 0
 		}
+	}
+}
+
+// Rebind only the return socket when it fails. The running mesh identity and all
+// other legs remain intact, including through a control-plane outage.
+func receiveMedia(ctx context.Context, mesh net.PacketConn, dial func() (net.PacketConn, error), deliver func([]byte), delays [3]time.Duration, cooldown time.Duration) {
+	defer func() {
+		if mesh != nil {
+			mesh.Close()
+		}
+	}()
+	attempts := 0
+	healthySince := time.Time{}
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if mesh == nil {
+			wait := cooldown
+			if attempts < len(delays) {
+				wait = delays[attempts]
+			}
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if attempts == len(delays) {
+				attempts = 0
+			}
+			attempts++
+			next, err := dial()
+			if err != nil {
+				continue
+			}
+			mesh = next
+		}
+		b := make([]byte, 1500)
+		n, _, err := mesh.ReadFrom(b)
+		if err != nil {
+			mesh.Close()
+			mesh = nil
+			healthySince = time.Time{}
+			continue
+		}
+		if healthySince.IsZero() {
+			healthySince = time.Now()
+		}
+		if time.Since(healthySince) >= time.Minute {
+			attempts = 0
+		}
+		deliver(b[:n])
 	}
 }

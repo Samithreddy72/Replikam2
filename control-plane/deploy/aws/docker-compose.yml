@@ -10,6 +10,11 @@ services:
   fleet:
     image: netbridge-fleet:latest
     restart: always
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       # PUBLIC_BASE_URL is what puts a clickable link in sign-in emails. Without it the
       # email carries only a paste-in code — the exact friction that cost us an hour.
@@ -53,6 +58,11 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: always
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "80:80"
       - "443:443"

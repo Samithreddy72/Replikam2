@@ -102,3 +102,35 @@ func TestRelayStopsAfterThreeRepairAttempts(t *testing.T) {
 		t.Fatalf("attempts=%d", attempts.Load())
 	}
 }
+
+type readFailure struct{ net.PacketConn }
+
+func (readFailure) ReadFrom([]byte) (int, net.Addr, error) { return 0, nil, errors.New("lost socket") }
+func (readFailure) Close() error                           { return nil }
+func TestReturnSocketRepairPreservesProcessAndBoundsRetries(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var attempts atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		receiveMedia(ctx, readFailure{}, func() (net.PacketConn, error) { attempts.Add(1); return nil, errors.New("offline") }, func([]byte) { t.Error("unexpected packet") }, [3]time.Duration{}, time.Hour)
+		close(done)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for attempts.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("attempts=%d", attempts.Load())
+	}
+	time.Sleep(10 * time.Millisecond)
+	if attempts.Load() != 3 {
+		t.Fatal("unbounded return socket retry loop")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("return repair did not cancel")
+	}
+}

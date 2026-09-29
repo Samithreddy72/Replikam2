@@ -22,6 +22,7 @@ control plane refuses fleet mutations even if the UI asked for them.
 """
 import hashlib, json, os, pathlib, re, shutil, socket, subprocess, sys, threading, time
 import urllib.request, urllib.error, urllib.parse
+import math
 
 
 def _ensure_ca_bundle():
@@ -521,7 +522,7 @@ def _open_browser(url):
 
 
 # --------------------------------------------------------------------------- devices
-def av_devices():
+def av_devices(timeout=25):
     """Enumerate cameras and mics BY NAME.
 
     Both platforms print their device list to STDERR from a deliberately-failing probe
@@ -537,7 +538,7 @@ def av_devices():
             if IS_WIN else
             [ff, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""])
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=25)
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     except Exception as e:
         return {"video": [], "audio": [], "error": str(e)}
     err = p.stderr or ""
@@ -634,6 +635,60 @@ class WaitingMicrophone:
         return 1
 
 
+def bind_video_ticket(argv, ticket):
+    """Non-secret RTP discriminator; supports old signed and new unsigned FFmpeg options."""
+    argv = list(argv)
+    if not ticket:
+        return argv
+    value = str((int(hashlib.sha256(ticket.encode()).hexdigest()[:8], 16) & 0x7fffffff) or 1)
+    if "-ssrc" in argv:
+        argv[argv.index("-ssrc") + 1] = value
+    else:
+        argv[-1:-1] = ["-ssrc", value]
+    return argv
+
+
+class VideoQuality:
+    LEVELS = ((30, '600k'), (20, '400k'), (15, '250k'))
+
+    def __init__(self):
+        self.level = 0
+        self.bad = 0
+        self.good_since = None
+        self.changed_at = None
+
+    def observe(self, fps, now):
+        if isinstance(fps, bool) or not isinstance(fps, (int, float)) or not math.isfinite(fps) or fps <= 0:
+            self.bad = 0
+            self.good_since = None
+            return None  # no measurements/complete outage is not congestion evidence
+        expected = self.LEVELS[self.level][0]
+        if fps < expected * .65:
+            self.bad += 1
+            self.good_since = None
+        elif fps >= expected * .9:
+            self.bad = 0
+            if self.good_since is None:
+                self.good_since = now
+        else:
+            self.bad = 0
+            self.good_since = None
+        if self.changed_at is not None and now - self.changed_at < 60:
+            return None
+        next_level = self.level
+        if self.bad >= 3 and self.level < len(self.LEVELS)-1:
+            next_level += 1
+        elif self.level and self.good_since is not None and now - self.good_since >= 180:
+            next_level -= 1
+        if next_level == self.level:
+            return None
+        self.level = next_level
+        self.changed_at = now
+        self.bad = 0
+        self.good_since = None
+        return self.LEVELS[self.level]
+
+
 class Session:
     """Owns the live ffmpeg legs + the return listener."""
 
@@ -656,6 +711,9 @@ class Session:
         self.return_port = 5004
         self.return_player = "none"
         self.voice_proc = None
+        self.video_quality = VideoQuality()
+        self.capture_names = {}
+        self.waiting_for_devices = {}
         self.voice_muted = False
         self.return_proc = None     # the return-audio player, tracked so it can be toggled
         self.return_on = True
@@ -722,6 +780,10 @@ class Session:
     @_locked
     def start(self, pi_host, video_idx, audio_idx, fps=STREAM_FPS, mic_gain=0, return_port=5004, mic_name=None):
         self.stop()
+        self.interruption = None
+        self.video_quality = VideoQuality()
+        self.capture_names = {}
+        self.waiting_for_devices = {}
         self.bridge, self.return_port = pi_host, return_port
         ff = _ffmpeg()
         common = [ff, "-hide_banner", "-loglevel", "warning"]
@@ -756,13 +818,7 @@ class Session:
         ] + venc + [
             "-b:v", STREAM_BITRATE, "-g", str(fps), "-bsf:v", "dump_extra=freq=keyframe", "-an",
             "-f", "rtp", "rtp://%s:%d?pkt_size=1100" % (pi_host, RTP_VIDEO)]
-        # Bind RTP to this PIN session. This public discriminator rejects late packets
-        # from an earlier presenter; encrypted mesh + Pi peer gate remain authorization.
-        ticket = PINS.ticket()
-        if ticket:
-            ssrc = int(hashlib.sha256(ticket.encode()).hexdigest()[:8], 16) or 1
-            # FFmpeg's RTP muxer exposes SSRC as a signed 32-bit option.
-            v[-1:-1] = ["-ssrc", str(ssrc if ssrc < 2**31 else ssrc - 2**32)]
+        v = bind_video_ticket(v, PINS.ticket())
         a = common + ain + [
             # The Pi owns voice AGC. Avoid stacked boosts; disable the limiter's
             # automatic makeup gain so this safety ceiling really stays at 0.9.
@@ -879,6 +935,22 @@ class Session:
         argv = (getattr(self, "leg_argv", {}) or {}).get(name)
         if not argv and not (name == "voice" and getattr(self, "voice_backend", None) == "gstreamer-coreaudio"):
             return False
+        selected = getattr(self, "capture_names", {}).get(name)
+        if selected and (name == "video" or IS_WIN):
+            devices = av_devices(timeout=3).get("video" if name == "video" else "audio", [])
+            matches = [d for d in devices if d.get("name") == selected]
+            if not matches:
+                self.waiting_for_devices[name] = selected
+                return False
+            self.waiting_for_devices.pop(name, None)
+            argv = list(argv)
+            if "-i" in argv:
+                argv[argv.index("-i")+1] = (("video=" if name == "video" else "audio=") + selected
+                    if IS_WIN else str(matches[0]["index"]) + ":none")
+            self.leg_argv[name] = argv
+        if name == "video":
+            argv = bind_video_ticket(argv, PINS.ticket())
+            self.leg_argv[name] = argv
         old = (getattr(self, "leg_proc", {}) or {}).get(name)
         if old is not None:
             # Same care as a full stop. A respawn happens exactly when something is already
@@ -908,6 +980,25 @@ class Session:
         if name == "voice":
             self.voice_proc = proc
         return proc.poll() is None
+
+    @_locked
+    def adapt_video(self, check, now):
+        if not self.wanted or not isinstance(check, dict) or check.get("source_state") != "live":
+            return None
+        choice = self.video_quality.observe(check.get("fps"), now)
+        if choice is None:
+            return None
+        argv = list(self.leg_argv.get("video") or [])
+        if not argv:
+            return None
+        fps, bitrate = choice
+        for flag, value in (("-r", str(fps)), ("-g", str(fps)), ("-b:v", bitrate)):
+            if flag not in argv:
+                return None
+            argv[argv.index(flag)+1] = value
+        self.leg_argv["video"] = argv
+        ok = self.respawn_leg("video")
+        return "Video set to %d fps / %s%s" % (fps, bitrate, "" if ok else " — camera unavailable")
 
     def leg_cpu_rate(self, name):
         """CPU seconds per wall second this leg is currently burning, or None.
@@ -1285,6 +1376,32 @@ def _quit(p, timeout=4.0):
         p.kill()
     except Exception:
         pass
+
+
+_SUSPENDING = threading.Event()
+_POWER_OBSERVER = None
+
+
+def suspend_capture():
+    # Native sleep callback: privacy intent is set before any process cleanup.
+    _SUSPENDING.set()
+    if not SESSION.wanted:
+        return
+    SESSION.wanted = False
+    SESSION.stop()
+    SESSION.interruption = "Session paused for sleep. Choose Go live to resume."
+    ticket, port = PINS.ticket(), getattr(MESH, "control_port", None)
+    PINS.clear()
+    # Capture the old ticket NOW: delayed cleanup after wake must never end a new session.
+    def retire():
+        if ticket and port:
+            api("POST", "http://127.0.0.1:%d/api/end-session" % port,
+                body={"ticket": ticket}, timeout=2)
+    threading.Thread(target=retire, daemon=True).start()
+
+
+def resume_capture():
+    _SUSPENDING.clear()  # Explicit Go live is the only path that starts capture again.
 
 
 SESSION = Session()
@@ -1709,7 +1826,7 @@ def _unlock_bridge(host, st, pin):
             if proto < PIN_PROTOCOL:
                 return {"ok": False, "reason": "old_bridge", "message": PIN_MESSAGES["old_bridge"]}
             # protocol 2: this app keeps the ticket in memory. Older apps get no ticket back.
-            last = api("POST", route["base"] + "/api/unlock", body={"pin": pin, "protocol": PIN_PROTOCOL}, timeout=15)
+            last = api("POST", route["base"] + "/api/unlock", body={"pin": pin, "protocol": PIN_PROTOCOL, "video_binding": "ssrc-sha256-31-v1"}, timeout=15)
             if not isinstance(last,dict) or last.get("_error"):
                 return {"ok": False, "reason": "unconfirmed", "attempts": 1,
                         "message": "The PIN result could not be confirmed. It was not retried automatically. Check the bridge connection before trying again."}
@@ -1727,6 +1844,9 @@ def _unlock_bridge(host, st, pin):
                             "be starting up — wait a few seconds and try again")}
     if last.get("ok") and last.get("ticket"):
         PINS.set(host, last["ticket"])
+        if getattr(SESSION, "wanted", False):
+            # A renewed PIN creates a new epoch. Rebind video only; healthy audio stays up.
+            SESSION.respawn_leg("video")
         return {"ok": True, "reason": "ok", "unlocked": True,
                 "message": "unlocked — this session ends when you press End session",
                 "idle_timeout": last.get("idle_timeout"), "expires_in": last.get("expires_in")}
@@ -1946,7 +2066,7 @@ class StreamGuard:
         # gating on `live` alone let one last repair through and printed "restart FAILED",
         # which reads like a fault when it was a correct refusal. If the session was ended,
         # there is nothing here to supervise.
-        if not getattr(SESSION, "wanted", False) or not SESSION.live:
+        if not getattr(SESSION, "wanted", False):
             with self.lock:
                 self.live_since = 0.0
                 self.waiting_for_mic = False
@@ -2000,6 +2120,11 @@ class StreamGuard:
                         print("[guard] %s" % self.last, flush=True)
                     continue
             ok = SESSION.set_return(True) if name == "return" else SESSION.respawn_leg(name)
+            waiting = getattr(SESSION, "waiting_for_devices", {})
+            if isinstance(waiting, dict) and name in waiting:
+                with self.lock:
+                    self.last = "Waiting for " + waiting[name]
+                continue  # unplugging a selected device does not consume crash retries
             with self.lock:
                 self.repairs[name] = self.repairs.get(name, 0) + 1
                 self.last = "%s leg died -> %s (repair #%d)" % (
@@ -2358,6 +2483,13 @@ class BridgeWatch:
         with self.lock:
             self.power = power if isinstance(power, dict) else None
 
+        video_check = checks.get("video_arriving") or {}
+        quality_note = SESSION.adapt_video(video_check, now) if video_check.get("source_state") == "live" else None
+        if quality_note:
+            with self.lock:
+                self.last = quality_note
+            return  # never combine a quality change with another repair in the same tick
+
         for key, val in checks.items():
             if key == "voice_arriving" and getattr(SESSION, "voice_muted", False) is True:
                 with self.lock:
@@ -2626,6 +2758,7 @@ class Handler(BaseHTTPRequestHandler):
                 "voice_backend": getattr(SESSION, "voice_backend", None),
                 "live": SESSION.live,
                 "wanted": SESSION.wanted,
+                "interruption": getattr(SESSION, "interruption", None),
                 "live_host": (PINS.host() or st.get("bridge_host")) if SESSION.wanted else None,
                 "live_bridge_id": MESH.bridge_id if SESSION.wanted else None,
                 "pin": PINS.snapshot(),      # never the ticket itself
@@ -2848,6 +2981,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(dict(res, _error=res.get("message")), 502)
 
         if self.path == "/api/golive":
+            if _SUSPENDING.is_set():
+                return self._send({"_error": "Wait for the computer to finish waking before presenting."}, 409)
             host = b.get("host")
             if not host:
                 return self._send({"_error": "host required"}, 400)
@@ -2880,12 +3015,16 @@ class Handler(BaseHTTPRequestHandler):
                                    "camera": st.get("camera_name"), "mic": st.get("mic_name"),
                                    "note": "already live — nothing to do"})
             devs = av_devices()
-            vidx, vname, _ = resolve_by_name(devs.get("video", []), b.get("camera_name"))
+            vidx, vname, found_video = resolve_by_name(devs.get("video", []), b.get("camera_name"))
+            if b.get("camera_name") and not found_video:
+                return self._send({"_error": "Selected camera is unavailable. Reconnect it or select another camera."}, 409)
             if IS_MAC and _gst():
                 # Follow macOS input preference, including USB disconnect/reconnect.
                 aidx, aname = "default", "System default microphone"
             else:
-                aidx, aname, _ = resolve_by_name(devs.get("audio", []), b.get("mic_name"), "0")
+                aidx, aname, found_audio = resolve_by_name(devs.get("audio", []), b.get("mic_name"), "0")
+                if b.get("mic_name") and not found_audio:
+                    return self._send({"_error": "Selected microphone is unavailable. Reconnect it or select another microphone."}, 409)
             port = int(b.get("return_port") or 5004)
             # THE PIN. A go-live from the page carries it; Studio unlocked a moment ago; an
             # internal reconnect (reconnect=true) reuses this session's ticket. Nothing else
@@ -2923,6 +3062,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(peer, dict) or peer.get("ok") is not True:
                 return self._send({"_error":"The bridge did not confirm your session. Media has not been started; try again."},502)
             SESSION.start(route["media_host"], vidx, aidx, return_port=port, mic_name=aname)
+            SESSION.capture_names = {"video": vname, "voice": aname}
             st.update({"bridge_host": host, "camera_name": vname, "mic_name": aname})
             save_state(st)
             BRIDGEWATCH.request_refresh()
@@ -3381,6 +3521,8 @@ function setCheckTone(ready){
   $('ckfix').style.borderColor=ready?'var(--ok)':'rgba(198,57,44,.28)';
 }
 async function poll(){
+  const state=await j('/api/state');
+  if(state.interruption&&!state.wanted){setLive(false);$('m2').textContent=state.interruption;return;}
   setCheckTone(false);
   const h=liveHost||host(); if(!h)return;
   let c;
@@ -3413,8 +3555,7 @@ async function poll(){
   if(!legs.ok){
     const names={5000:'video',5002:'voice',5004:'return audio'};
     const lost=(legs.missing||[]).map(p=>names[p]||p).join(' and ');
-    $('ckfix').textContent='This app stopped sending — the '+lost+' path to the bridge dropped '
-      +(legs.down_for_s||0)+'s ago. Your camera and mic are fine. Waiting for the affected path.';
+    $('ckfix').textContent=lost+' path unavailable for '+(legs.down_for_s||0)+'s. Other working media remains active.';
     $('ckfix').style.display='';
     repairLegs(legs.missing||[]);
     return;
@@ -3514,6 +3655,11 @@ def main():
     # ffmpeg/gst would keep the camera on / keep playing the room.
     _kill_orphan_mesh()
     _kill_orphan_media()
+    from power_observer import PowerObserver
+    global _POWER_OBSERVER
+    _POWER_OBSERVER = PowerObserver(suspend_capture, resume_capture)
+    if not _POWER_OBSERVER.active:
+        print("[power] " + str(_POWER_OBSERVER.error), flush=True)
     # Watch the media legs for the life of the process. It self-gates on SESSION.live, so it
     # costs three failed binds every 3s while idle and nothing at all in attention.
     threading.Thread(target=LEGS.run, daemon=True).start()

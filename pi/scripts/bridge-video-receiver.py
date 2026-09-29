@@ -29,7 +29,7 @@ def read_session(path=CONTROL, now=None):
 def rtp_current(packet, epoch):
     # Fixed RTP header includes SSRC even when extensions/CSRCs are present.
     return (len(packet) >= 12 and packet[0] >> 6 == 2 and packet[1] & 127 == 96
-            and struct.unpack('!I', packet[8:12])[0] == ((epoch >> 32) or 1))
+            and struct.unpack('!I', packet[8:12])[0] == (((epoch >> 32) & 0x7fffffff) or 1))
 
 
 def publish_frame(pixels, epoch, stamp, directory=FRAME_DIR, count=0):

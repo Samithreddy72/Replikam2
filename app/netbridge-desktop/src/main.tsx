@@ -134,6 +134,7 @@ function App() {
     try {
       const s = await api<EngineState>("/api/state");
       setState(s);
+      if(s.interruption && !s.wanted) setNotice(s.interruption);
       setEngineError("");
       if (!initialized.current) {
         setSelected(s.last_bridge || "");

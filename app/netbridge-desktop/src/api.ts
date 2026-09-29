@@ -22,6 +22,7 @@ export type EngineState = {
   system_default_mic?: boolean;
   live: boolean;
   wanted?: boolean;
+  interruption?: string;
   voice_muted?: boolean;
   return_on: boolean;
   return_gain: string;

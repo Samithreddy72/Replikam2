@@ -1240,6 +1240,7 @@ def _return_hw_ptr():
     return None
 
 def checks():
+    fps = None
     win = 2.0                       # one shared sampling window for all deltas
     pid, t0 = _feeder_cpu_ticks()
     vpid, vt0 = _voice_feeder_cpu_ticks()
@@ -1342,7 +1343,8 @@ def checks():
             "(expanding the filesystem and generating host keys). Audio may burst for a "
             "minute or two; this finishes on its own." % PORT) if settling() else
             "bridge-web serving on :%d" % PORT},
-        "video_arriving": {"ok": video_ok, "detail": video_detail},
+        "video_arriving": {"ok": video_ok, "detail": video_detail, "fps": fps,
+                           "source_state": output.get("state") if output else None},
         "voice_arriving": {"ok": voice_ok, "detail": voice_detail},
         "client_sees_camera": {"ok": udc == "configured",
                                "detail": "usb gadget state: %s" % (udc or "?")},
@@ -1565,6 +1567,12 @@ class H(http.server.BaseHTTPRequestHandler):
                                    "pre": pre, "error": error}).encode("utf-8"),
                        "application/json; charset=utf-8")
         elif path == "/api/unlock":
+            required_binding = pin_state().get("video_binding")
+            if required_binding and body.get("video_binding") != required_binding:
+                self._send(json.dumps({"ok": False, "reason": "app_upgrade_required",
+                    "message": "Update the presenter app before using this bridge image."}).encode(),
+                    "application/json; charset=utf-8")
+                return
             # The PIN is verified ON THE DEVICE ITSELF - never forwarded to the control plane,
             # never logged, never on a command line. Presenter app -> this bridge over the mesh.
             # A correct PIN opens the session for the CALLER's mesh address (where its media will

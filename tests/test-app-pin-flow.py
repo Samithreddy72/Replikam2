@@ -187,8 +187,7 @@ def run(platform):
                patch.object(app.MESH, "stop", fake_mesh_stop), patch.object(app, "SESSION", ses),
                patch.object(app, "load_state", lambda: dict(STATE)),
                patch.object(app, "save_state", lambda st: None),
-               patch.object(app, "av_devices", lambda: {"video": [{"name": "Cam"}], "audio": [{"name": "Mic"}]}),
-               patch.object(app, "resolve_by_name", lambda devs, name, default=None: (0, name or "Cam", None)),
+               patch.object(app, "av_devices", lambda: {"video": [{"name": "Cam", "index": "0"}], "audio": [{"name": "Mic", "index": "0"}]}),
                patch.object(app, "_gst", lambda: True), patch.object(app, "_kill_orphan_mesh", lambda **k: None),
                patch.object(app, "_bridge_reachable", lambda *a, **k: True),
                patch.object(app, "_logdir", lambda: LOGS), patch.object(app.time, "sleep", lambda s: None)]

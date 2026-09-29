@@ -259,31 +259,15 @@ func returnLeg(s *tsnet.Server, tsip string, port int) error {
 		}
 	}()
 	go func() {
-		defer mesh.Close()
 		defer close(ch)
-		var count, dropped uint64
-		for {
-			buf := make([]byte, 1500)
-			n, from, err := mesh.ReadFrom(buf)
-			if err != nil {
-				dbg("returnLeg mesh.ReadFrom closed after %d pkts (%d dropped): %v",
-					count, dropped, err)
-				return
-			}
-			count++
-			if count == 1 || count%200 == 0 {
-				dbg("returnLeg RX #%d %d bytes from %v (dropped %d)", count, n, from, dropped)
-			}
+		receiveMedia(context.Background(), mesh, func() (net.PacketConn, error) {
+			return s.ListenPacket("udp", fmt.Sprintf("%s:%d", tsip, port))
+		}, func(b []byte) {
 			select {
-			case ch <- pkt{buf, n, time.Now()}:
+			case ch <- pkt{b, len(b), time.Now()}:
 			default:
-				// Writer is wedged. DROP rather than block: stalling the reader would back
-				// pressure into the netstack and convert a brief hiccup into a long burst.
-				// For real-time audio a dropped packet is strictly better than a late one —
-				// the jitterbuffer conceals a loss, it cannot undo added latency.
-				dropped++
 			}
-		}
+		}, [3]time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}, time.Minute)
 	}()
 	return nil
 }

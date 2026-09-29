@@ -74,7 +74,11 @@ bw.read = lambda path: "" if "bridge-return-audio" in str(path) else ""
 
 def call(method, path, body=None, caller="100.101.1.10"):
     h = bw.H.__new__(bw.H)
-    raw = json.dumps(body or {}).encode()
+    body = dict(body or {})
+    # All ordinary fixtures represent the matching presenter. Explicit None below
+    # exercises a legacy client before it can supersede the current session.
+    if path == "/api/unlock": body.setdefault("video_binding", "ssrc-sha256-31-v1")
+    raw = json.dumps(body).encode()
     h.rfile, h.wfile = io.BytesIO(raw), io.BytesIO()
     h.headers = {"Content-Length": str(len(raw))}
     h.path, h.command, h.request_version = path, method, "HTTP/1.1"
@@ -103,6 +107,10 @@ _real_run([sys.executable, str(TOOL), "gate-init"], env=PINENV, capture_output=T
 
 print("\nbridge-web: the PIN is required to go live")
 print("==========================================")
+
+st, j = call("POST", "/api/unlock", {"pin": "1234", "protocol": 2, "video_binding": None})
+check(st == 200 and j.get("reason") == "app_upgrade_required" and "ticket" not in j,
+      "legacy video client is refused before opening or replacing a session", j)
 
 print("\n  ---- no PIN set ----")
 st, j = call("GET", "/api/lock-state")

@@ -66,8 +66,8 @@ class Decode(unittest.TestCase):
         self.assertEqual((self.directory/'frame').read_bytes(),stopped)
         self.assertEqual(self.receiver.failures,0)
 
-    def test_ffmpeg_signed_ssrc_matches_receiver(self):
-        # FFmpeg exposes SSRC as signed, RTP serializes the same unsigned bits.
+    def test_ffmpeg_high_bit_hash_matches_receiver(self):
+        # Use a hash with the high bit set; transport masks it for FFmpeg compatibility.
         epoch = 0xf234567812345678
         self.control.write_text('%x 1 %d\n' % (epoch,time.monotonic_ns()+120_000_000_000))
         self.receiver.tick()
@@ -75,7 +75,7 @@ class Decode(unittest.TestCase):
         self.assertIsNotNone(ff, 'real FFmpeg required')
         p = subprocess.Popen([ff,'-hide_banner','-loglevel','error','-re','-f','lavfi',
             '-i','color=c=black:s=424x240:r=10','-t','2','-c:v','libx264','-tune','zerolatency',
-            '-g','10','-ssrc',str((epoch>>32)-2**32),'-f','rtp',
+            '-g','10','-ssrc',str((epoch>>32)&0x7fffffff),'-f','rtp',
             'rtp://127.0.0.1:%d?pkt_size=1100'%self.port],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
         self.addCleanup(lambda:p.poll() is None and p.kill())
         self.drive(1)
