@@ -51,8 +51,14 @@ import {
 import { Persona } from "./Persona";
 import "./styles.css";
 
-type Page = "Studio" | "Bridges" | "Personas" | "Sessions" | "Settings";
+type Page = "Studio" | "Bridges" | "Sessions" | "Settings";
 type HistoryEntry = { started: string; ended: string; bridge: string };
+const meetingChecks = [
+  { key: "video_arriving", name: "Video received", icon: Video },
+  { key: "voice_arriving", name: "Voice received", icon: Mic },
+  { key: "client_sees_camera", name: "Meeting camera", icon: Monitor },
+  { key: "return_audio", name: "Meeting audio", icon: Headphones },
+];
 const emptyDevices: Devices = { video: [], audio: [] };
 function readHistory(): HistoryEntry[] {
   try {
@@ -378,7 +384,6 @@ function App() {
     });
     setStarted(new Date().toISOString());
     await refresh();
-    setHealth(true);
     setNotice(
       r.peer_result?._error
         ? `Streaming started, but return routing failed: ${r.peer_result._error}`
@@ -601,7 +606,6 @@ function App() {
             [
               { name: "Studio", icon: LayoutDashboard },
               { name: "Bridges", icon: Radio },
-              { name: "Personas", icon: UserRound },
               { name: "Sessions", icon: Activity },
             ] as const
           ).map(({ name, icon: Icon }) => (
@@ -612,7 +616,6 @@ function App() {
             >
               <Icon size={18} />
               {name}
-              {name === "Personas" && <span className="nav-tag">LAB</span>}
             </button>
           ))}
         </nav>
@@ -695,18 +698,14 @@ function App() {
               <div className="eyebrow">
                 {page === "Studio"
                   ? "PRESENTER"
-                  : page === "Personas"
-                    ? "A LITTLE MORE YOU"
-                    : "NETBRIDGE WORKSPACE"}
+                  : "NETBRIDGE WORKSPACE"}
               </div>
               <h1>
                 {page === "Studio"
                   ? live
                     ? "Live session"
                     : "Set up your session"
-                  : page === "Personas"
-                    ? "Avatar preview lab"
-                    : page === "Bridges"
+                  : page === "Bridges"
                       ? "Meeting bridges"
                       : page === "Sessions"
                         ? "Session history"
@@ -715,9 +714,7 @@ function App() {
               <p>
                 {page === "Studio"
                   ? live ? "Control your microphone and meeting audio here." : "Choose your room, check your devices, then go live."
-                  : page === "Personas"
-                    ? "Explore a voice-reactive persona in a private, local preview."
-                    : page === "Bridges"
+                  : page === "Bridges"
                       ? "Choose the room where your next conversation happens."
                       : page === "Sessions"
                         ? "Sessions ended from this app are saved on this device."
@@ -731,6 +728,25 @@ function App() {
               </span>
             )}
           </div>
+          {page === "Studio" && (
+            <section className="meeting-checks panel" aria-label="Meeting checks">
+              <div className="card-heading">
+                <h3>Meeting checks</h3>
+                <span className="muted tiny">{meetingChecks.filter(({key}) => deliveryStatus(engineError ? null : state, key).tone === "good").length}/4 confirmed</span>
+              </div>
+              <div className="meeting-check-grid">
+                {meetingChecks.map(({key, name, icon: Icon}) => {
+                  const check = deliveryStatus(engineError ? null : state, key);
+                  return <div className="meeting-check" key={key}>
+                    <Icon size={18} aria-hidden="true" />
+                    <div><strong>{name}</strong><span className={check.tone}>{check.label}</span></div>
+                  </div>;
+                })}
+              </div>
+              <p className="field-note">Bridge delivery checks update while live. USB status alone cannot confirm the picture in the meeting app.</p>
+              <button className="meeting-check-details" onClick={() => setHealth(true)}>View check details <ArrowRight size={14} /></button>
+            </section>
+          )}
           {!desktop && (
             <div className="banner">
               <Monitor size={17} />
@@ -1055,111 +1071,6 @@ function App() {
                 </div>
               )}
             </>
-          )}
-          {page === "Personas" && (
-            <div className="persona-grid">
-              <section>
-                {previewPanel(true)}
-                <div className="persona-description">
-                  <Sparkles size={18} />
-                  <div>
-                    <h3>A camera-free kind of presence.</h3>
-                    <p>
-                      This lab animates the avatar’s mouth from your microphone
-                      level. It does not generate speech or send avatar video to
-                      a meeting.
-                    </p>
-                  </div>
-                </div>
-              </section>
-              <section className="setup-card">
-                <h3>Choose your persona</h3>
-                <div className="persona-choices">
-                  {["illustrated", "robot"].map((p) => (
-                    <button
-                      className={persona === p ? "chosen" : ""}
-                      key={p}
-                      aria-label={p === "robot" ? "Robot" : "Illustrated"}
-                      onClick={() => {
-                        setPersona(p);
-                        localStorage.setItem("nb.persona", p);
-                      }}
-                    >
-                      <Persona kind={p} />
-                      <span>
-                        {p === "robot" ? "Robot" : "Illustrated"}
-                        {persona === p && <Check size={13} />}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-                <div className="separator" />
-                <h3>Bring it to life</h3>
-                <p className="field-note">
-                  Use your real voice to animate this local preview. Audio is
-                  not recorded.
-                </p>
-                {button(
-                  preview ? "Stop voice preview" : "Try voice animation",
-                  async () => {
-                    if (live)
-                      throw new Error(
-                        "End your session before starting a persona microphone preview.",
-                      );
-                    if (preview) {
-                      stopPreview();
-                      return;
-                    }
-                    stopPreview();
-                    const s = await navigator.mediaDevices.getUserMedia({
-                      audio: true,
-                    });
-                    streamRef.current = s;
-                    setPreview(s);
-                    const ctx = new AudioContext();
-                    audioContext.current = ctx;
-                    await ctx.resume();
-                    const a = ctx.createAnalyser();
-                    a.fftSize = 256;
-                    ctx.createMediaStreamSource(s).connect(a);
-                    const data = new Uint8Array(256);
-                    function tick() {
-                      a.getByteTimeDomainData(data);
-                      setLevel(
-                        Math.min(
-                          1,
-                          Math.sqrt(
-                            data.reduce((n, v) => n + (v - 128) ** 2, 0) / 256,
-                          ) / 25,
-                        ),
-                      );
-                      frame.current = requestAnimationFrame(tick);
-                    }
-                    tick();
-                  },
-                  <Mic size={16} />,
-                  "primary wide",
-                )}
-                <div className="lab-note">
-                  <Sparkles size={16} />
-                  <strong>Local preview lab</strong>
-                  <p>
-                    Realistic AI presenters and bridge transmission require an
-                    additional rendering pipeline.
-                  </p>
-                </div>
-                <button
-                  className="secondary wide"
-                  onClick={() => {
-                    changeSource("Camera");
-                    navigate("Studio");
-                  }}
-                >
-                  Return to camera studio
-                  <ArrowRight size={16} />
-                </button>
-              </section>
-            </div>
           )}
           {page === "Sessions" && (
             <div className="panel">
@@ -1546,7 +1457,6 @@ function App() {
               [
                 "Studio",
                 "Bridges",
-                "Personas",
                 "Sessions",
                 "Settings",
               ] as Page[]

@@ -5,13 +5,11 @@ test('browser preview shows honest states and navigates without overflow',async(
  await expect(page.getByRole('heading',{name:'Set up your session'})).toBeVisible();
  await expect(page.getByRole('button',{name:'Go live',exact:true})).toBeDisabled();
  await page.screenshot({path:'test-results/studio.png',fullPage:true});
- await page.getByRole('button',{name:/Personas/}).first().click();
- await expect(page.getByRole('heading',{name:'Avatar preview lab'})).toBeVisible();
- await page.getByRole('button',{name:'Robot',exact:true}).click();
- await expect(page.getByRole('img',{name:'robot persona preview'}).first()).toBeVisible();
- await page.screenshot({path:'test-results/personas.png',fullPage:true});
+ await expect(page.getByRole('button',{name:/Personas/})).toHaveCount(0);
+ await expect(page.getByRole('region',{name:'Meeting checks'})).toBeVisible();
+ await expect(page.getByText('0/4 confirmed',{exact:true})).toBeVisible();
  await page.getByRole('button',{name:'Connection health',exact:true}).click();
- await expect(page.getByText('Not streaming',{exact:true})).toHaveCount(4);
+ await expect(page.locator('aside').getByText('Not streaming',{exact:true})).toHaveCount(4);
  await page.getByRole('button',{name:'Close diagnostics'}).click();
  for(const name of ['Bridges','Sessions','Settings']){await page.getByRole('button',{name,exact:true}).first().click();await expect(page.locator('h1')).toBeVisible()}
  await page.setViewportSize({width:960,height:680});
@@ -33,7 +31,7 @@ test('desktop UI unlocks before streaming, handles mute, and ends session',async
    switch(args.path){
     case '/api/preflight':return {checks:[{label:'Camera',status:'pass',detail:'Listed, capture not yet tested.'},{label:'Receiver',status:'unknown',detail:'Displayed picture not verified.'}]};
     case '/api/support-report':return args.body.submit?{reference:'NB-SUPPORT-42'}:{report:{live:state.live,app_version:'test'},notice:'No recordings or raw logs are uploaded.'};
-    case '/api/state':return {...state};
+    case '/api/state':return {...state,bridge_checks:{age_s:1,reachable:true,checks:Object.fromEntries(['video_arriving','voice_arriving','return_audio','client_sees_camera'].map(key=>[key,{ok:true,detail:'Fresh test measurement'}]))}};
     case '/api/bridges':return [{id:'room',name:'Test room',online:true,tailscale_ip:'100.1.2.3'}];
     case '/api/devices':return {video:[{name:'Test camera',index:'0'}],audio:[{name:'Test mic',index:'0'}]};
     case '/api/unlock':return {ok:args.body.pin==='123456',message:'Wrong PIN'};
@@ -65,8 +63,10 @@ test('desktop UI unlocks before streaming, handles mute, and ends session',async
  await page.getByPlaceholder('Enter your bridge PIN').fill('123456');
  await page.getByRole('button',{name:'Go live',exact:true}).click();
  await expect(page.getByRole('button',{name:'End session',exact:true})).toBeEnabled();
+ await expect(page.getByText('3/4 confirmed',{exact:true})).toBeVisible();
+ await expect(page.getByText('USB reported configured',{exact:true})).toBeVisible();
  await page.screenshot({path:'test-results/studio-live.png',fullPage:true});
- await page.getByRole('button',{name:'Close diagnostics'}).click();
+ await expect(page.getByRole('region',{name:'Meeting checks'})).toBeVisible();
  await page.getByRole('button',{name:'Mute microphone',exact:true}).click();
  await expect(page.getByRole('button',{name:'Unmute microphone',exact:true})).toBeEnabled();
  await page.getByRole('button',{name:'Mute meeting audio',exact:true}).click();

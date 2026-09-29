@@ -36,6 +36,12 @@ describe("bridge delivery evidence", () => {
       ).tone,
     ).toBe("warn");
   });
+  it("never counts a configured USB flag as verified meeting reception", () => {
+    const state = {...live, bridge_checks: {age_s: 1, checks: {client_sees_camera: {ok: true}}}};
+    expect(deliveryStatus(state, "client_sees_camera").tone).toBe("neutral");
+    expect(deliveryStatus({...state, voice_muted: true}, "voice_arriving").tone).toBe("neutral");
+    expect(deliveryStatus({...state, return_on: false}, "return_audio").tone).toBe("neutral");
+  });
   it("prefers the mesh destination and does not invent an address", () => {
     expect(
       bridgeHost({
