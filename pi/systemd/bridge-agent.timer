@@ -2,9 +2,9 @@
 Description=NetBridge fleet agent tick (heartbeat + command pull)
 
 [Timer]
-OnBootSec=40
-OnUnitActiveSec=15
-AccuracySec=5
+OnBootSec=10
+OnUnitInactiveSec=15
+AccuracySec=1
 
 [Install]
 WantedBy=timers.target

@@ -360,22 +360,12 @@ def enroll(base, conf, tel, force=False):
         except OSError:
             pass
     if os.path.exists(TOKEN_FILE):
-        return open(TOKEN_FILE).read().strip()
+        with open(TOKEN_FILE) as stored:
+            return stored.read().strip()
     boot = conf.get("BOOTSTRAP_TOKEN")
     if not boot:
         raise SystemExit("not enrolled and no BOOTSTRAP_TOKEN in %s" % CONF)
-    recovery = None
-    recovery_file = "/data/netbridge-recovery.token"
-    try:
-        import stat
-        info = os.lstat(recovery_file)
-        if stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_mode & 0o077 == 0:
-            with open(recovery_file) as fh: recovery = fh.read(257).strip()
-            if len(recovery)>256: recovery=None
-    except OSError:
-        pass
     resp = http("POST", base + "/v1/enroll", body={
-        "recovery_token": recovery,
         "bootstrap_token": boot,
         "device_id": tel["device_id"],
         "pairing_code": tel["pairing_code"],
@@ -388,9 +378,6 @@ def enroll(base, conf, tel, force=False):
     with open(TOKEN_FILE, "w") as f:
         f.write(token)
     os.chmod(TOKEN_FILE, 0o600)
-    if recovery:
-        try: os.unlink(recovery_file)
-        except OSError: pass
     return token
 
 

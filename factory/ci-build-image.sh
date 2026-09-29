@@ -129,6 +129,8 @@ for f in pi/scripts/*; do
   if [ "$b" = "uvc-raw-setup.sh" ]; then install -m 0755 "$f" /home/pi/; else install -m 0755 "$f" /usr/local/bin/; fi
 done
 install -m 0644 pi/systemd/*.service pi/systemd/*.timer /etc/systemd/system/
+install -d -m 0755 /etc/NetworkManager/dispatcher.d
+install -m 0755 pi/scripts/bridge-fleet-network-up /etc/NetworkManager/dispatcher.d/90-netbridge-fleet
 bash tools/build-uvc-source.sh /tmp/netbridge-uvc-build || exit 1
 install -d /etc/netbridge
 printf "1\n" > /etc/netbridge/video-fallback-v1

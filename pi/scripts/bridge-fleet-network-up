@@ -1,0 +1,8 @@
+#!/bin/sh
+# NetworkManager event hook: start one bounded agent tick after connectivity changes.
+# systemd coalesces starts of the same oneshot; the timer retries failed requests.
+case "${2:-}" in
+  up|dhcp4-change|dhcp6-change)
+    /usr/bin/systemctl --no-block start bridge-agent.service
+    ;;
+esac
