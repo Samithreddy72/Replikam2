@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -50,6 +51,11 @@ def collect(version, platform, output, target=None):
             raise ValueError('Missing macOS application')
         subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent',
                         str(app), str(output / (prefix + '.zip'))], check=True)
+        # Verify the bytes a recipient extracts, not just the pre-upload build tree.
+        with tempfile.TemporaryDirectory(prefix='studio-transfer-') as extracted:
+            subprocess.run(['ditto', '-x', '-k', str(output / (prefix + '.zip')), extracted], check=True)
+            subprocess.run(['codesign', '--verify', '--deep', '--strict', '--verbose=2',
+                            str(pathlib.Path(extracted) / app.name)], check=True)
         candidates = list((bundle / 'dmg').glob('*.dmg'))
         extension = '.dmg'
     else:
@@ -57,6 +63,8 @@ def collect(version, platform, output, target=None):
         extension = '-setup.exe'
     if len(candidates) != 1:
         raise ValueError(f'Expected one installer for {platform}, got {len(candidates)}')
+    if platform == 'macos-arm64':
+        subprocess.run(['hdiutil', 'verify', str(candidates[0])], check=True)
     shutil.copy2(candidates[0], output / (prefix + extension))
     for artifact in bundle.rglob('*.sig'):
         payload = artifact.with_suffix('')

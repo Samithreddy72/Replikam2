@@ -19,6 +19,7 @@ deliberately out of scope here.
 """
 import argparse, os, platform, shutil, subprocess, sys, urllib.request, zipfile, tarfile
 import pathlib
+import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 DIST = HERE / "dist"
@@ -57,32 +58,38 @@ def fetch_ffmpeg(dest: pathlib.Path) -> pathlib.Path | None:
         log("ffmpeg already fetched")
         return out
     log("downloading ffmpeg for %s" % key)
-    tmp = dest / "ffmpeg-dl"
-    try:
-        urllib.request.urlretrieve(url, tmp)
-    except Exception as e:
-        log("ffmpeg download FAILED (%s) — continuing without a bundled binary" % e)
-        return None
-    # The archives differ in layout; find the binary wherever it landed.
-    try:
-        if zipfile.is_zipfile(tmp):
-            with zipfile.ZipFile(tmp) as z:
-                z.extractall(dest / "_ff")
-        else:
-            with tarfile.open(tmp) as t:
-                t.extractall(dest / "_ff")
-    except Exception as e:
-        log("could not unpack ffmpeg (%s)" % e)
-        return None
+    # Keep archives and AppleDouble metadata outside the shipped runtime. Extract only
+    # the executable: copying __MACOSX/._* into a sealed app breaks its signature when
+    # a normal Mac ZIP extractor turns those entries back into filesystem metadata.
     want = "ffmpeg.exe" if IS_WIN else "ffmpeg"
-    for root, _dirs, files in os.walk(dest / "_ff"):
-        if want in files:
-            shutil.copy2(os.path.join(root, want), out)
+    try:
+        with tempfile.TemporaryDirectory(prefix="netbridge-ffmpeg-") as staging:
+            tmp = pathlib.Path(staging) / "download"
+            urllib.request.urlretrieve(url, tmp)
+            if zipfile.is_zipfile(tmp):
+                with zipfile.ZipFile(tmp) as archive:
+                    matches = [item for item in archive.infolist()
+                               if not item.is_dir() and pathlib.PurePosixPath(item.filename).name == want
+                               and '__MACOSX' not in pathlib.PurePosixPath(item.filename).parts]
+                    if len(matches) != 1:
+                        raise ValueError('Expected exactly one FFmpeg executable')
+                    with archive.open(matches[0]) as source, out.open('wb') as target:
+                        shutil.copyfileobj(source, target)
+            else:
+                with tarfile.open(tmp) as archive:
+                    matches = [item for item in archive.getmembers()
+                               if item.isfile() and pathlib.PurePosixPath(item.name).name == want]
+                    if len(matches) != 1:
+                        raise ValueError('Expected exactly one FFmpeg executable')
+                    with archive.extractfile(matches[0]) as source, out.open('wb') as target:
+                        shutil.copyfileobj(source, target)
             out.chmod(0o755)
-            log("bundled ffmpeg -> %s (%.1f MB)" % (out, out.stat().st_size / 1e6))
-            return out
-    log("ffmpeg binary not found inside the archive")
-    return None
+        log("bundled ffmpeg -> %s (%.1f MB)" % (out, out.stat().st_size / 1e6))
+        return out
+    except Exception as error:
+        out.unlink(missing_ok=True)
+        log("ffmpeg preparation FAILED (%s)" % error)
+        return None
 
 
 # The exact elements our return-audio pipeline uses. Bundling only the plugins that
