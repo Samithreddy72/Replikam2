@@ -162,7 +162,7 @@ function App() {
     setCamera((c) =>
       d.video.some((v) => v.name === c) ? c : d.video[0]?.name || "",
     );
-    setMic((m) => m || d.audio[0]?.name || "");
+    setMic((m) => d.audio.some((v) => v.name === m) ? m : d.audio[0]?.name || "");
   };
   const loadBridges = async () => {
     const b = await api<Bridge[]>("/api/bridges");
@@ -381,6 +381,10 @@ function App() {
       host,
       camera_name: camera,
       mic_name: state?.system_default_mic ? "System default microphone" : mic,
+    }).catch((error) => {
+      // A rejected/expired ticket must not trap retries behind cached UI unlock state.
+      setUnlocked("");
+      throw error;
     });
     setStarted(new Date().toISOString());
     await refresh();
@@ -850,6 +854,10 @@ function App() {
                             });
                             await api("/api/signin-redeem", { code });
                             setCode("");
+                            // The sign-in action owns the busy lock; the signed-in effect
+                            // cannot load the workspace until that action has completed.
+                            await loadBridges();
+                            await loadDevices();
                             await refresh();
                           },
                           <ArrowRight size={16} />,

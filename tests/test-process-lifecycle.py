@@ -49,7 +49,7 @@ def running(pid):
         proc=Path('/proc')/str(pid)/'stat'
         if proc.exists() and proc.read_text().split(') ',1)[1].startswith('Z'):return False
         return True
-    except ProcessLookupError:return False
+    except (ProcessLookupError, FileNotFoundError):return False
 
 class LifecycleTest(unittest.TestCase):
     def worker(self,mode):
