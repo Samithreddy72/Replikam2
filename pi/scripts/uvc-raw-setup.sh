@@ -21,7 +21,7 @@ bridge_usb_serial() {
 SERIAL=$(bridge_usb_serial "$(cat /etc/bridge/usb-serial-mode 2>/dev/null || true)" "$(awk '/^Serial[[:space:]]*:/ {print $3}' /proc/cpuinfo)") || { echo 'Invalid unique USB identity; refusing descriptor setup' >&2; exit 1; }
 MANUF=$(hostname)
 # Display label only: preserve the existing VID, PID and serial identity.
-PRODUCT="Logi-tech G433"
+PRODUCT="Logi"
 BOARD=$(strings /proc/device-tree/model)
 UDC=$(ls /sys/class/udc) # will identify the 'first' UDC
 

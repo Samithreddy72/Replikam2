@@ -21,4 +21,4 @@ The production image masks obsolete loopback/test-pattern producers, optional di
 ## Release gates
 Automated PIN, session, stop, helper, fallback, rollout, signature and UI tests are necessary but not hardware qualification. Inspect the signed built image and compare its contents to the exact revision. Verify native installer contents. Then perform a maintenance cold boot, a correct/incorrect PIN check, two start/stop sessions, video interruption/recovery, USB reconnect and meeting-side audio/video checks. Do not replace a working live session to perform this audit.
 
-Windows may retain a generic camera friendly name while the bus reports Logi-tech G433. Refresh the device entry only outside a meeting; do not change USB identity merely to force a new name.
+Windows may retain a generic camera friendly name while the bus reports Logi. Refresh the device entry only outside a meeting; do not change USB identity merely to force a new name.

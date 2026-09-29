@@ -213,6 +213,7 @@ has bridge-ab && ok "A/B slot manager present (bridge-ab)" || warn "no A/B manag
 sec "Stage 3 — the USB gadget comes up"
 has bridge-gadget-setup.sh && ok "gadget setup script present" || no "no gadget setup script"
 has uvc-raw-setup.sh && ok "UVC/UAC2 descriptor script present" || no "no descriptor script"
+grepf uvc-raw-setup.sh '^PRODUCT="Logi"$' && ok "USB product label is Logi" || no "USB product label is not Logi"
 grepf uvc-raw-setup.sh 'configfs|usb_gadget' && ok "builds the gadget through configfs" \
   || no "gadget is not built through configfs — it will not enumerate"
 has bridge-uvcd.sh && ok "UVC daemon present (serves video to the meeting laptop)" \
