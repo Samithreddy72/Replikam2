@@ -478,8 +478,9 @@ def pin_state():
 # a Pi 4 there is no VBUS sense line exposed to tell them apart - so both are reported as
 # USB_DISCONNECTED with the ambiguity stated in the detail, rather than inventing certainty.
 USB_STATES = {
-    "configured": ("USB_CONNECTED_HEALTHY", True,
-                   "the meeting laptop has enumerated the bridge and is using it"),
+    "configured": ("USB_CONFIGURED_UNVERIFIED", False,
+                   "kernel reports configured; this reading can remain stale after unplugging. "
+                   "Physical attachment and meeting-app capture are unverified"),
     "suspended":  ("USB_HOST_SUSPENDED", True,
                    "the meeting laptop has suspended the USB bus - it is probably asleep"),
     "addressed":  ("USB_HOST_NOT_ENUMERATING", True,
@@ -1346,8 +1347,9 @@ def checks():
         "video_arriving": {"ok": video_ok, "detail": video_detail, "fps": fps,
                            "source_state": output.get("state") if output else None},
         "voice_arriving": {"ok": voice_ok, "detail": voice_detail},
-        "client_sees_camera": {"ok": udc == "configured",
-                               "detail": "usb gadget state: %s" % (udc or "?")},
+        "client_sees_camera": {"ok": udc == "configured", "certain": False,
+                               "receiver_verified": False,
+                               "detail": "USB state: %s; attachment and room picture unverified" % (udc or "?")},
         "return_audio": {"ok": audio_ok, "detail": audio_detail},
         # Tuning the fleet wants the PRESENTER APP to apply. Carried here because /api/checks
         # is the one thing the app already polls on a timer; see presenter_tuning().

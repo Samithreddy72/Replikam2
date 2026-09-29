@@ -64,6 +64,28 @@ class StudioRelease(unittest.TestCase):
                 release.publish('1.2.3', temp, True)
             self.assertEqual(run.call_count, 1)
 
+    def test_stage_refuses_published_or_other_source(self):
+        for draft, sha in ((False, 'abc'), (True, 'other')):
+            with patch.dict(os.environ, GITHUB_REPOSITORY='test/repo', GITHUB_SHA='abc'), patch.object(
+                release.subprocess, 'run', return_value=SimpleNamespace(returncode=0,
+                    stdout=json.dumps({'isDraft': draft, 'targetCommitish': sha}))) as run:
+                with self.assertRaises(ValueError):
+                    release.stage('1.2.3', '/unused')
+                self.assertEqual(run.call_count, 1)
+
+    def test_stage_preserves_verified_files_in_draft(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ,
+            GITHUB_REPOSITORY='test/repo', GITHUB_SHA='abc'), patch.object(
+            release.subprocess, 'run', return_value=SimpleNamespace(returncode=0,
+                stdout=json.dumps({'isDraft': True, 'targetCommitish': 'abc'}))) as run:
+            artifact = pathlib.Path(temp, 'macos-arm64-SHA256SUMS.txt')
+            artifact.write_text('verified checksum')
+            release.stage('1.2.3', temp)
+            self.assertEqual(run.call_count, 2)
+            self.assertIn(str(artifact), run.call_args.args[0])
+            self.assertIn('upload', run.call_args.args[0])
+            self.assertNotIn('--draft=false', run.call_args.args[0])
+
     def test_default_draft_does_not_publish(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ,
             GITHUB_REPOSITORY='test/repo', GITHUB_SHA='abc'), patch.object(

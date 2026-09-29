@@ -38,6 +38,8 @@ jobs:
     permissions:
       contents: read
   validate:
+    permissions:
+      contents: write
     needs: tests
     runs-on: ubuntu-latest
     steps:
@@ -66,7 +68,18 @@ jobs:
                   raise SystemExit('This version is published or belongs to a different commit. Choose a new version.')
           PY
 
+      - name: Reserve draft for verified platform artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "studio-v$STUDIO_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "studio-v$STUDIO_VERSION" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --draft --title "NetBridge Studio $STUDIO_VERSION — candidate" \
+              --notes "Build in progress. Each platform is attached only after its checks pass. Not hardware-qualified."
+
   build:
+    permissions:
+      contents: write
     needs: validate
     strategy:
       fail-fast: false
@@ -185,7 +198,14 @@ jobs:
         run: |
           python app/netbridge-desktop/scripts/ci-release.py collect --version "$STUDIO_VERSION" \
             --platform "$RELEASE_PLATFORM" --directory app/netbridge-desktop/artifacts/release
+      - name: Preserve verified platform in draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python app/netbridge-desktop/scripts/ci-release.py stage --version "$STUDIO_VERSION" \
+            --directory app/netbridge-desktop/artifacts/release
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: studio-${{ matrix.platform }}-${{ github.run_id }}
           path: app/netbridge-desktop/artifacts/release/
@@ -207,11 +227,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: studio-*-${{ github.run_id }}
-          merge-multiple: true
-          path: studio-release
+      - name: Fetch verified platform drafts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "studio-v$STUDIO_VERSION" --repo "$GITHUB_REPOSITORY" --dir studio-release
       - name: Create release only after both platforms pass
         env:
           GH_TOKEN: ${{ github.token }}

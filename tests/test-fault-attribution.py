@@ -40,7 +40,7 @@ print("=========================================")
 print("\n  ---- USB: five situations, not one ----")
 G = ("uac2.usb0 uvc.0", True, True)      # a healthy gadget
 cases = [
-    ("configured",   "USB_CONNECTED_HEALTHY",    True),
+    ("configured",   "USB_CONFIGURED_UNVERIFIED", False),
     ("suspended",    "USB_HOST_SUSPENDED",       True),
     ("addressed",    "USB_HOST_NOT_ENUMERATING", True),
     ("powered",      "USB_HOST_NOT_ENUMERATING", True),

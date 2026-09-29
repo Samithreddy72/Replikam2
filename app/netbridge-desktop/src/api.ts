@@ -86,8 +86,8 @@ export function deliveryStatus(
       detail: "No fresh bridge measurement available.",
     };
   return {
-    tone: check.ok ? "good" : "warn",
-    label: check.ok ? (key === "client_sees_camera" ? "USB configured" : "Confirmed by bridge") : "Needs attention",
-    detail: key === "client_sees_camera" ? "USB state only; the meeting app’s displayed picture is not verified." : check.detail || "No details provided",
+    tone: key === "client_sees_camera" ? "neutral" : check.ok ? "good" : "warn",
+    label: check.ok ? (key === "client_sees_camera" ? "USB reported configured" : "Confirmed by bridge") : "Needs attention",
+    detail: key === "client_sees_camera" ? "USB state can remain stale after unplugging. Physical attachment and the room picture are unverified." : check.detail || "No details provided",
   };
 }

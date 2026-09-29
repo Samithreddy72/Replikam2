@@ -3557,7 +3557,7 @@ async function poll(){
   let firstBad=null;
   for(const [ci,li,k] of map){let v=c[k]||{};
     if(k==='return_audio')v=rescueReturnAudio(v);
-    $(ci).className=v.ok?'ok':'bad';
+    $(ci).className=k==='client_sees_camera'?'':v.ok?'ok':'bad';
     $(li).textContent=(v.detail||'').slice(0,42);
     if(!v.ok&&!firstBad)firstBad=k;}
   // The legs outrank every per-check fix. When they are down the red rows are a SYMPTOM,

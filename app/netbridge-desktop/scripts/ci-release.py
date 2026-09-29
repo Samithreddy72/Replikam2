@@ -78,6 +78,23 @@ def collect(version, platform, output, target=None):
     (output / (platform + '-SHA256SUMS.txt')).write_text('\n'.join(lines) + '\n')
 
 
+def stage(version, directory):
+    """Keep each verified platform in an immutable-source draft, independent of Actions quota."""
+    validate_version(version)
+    repo, sha = os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_SHA']
+    tag = 'studio-v' + version
+    result = subprocess.run(['gh', 'release', 'view', tag, '--repo', repo,
+                             '--json', 'isDraft,targetCommitish'], capture_output=True, text=True, check=True)
+    info = json.loads(result.stdout)
+    if not info['isDraft'] or info['targetCommitish'] != sha:
+        raise ValueError('Refusing to stage into a published or different-source release')
+    paths = sorted(path for path in pathlib.Path(directory).iterdir() if path.is_file())
+    if not paths:
+        raise ValueError('No verified platform artifacts to stage')
+    subprocess.run(['gh', 'release', 'upload', tag, '--repo', repo, '--clobber',
+                    *map(str, paths)], check=True)
+
+
 def publish(version, directory, draft):
     validate_version(version)
     repo = os.environ['GITHUB_REPOSITORY']
@@ -109,7 +126,7 @@ def publish(version, directory, draft):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['version', 'collect', 'publish'])
+    parser.add_argument('operation', choices=['version', 'collect', 'stage', 'publish'])
     parser.add_argument('--version', required=True)
     parser.add_argument('--platform', choices=['macos-arm64', 'windows-x64'])
     parser.add_argument('--directory')
@@ -119,5 +136,7 @@ if __name__ == '__main__':
         stamp(args.version)
     elif args.operation == 'collect':
         collect(args.version, args.platform, args.directory, os.environ.get('CARGO_TARGET_DIR'))
+    elif args.operation == 'stage':
+        stage(args.version, args.directory)
     else:
         publish(args.version, args.directory, args.draft == 'true')
