@@ -27,6 +27,7 @@ class ReturnPlayback(unittest.TestCase):
         session.respawn_leg.return_value = True
         guard = app.StreamGuard()
         guard.live_since = time.time() - 60
+        guard.generation = (id(session), session.generation)
         resolve = Mock(return_value=42)
         with patch.object(app, 'SESSION', session), patch.dict(sys.modules, {
                 'audio_engine': types.SimpleNamespace(mac_microphone_device_id=resolve)}):
@@ -46,6 +47,7 @@ class ReturnPlayback(unittest.TestCase):
         session.respawn_leg.return_value = True
         guard = app.StreamGuard()
         guard.live_since = time.time() - 60
+        guard.generation = (id(session), session.generation)
         with patch.object(app, 'SESSION', session), patch.dict(sys.modules, {
                 'audio_engine': types.SimpleNamespace(mac_microphone_device_id=lambda name: 43)}):
             guard._tick()
@@ -62,6 +64,7 @@ class ReturnPlayback(unittest.TestCase):
         session.respawn_leg.return_value = True
         guard = app.StreamGuard()
         guard.live_since = time.time() - 60
+        guard.generation = (id(session), session.generation)
         resolve = Mock(side_effect=RuntimeError('not attached'))
         with patch.object(app, 'SESSION', session), patch.dict(sys.modules, {
                 'audio_engine': types.SimpleNamespace(mac_microphone_device_id=resolve)}):
