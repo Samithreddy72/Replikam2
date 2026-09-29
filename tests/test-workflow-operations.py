@@ -46,6 +46,17 @@ class Workflow(unittest.TestCase):
    self.assertTrue(view['laptop']);self.assertIn('500 samples',view['latest']['power']['summary'])
    self.assertNotIn('return buffer',view['latest']['power']['summary'])
    self.assertEqual(d.latest['power']['summary'],raw['summary'])
+ def test_stale_usb_configuration_is_uncertain_and_still_blocks_disruption(self):
+  for state in ('configured','suspended'):
+   with SessionLocal() as db:
+    d=db.get(Device,'a');d.latest={'udc':state,'streams':{'video':False,'voice':False}};db.commit()
+   report=self.client.get('/admin/devices/a/health').json()
+   self.assertTrue(report['activity']['busy']);self.assertTrue(report['activity']['unknown'])
+   self.assertFalse(report['activity']['attachment_verified'])
+   self.assertIn('unverified',report['activity']['reason'])
+   usb=next(row for row in report['checks'] if row['key']=='usb')
+   self.assertEqual(usb['status'],'unknown');self.assertIn('unplugging',usb['detail'])
+   self.assertEqual(self.client.post('/admin/devices/a/commands',json={'type':'reboot','confirm':True}).status_code,409)
  def test_cancel_and_expire_waiting(self):
   c=self.client;r=c.post('/admin/devices/a/commands',json={'type':'reboot','confirm':True,'when':'idle'}).json()
   self.assertEqual(c.delete('/admin/devices/a/commands/'+str(r['id'])).status_code,200)

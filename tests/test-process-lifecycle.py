@@ -75,8 +75,16 @@ class LifecycleTest(unittest.TestCase):
     def assert_helpers_released(self,helpers):
         for pid,port in helpers:
             self.assert_gone(pid)
-            with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as probe:
-                probe.bind(('127.0.0.1',port))
+            # Windows Job termination is asynchronous; process exit can precede
+            # socket teardown. Require actual release within a bounded interval.
+            for attempt in range(100):
+                try:
+                    with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as probe:
+                        probe.bind(('127.0.0.1',port))
+                    break
+                except OSError:
+                    if attempt == 99:raise
+                    time.sleep(.05)
 
     def test_engine_hard_kill_stops_all_owned_helpers_only(self):
         outsider=subprocess.Popen([sys.executable,'-c','import time;time.sleep(90)'])

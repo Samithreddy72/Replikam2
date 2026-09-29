@@ -31,10 +31,11 @@ def activity(dev, now=None):
     live = bool(streams.get('video') or streams.get('voice') or
                 (isinstance(session,dict) and session.get('active')))
     laptop = t.get('udc') in ('configured','suspended')
-    unknown = t.get('udc') not in ('not attached','attached','powered','default','addressed','configured','suspended') or not all(isinstance(streams.get(k),bool) for k in ('video','voice'))
+    # Configured can remain stale after unplugging; retain the conservative busy guard.
+    unknown = laptop or t.get('udc') not in ('not attached','attached','powered','default','addressed','configured','suspended') or not all(isinstance(streams.get(k),bool) for k in ('video','voice'))
     return {'busy': live or laptop or unknown, 'unknown': unknown, 'live':live,
-            'laptop':laptop, 'reason': 'A presenter is live.' if live else
-            'The meeting laptop is attached.' if laptop else
+            'laptop':laptop, 'attachment_verified':False, 'reason': 'A presenter is live.' if live else
+            'USB attachment is unverified; treat the bridge as busy.' if laptop else
             'USB/session status is unavailable.' if unknown else 'Bridge is idle.'}
 
 def power_detail(power):
@@ -73,8 +74,8 @@ def health(dev, alerts=(), now=None):
     power=t.get('power') if isinstance(t.get('power'),dict) else {}
     row('power','Power','unknown' if not fresh or not isinstance(power.get('ok'),bool) else 'pass' if power.get('ok') is True else 'warn',
         power_detail(power))
-    row('usb','USB connection','unknown' if not fresh or 'udc' not in t else 'pass' if t['udc']=='configured' else 'warn',
-        'USB configured; displayed picture is not verified.' if t.get('udc')=='configured' else 'Check the meeting laptop USB connection.')
+    row('usb','USB connection','unknown' if not fresh or 'udc' not in t or t.get('udc') in ('configured','suspended') else 'warn',
+        'USB reports configured or suspended; this reading can persist after unplugging. Attachment and displayed picture are unverified.' if t.get('udc') in ('configured','suspended') else 'Check the meeting laptop USB connection.')
     misses=t.get('usb_misses_per_s')
     known=isinstance(misses,(int,float)) and not isinstance(misses,bool)
     row('usb_misses','USB delivery','unknown' if not fresh or not known else 'warn' if misses>0 else 'pass',
