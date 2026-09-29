@@ -227,7 +227,7 @@ g uvc 'create_frame \$FUNCTION 424 240 uncompressed u' && ok "UVC descriptor fra
 awk '/dwFrameInterval$/{getline; print; exit}' "$T/uvc" | grep -qx 333333 && ok "UVC frame interval 333333 = 30 fps" || no "UVC frame interval is not 30 fps"
 g uvc 'echo 1024 > functions/\$FUNCTION/streaming_maxpacket' && ok "streaming_maxpacket 1024 (one packet per microframe)" || no "streaming_maxpacket is not 1024"
 g gs '"YUYV:424x240@30/1"' && ok "loopback caps 424x240@30" || no "loopback caps wrong"
-g receiver 'format=YUY2,width=424,height=240' && g receiver 'framerate=30/1' && ok "feeder output 424x240@30" || no "feeder output wrong"
+g receiver 'format=YUY2,width=424,height=240' && g receiver 'appsink name=frames.*sync=false.*max-buffers=1.*drop=true' && ! g receiver '![[:space:]]*videorate|v4l2sink' && ok "receiver publishes fresh 424x240 frames; USB owns 30 fps pacing" || no "receiver output or freshness policy wrong"
 g idl '^W, H = 424, 240' && ok "idle frame 424x240" || no "idle frame size wrong"
 g web 'dwFrameInterval' && ok "status page reads fps from the descriptor" || no "status page expected-fps fix missing"
 cat_img /usr/local/bin/bridge-return-audio.sh > "$T/ret"; cat_img /usr/local/bin/bridge > "$T/cli"

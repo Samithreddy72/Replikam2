@@ -325,11 +325,14 @@ fi
 UI=$(awk '/dwFrameInterval$/{getline; print; exit}' "$CAT/uvc-raw-setup.sh" 2>/dev/null | tr -d ' ')
 UFPS=$([ -n "$UI" ] && [ "$UI" -gt 0 ] 2>/dev/null && echo $(( (10000000 + UI/2) / UI )))
 LFPS=$(grep -oE 'YUYV:[0-9]+x[0-9]+@[0-9]+/1' "$CAT/bridge-gadget-setup.sh" 2>/dev/null | head -1 | sed -E 's/.*@([0-9]+)\/1/\1/')
-FFPS=$(grep -oE 'framerate=[0-9]+/1' "$CAT/bridge-video-receiver.py" 2>/dev/null | sed -E 's/.*framerate=([0-9]+)\/1/\1/')
-if [ "${UFPS:-x}" = 30 ] && [ "$UFPS" = "$LFPS" ] && [ "$UFPS" = "$FFPS" ]; then
-  ok "frame rate agrees everywhere: descriptor, loopback, feeder (30 fps)"
+# USB owns output pacing; the receiver must publish only freshly decoded frames.
+# A videorate-generated frame would incorrectly extend the freeze deadline.
+if [ "${UFPS:-x}" = 30 ] && [ "$UFPS" = "$LFPS" ] \
+   && grepf bridge-video-receiver.py 'appsink name=frames.*sync=false.*max-buffers=1.*drop=true' \
+   && ! grepf bridge-video-receiver.py '![[:space:]]*videorate|v4l2sink'; then
+  ok "USB output is 30 fps; receiver publishes latest decoded frames without synthetic freshness"
 else
-  no "frame rate: descriptor=${UFPS:-?} loopback=${LFPS:-?} feeder=${FFPS:-?} — expected 30 in all three"
+  no "USB pacing or decoded-frame delivery mismatch: descriptor=${UFPS:-?} loopback=${LFPS:-?}"
 fi
 # 2026-09-24: no automatic media restarts on a fresh card. The WAN profile (owner's standing choice)
 # is seeded on /data, and jitter-sentry never switches back to lan - every switch restarts the
