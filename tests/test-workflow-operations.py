@@ -21,6 +21,17 @@ class Workflow(unittest.TestCase):
     db.add(Device(id=name,org_id=org,pairing_code=name,claimed_at=utcnow(),last_seen=utcnow(),latest={'udc':'configured','streams':{'video':True}},token_hash=auth.hash_token('device-'+name)))
    db.commit()
  def tearDown(self):self.client.__exit__(None,None,None);main.app.dependency_overrides.clear()
+ def test_incomplete_media_telemetry_does_not_report_session_ended(self):
+  with SessionLocal() as db:
+   d=db.get(Device,'a');now=utcnow()
+   workflow.observe_session(db,d,now);db.commit()
+   row=db.query(ObservedSession).one()
+   for streams in ({'video':False},{'video':False,'voice':None},{'video':'false','voice':False}):
+    d.latest={'streams':streams};workflow.observe_session(db,d,now+dt.timedelta(seconds=1));db.commit()
+    self.assertIsNone(row.ended_at)
+   d.latest={'streams':{'video':False,'voice':False}}
+   workflow.observe_session(db,d,now+dt.timedelta(seconds=2));db.commit()
+   self.assertIsNotNone(row.ended_at)
  def test_busy_action_waits_then_delivers_once(self):
   c=self.client
   self.assertEqual(c.post('/admin/devices/a/commands',json={'type':'reboot','confirm':True}).status_code,409)

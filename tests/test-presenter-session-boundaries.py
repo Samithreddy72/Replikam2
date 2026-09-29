@@ -22,4 +22,15 @@ class Boundaries(unittest.TestCase):
     stop.assert_called_once();self.assertEqual(events,['capture stopped','session ended','mesh stopped'])
     self.assertNotIn('token',save.call_args.args[0]);self.assertEqual(save.call_args.args[0]['control_url'],'https://fleet.invalid')
    finally:server.shutdown();server.server_close()
+ def test_stop_releases_capture_before_network_cleanup(self):
+  events=[]
+  state={'token':'test-token','email':'test@example.invalid','control_url':'https://fleet.invalid'}
+  with patch.object(a,'load_state',return_value=state),patch.object(a,'save_state') as save,patch.object(a.SESSION,'stop',side_effect=lambda:events.append('capture stopped')) as stop,patch.object(a,'_end_bridge_session',side_effect=lambda:events.append('session ended')),patch.object(a.MESH,'stop',side_effect=lambda:events.append('mesh stopped')):
+   server=a.ThreadingHTTPServer(('127.0.0.1',0),a.Handler)
+   threading.Thread(target=server.serve_forever,daemon=True).start()
+   try:
+    request=urllib.request.Request('http://127.0.0.1:%d/api/stop'%server.server_port,data=b'{}',headers={'Content-Type':'application/json'})
+    with urllib.request.urlopen(request) as response:self.assertTrue(json.load(response)['ok'])
+    stop.assert_called_once();self.assertEqual(events,['capture stopped','session ended','mesh stopped'])
+   finally:server.shutdown();server.server_close()
 if __name__=='__main__':unittest.main()

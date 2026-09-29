@@ -861,27 +861,32 @@ class Session:
         self.leg_argv = {"video": v, "voice": a}
         self.leg_proc = {}
         logdir = _logdir()
-        for name, argv in (("video", v), ("voice", a)):
-            if name == "voice" and not argv:
-                self.voice_proc = WaitingMicrophone()
-                self.leg_proc[name] = self.voice_proc
-                continue
-            lf = open(os.path.join(str(logdir), "netbridge-source-%s.log" % name), "w")
-            self.logs.append(lf)
-            # stdin is a PIPE so this leg can be asked to quit POLITELY later. ffmpeg exits
-            # cleanly on "q" and releases its capture device; killed with a signal while it
-            # holds avfoundation it can leave the macOS camera daemons wedged - handing out
-            # the device afterwards but never delivering frames. That happened on 2026-08-14
-            # and cost a live session. See _quit().
-            proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
-                                    stdout=subprocess.DEVNULL, stderr=lf,
-                                    env=self.leg_env.get(name))
-            self.procs.append(proc)
-            self.leg_proc[name] = proc
-            if name == "voice":
-                self.voice_proc = proc          # so the app can report the voice leg is alive
+        try:
+            for name, argv in (("video", v), ("voice", a)):
+                if name == "voice" and not argv:
+                    self.voice_proc = WaitingMicrophone()
+                    self.leg_proc[name] = self.voice_proc
+                    continue
+                lf = open(os.path.join(str(logdir), "netbridge-source-%s.log" % name), "w")
+                self.logs.append(lf)
+                # stdin is a PIPE so this leg can be asked to quit POLITELY later. ffmpeg exits
+                # cleanly on "q" and releases its capture device; killed with a signal while it
+                # holds avfoundation it can leave the macOS camera daemons wedged - handing out
+                # the device afterwards but never delivering frames. That happened on 2026-08-14
+                # and cost a live session. See _quit().
+                proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                                        stdout=subprocess.DEVNULL, stderr=lf,
+                                        env=self.leg_env.get(name))
+                self.procs.append(proc)
+                self.leg_proc[name] = proc
+                if name == "voice":
+                    self.voice_proc = proc          # so the app can report the voice leg is alive
 
-        self.return_player = self._start_return(return_port) if self.return_on else "off"
+            self.return_player = self._start_return(return_port) if self.return_on else "off"
+        except Exception as exc:
+            self.stop()
+            raise RuntimeError("Media could not start. Camera and microphone have been released; try again.") from exc
+
 
     @_locked
     def set_voice_muted(self, muted):
@@ -1326,8 +1331,22 @@ class Session:
                 pass
         for p in self.procs:
             _quit(p)
+            pipe = getattr(p, "stdin", None)
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
         self.procs = []
         self.return_proc = None
+        self.voice_proc = None
+        self.leg_proc = {}
+        for log in self.logs:
+            try:
+                log.close()
+            except OSError:
+                pass
+        self.logs = []
 
 
 
@@ -1376,6 +1395,7 @@ def _quit(p, timeout=4.0):
             except Exception: pass
     try:
         p.kill()
+        p.wait(timeout=2.0)  # Reap before a replacement tries to acquire its devices/ports.
     except Exception:
         pass
 
@@ -1696,6 +1716,7 @@ class MeshManager:
             except Exception:
                 try:
                     self.proc.kill()
+                    self.proc.wait(timeout=2)
                 except Exception:
                     pass
         self.proc = self.bridge_id = self.tailnet_ip = self.control_port = None
@@ -3093,9 +3114,11 @@ class Handler(BaseHTTPRequestHandler):
             # bridge rebooted): same session, so the ticket stays. A presenter's Stop ends the
             # bridge's session (its gate closes at once) and forgets the ticket.
             keep = bool(b.get("keep_session")) and bool(PINS.ticket())
-            ended = False if keep else _end_bridge_session()
-            SESSION.stop()
-            MESH.stop()
+            SESSION.stop()  # Release capture before waiting on an unreachable bridge.
+            try:
+                ended = False if keep else _end_bridge_session()
+            finally:
+                MESH.stop()
             return self._send({"ok": True, "session_kept": keep, "bridge_session_ended": ended})
 
         if self.path == "/api/return-tuning":
@@ -3735,12 +3758,12 @@ def main():
             return
         _cleaned["done"] = True
         try:
-            _end_bridge_session()   # the bridge relocks now, not 10 min from now
-        except Exception:
-            pass
-        try:
-            SESSION.stop()      # kill the video/voice ffmpeg legs + the return player
+            SESSION.stop()      # release capture before any network wait
         finally:
+            try:
+                _end_bridge_session()   # retire the ticket while mesh is still available
+            except Exception:
+                pass
             try:
                 MESH.stop()     # remove the ephemeral mesh node
             finally:

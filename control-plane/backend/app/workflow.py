@@ -129,7 +129,7 @@ def observe_session(db, dev, now=None):
     if opened and (now-utc(opened.last_seen)).total_seconds()>60:
         opened.ended_at=opened.last_seen;opened.end_reason='Telemetry gap; actual session end unknown'
         opened=None
-    live=bool(streams.get('video') or streams.get('voice'))
+    live=streams.get('video') is True or streams.get('voice') is True
     if live:
         if not opened:
             opened=ObservedSession(device_id=dev.id,started_at=now,last_seen=now,samples=0,warning_samples=0)
@@ -139,7 +139,7 @@ def observe_session(db, dev, now=None):
         misses=t.get('usb_misses_per_s')
         if (isinstance(power,dict) and power.get('live')) or (isinstance(misses,(int,float)) and misses>0):
             opened.warning_samples+=1
-    elif opened:
+    elif opened and streams.get('video') is False and streams.get('voice') is False:
         opened.ended_at=now;opened.end_reason='Bridge reported no forward media'
 
 
