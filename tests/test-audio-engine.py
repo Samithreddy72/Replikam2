@@ -76,7 +76,7 @@ class Media(unittest.TestCase):
             # Replace only the physical capture device, keeping its downstream chain.
             sender = self.Gst.parse_launchv([
                 'audiotestsrc', 'is-live=true', 'num-buffers=100',
-                'samplesperbuffer=480'] + argv[6:])
+                'samplesperbuffer=480'] + argv[argv.index('!'):])
             self.addCleanup(lambda: sender.set_state(self.Gst.State.NULL))
             sender.set_state(self.Gst.State.PLAYING)
             packets = []
