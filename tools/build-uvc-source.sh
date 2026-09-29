@@ -6,6 +6,7 @@ work=${1:?supply an empty build directory}
 mkdir -p "$work"
 [ ! -e "$work/uvc-gadget" ] || { echo 'build directory already populated' >&2; exit 1; }
 tar xzf sources/patched-uvc-gadget-sources.tgz -C "$work"
+patch --batch --forward -d "$work/uvc-gadget" -p1 < sources/uvc-configfs-calloc.patch
 cp sources/v4l2-source-with-idle-frame.c "$work/uvc-gadget/lib/v4l2-source.c"
 cp sources/bridge-video-frame.h "$work/uvc-gadget/lib/"
 meson setup "$work/build" "$work/uvc-gadget" --prefix=/usr/local --libdir=lib/aarch64-linux-gnu

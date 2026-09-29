@@ -1,0 +1,20 @@
+--- a/lib/configfs.c
++++ b/lib/configfs.c
+@@ -686,7 +686,7 @@
+ 	}
+ 
+ 	format->num_frames = n_entries;
+-	format->frames = calloc(sizeof *format->frames, format->num_frames);
++	format->frames = calloc(format->num_frames, sizeof *format->frames);
+ 	if (!format->frames)
+ 		return -ENOMEM;
+ 
+@@ -770,7 +770,7 @@
+ 	}
+ 
+ 	cfg->num_formats = n_entries;
+-	cfg->formats = calloc(sizeof *cfg->formats, cfg->num_formats);
++	cfg->formats = calloc(cfg->num_formats, sizeof *cfg->formats);
+ 	if (!cfg->formats)
+ 		return -ENOMEM;
+ 
