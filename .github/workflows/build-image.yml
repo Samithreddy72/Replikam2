@@ -37,6 +37,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Restrict credential-bearing images to private drafts
+        env:
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+          RELEASE_DRAFT: ${{ github.event_name != 'workflow_dispatch' || inputs.draft }}
+        run: |
+          if [ "$REPOSITORY_PRIVATE" != true ] && [ "$RELEASE_DRAFT" != true ]; then
+            echo 'Credential-bearing images must remain draft releases on public repositories.'
+            exit 1
+          fi
+
       - name: Check release credentials before building
         env:
           OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
@@ -134,6 +144,7 @@ jobs:
       # stored by a different service, so the image can still be downloaded, verified and
       # flashed. continue-on-error: an artifact-storage quota must not block a release.
       - name: Keep flashable image as a build artifact
+        if: github.event.repository.private == true
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
