@@ -893,7 +893,7 @@ function paintRow(d){
   setText(c.sub, [d.pairing_code, T(d).ip].filter(Boolean).join(" · "));
   const t = T(d), pin = t.pin || {}, sm = t.streams || {};
   patch(c.state, JSON.stringify([d.state, d.laptop, d.state === "offline" ? rel(parseTs(d.last_seen)) : ""]), () => [
-    statePill(d), d.laptop ? h("div", {class: "small muted", style: "margin-top:3px"}, "laptop connected") : null]);
+    statePill(d), d.laptop ? h("div", {class: "small muted", style: "margin-top:3px"}, "USB attachment unverified") : null]);
   patch(c.session, JSON.stringify([d.state, sm.video, pin.session, pin.idle_limit_s]), () => sessionCell(d));
   patch(c.pin, JSON.stringify([d.state, pin.lockout, Math.round((pin.lockout_remaining || 0) / 60), pin.pin_set, pin.required, pin.protocol, pin.gate]), () => pinCell(d));
   patch(c.health, JSON.stringify([d.state, t.power && [t.power.live, t.power.ok], t.usb_misses_per_s, t.temp, t.wifi, (d.alerts || []).length]), () => healthCell(d));
@@ -1023,7 +1023,7 @@ function paintDrawer(){
   const t = T(d), pin = t.pin || {}, ses = pin.session || {}, sm = t.streams || {}, pw = t.power || {}, ov = t.overrides || {};
   setText(DR.f.hnum, d.label || (d.claimed ? "no fleet number" : "NEW"));
   setText(DR.f.hname, d.claimed ? devName(d) : "Unclaimed · " + (d.pairing_code || d.id));
-  patch(DR.f.hstate, JSON.stringify([d.state, d.laptop, d.last_seen]), () => [statePill(d), d.laptop ? pill("idle", "laptop connected") : null]);
+  patch(DR.f.hstate, JSON.stringify([d.state, d.laptop, d.last_seen]), () => [statePill(d), d.laptop ? pill("idle", "USB attachment unverified") : null]);
   DR.f.claimbox.hidden = !!d.claimed;
   if (DR.f.claimNote) DR.f.claimNote.hidden = !!d.claimed;
   if (DR.f.unclaimedActions) DR.f.unclaimedActions.hidden = !!d.claimed;
@@ -1034,7 +1034,7 @@ function paintDrawer(){
   kvSet("session", sm.video ? "Presenter streaming" + (ses.peer ? " from " + ses.peer : "") + (ses.age_s != null ? " · " + dur(ses.age_s) : "")
     : ses.active ? "Unlocked by a presenter, no video yet — relocks after " + dur(Math.max(0, (pin.idle_limit_s || 600) - (ses.idle_s || 0))) + " without video"
     : "No session — the bridge is locked" + (pin.last_end && pin.last_end.reason ? " (last session ended: " + pin.last_end.reason + ")" : ""));
-  kvSet("laptop", d.laptop === true ? "Plugged in and using the camera" : d.laptop === false ? "Not connected (" + (t.udc || "no USB host") + ")" : "—");
+  kvSet("laptop", d.laptop === true ? "USB reports configured; attachment and camera use unverified" : d.laptop === false ? "USB reports " + (t.udc || "no USB host") : "—");
   kvSet("pin", pin.lockout ? "LOCKED OUT after 3 wrong PINs — " + dur(pin.lockout_remaining) + " left"
     : pin.pin_set === false ? (pin.required ? "No PIN set — nobody can go live until you set one" : "No PIN set — anyone on the mesh can go live")
     : pin.pin_set ? "Set — required on every go-live" + (pin.protocol >= 2 ? "" : " (older software: not enforced)") + (pin.gate === "unavailable" ? " · media gate OFF" : "")
