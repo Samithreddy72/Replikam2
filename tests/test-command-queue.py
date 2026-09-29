@@ -325,8 +325,8 @@ names = [x["device"] for x in q.get("queued", [])]
 skipped = {x["device"]: x["reason"] for x in q.get("skipped", [])}
 check(b1.status_code == 200 and not any("Q004" in n for n in names) and any("Q004" in n for n in skipped),
       "an unclaimed card is left out of a broadcast, and named", q)
-check(any("Studio B" in n for n in skipped) and "laptop" in next(v for k, v in skipped.items() if "Studio B" in k),
-      "a bridge with its meeting laptop attached is not restarted by a broadcast", skipped)
+check(any("Studio B" in n for n in skipped) and "USB attachment is unverified" in next(v for k, v in skipped.items() if "Studio B" in k),
+      "a bridge with uncertain USB attachment is not restarted by a broadcast", skipped)
 b2 = client.post("/admin/commands/broadcast", json={"type": "restart", "idempotency_key": "k-1"})
 first = sorted(x["command_id"] for x in q["queued"])
 again = sorted(x["command_id"] for x in b2.json().get("queued", []))
