@@ -20,7 +20,8 @@ bridge_usb_serial() {
 }
 SERIAL=$(bridge_usb_serial "$(cat /etc/bridge/usb-serial-mode 2>/dev/null || true)" "$(awk '/^Serial[[:space:]]*:/ {print $3}' /proc/cpuinfo)") || { echo 'Invalid unique USB identity; refusing descriptor setup' >&2; exit 1; }
 MANUF=$(hostname)
-PRODUCT="UVC Gadget"
+# Display label only: preserve the existing VID, PID and serial identity.
+PRODUCT="Logi-tech G433"
 BOARD=$(strings /proc/device-tree/model)
 UDC=$(ls /sys/class/udc) # will identify the 'first' UDC
 
@@ -106,6 +107,7 @@ create_uvc() {
 
 	echo "	Creating UVC gadget functionality : $FUNCTION"
 	mkdir functions/$FUNCTION
+	printf '%s\n' "$PRODUCT" > "functions/$FUNCTION/function_name"
 
 	create_frame $FUNCTION 424 240 uncompressed u
 
@@ -206,7 +208,7 @@ case "$1" in
 	mkdir -p strings/0x409
 	echo $SERIAL > strings/0x409/serialnumber
 	echo $MANUF > strings/0x409/manufacturer
-	echo $PRODUCT > strings/0x409/product
+	printf '%s\n' "$PRODUCT" > strings/0x409/product
 	echo "OK"
 
 	echo "Creating Config"
@@ -219,6 +221,7 @@ case "$1" in
 
 	echo "Creating UAC2 microphone function..."
 	mkdir functions/uac2.usb0
+	printf '%s\n' "$PRODUCT" > functions/uac2.usb0/function_name
 	# ADAPTIVE sync for the host->gadget (speaker) stream: the default "async"
 	# mode requires a feedback endpoint that Windows' usbaudio2.sys must honor —
 	# a documented source of drift -> stutter-burst -> multi-second stream resets
