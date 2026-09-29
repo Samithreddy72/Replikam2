@@ -31,14 +31,14 @@ S 'echo "  ✓ connected to $(hostname) ($(uname -m))"' || { echo "❌ cannot re
 
 bar "1/8  pushing files (~45MB)"
 S 'mkdir -p /home/pi/replikam2'
-scp -q -r -i $KEY "$D/pi" "$D/restore" "$D/sources" pi@"$T":/home/pi/replikam2/
+scp -q -r -i $KEY "$D/pi" "$D/restore" "$D/sources" "$D/tools" pi@"$T":/home/pi/replikam2/
 echo "  ✓ pushed"
 
 bar "2/8  packages (needs internet on the Pi; 5-10 min — grab a coffee)"
 S 'sudo apt-get update -qq && sudo apt-get install -y -qq \
    gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
    gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-alsa \
-   v4l2loopback-dkms v4l2loopback-utils v4l-utils alsa-utils python3 python3-pil \
+   v4l2loopback-dkms v4l2loopback-utils v4l-utils alsa-utils python3 python3-pil python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
    git meson ninja-build build-essential 2>&1 | tail -1'
 echo "  ✓ packages ready"
 
@@ -65,11 +65,7 @@ bar "5/8  deploying the tested bridge (scripts, services, binaries)"
 S 'cd /home/pi/replikam2
    sudo cp pi/scripts/* /usr/local/bin/ && sudo mv /usr/local/bin/uvc-raw-setup.sh /home/pi/uvc-raw-setup.sh
    sudo cp -r pi/systemd/* /etc/systemd/system/
-   sudo cp restore/binaries/uvc-gadget restore/binaries/uvc-gadget-wlhe /usr/local/bin/
-   sudo mkdir -p /usr/local/lib/aarch64-linux-gnu
-   sudo cp restore/binaries/libuvcgadget.so.0.4.0 /usr/local/lib/aarch64-linux-gnu/
-   sudo ln -sf /usr/local/lib/aarch64-linux-gnu/libuvcgadget.so.0.4.0 /usr/local/lib/aarch64-linux-gnu/libuvcgadget.so.0
-   sudo ldconfig
+   sudo bash tools/build-uvc-source.sh "$(mktemp -d /tmp/netbridge-uvc.XXXXXX)" || exit 1
    sudo cp pi/configs/v4l2loopback.conf /etc/modprobe.d/
    sudo mkdir -p /etc/systemd/journald.conf.d /etc/systemd/system.conf.d /etc/NetworkManager/conf.d
    sudo cp pi/configs/size-cap.conf /etc/systemd/journald.conf.d/ 2>/dev/null
@@ -77,7 +73,7 @@ S 'cd /home/pi/replikam2
    sudo cp pi/configs/wifi-powersave-off.conf pi/configs/no-mac-rand.conf /etc/NetworkManager/conf.d/ 2>/dev/null
    sudo chmod +x /usr/local/bin/bridge* /usr/local/bin/wifi-guardian.sh /usr/local/bin/flight-recorder.sh /usr/local/bin/jitter-sentry.sh /home/pi/uvc-raw-setup.sh 2>/dev/null
    tar xzf sources/patched-uvc-gadget-sources.tgz -C /home/pi/ 2>/dev/null
-   echo "  ✓ deployed"'
+   echo "  ✓ deployed"' || exit 1
 
 bar "6/8  remote access (Tailscale — reach the Pi from anywhere)"
 S 'command -v tailscale >/dev/null || curl -fsSL https://tailscale.com/install.sh | sudo sh >/dev/null 2>&1

@@ -20,7 +20,7 @@ thing that turns J3's six steps into software:
 Deliberately NOT in this app: any admin capability. It signs in as a viewer, so the
 control plane refuses fleet mutations even if the UI asked for them.
 """
-import json, os, pathlib, re, shutil, socket, subprocess, sys, threading, time
+import hashlib, json, os, pathlib, re, shutil, socket, subprocess, sys, threading, time
 import urllib.request, urllib.error, urllib.parse
 
 
@@ -756,6 +756,13 @@ class Session:
         ] + venc + [
             "-b:v", STREAM_BITRATE, "-g", str(fps), "-bsf:v", "dump_extra=freq=keyframe", "-an",
             "-f", "rtp", "rtp://%s:%d?pkt_size=1100" % (pi_host, RTP_VIDEO)]
+        # Bind RTP to this PIN session. This public discriminator rejects late packets
+        # from an earlier presenter; encrypted mesh + Pi peer gate remain authorization.
+        ticket = PINS.ticket()
+        if ticket:
+            ssrc = int(hashlib.sha256(ticket.encode()).hexdigest()[:8], 16) or 1
+            # FFmpeg's RTP muxer exposes SSRC as a signed 32-bit option.
+            v[-1:-1] = ["-ssrc", str(ssrc if ssrc < 2**31 else ssrc - 2**32)]
         a = common + ain + [
             # The Pi owns voice AGC. Avoid stacked boosts; disable the limiter's
             # automatic makeup gain so this safety ceiling really stays at 0.9.
@@ -1285,7 +1292,7 @@ SESSION = Session()
 
 MESH_PROC = "netbridge-mesh.exe" if IS_WIN else "netbridge-mesh"
 MEDIA_PROCS = ("ffmpeg", "gst-launch-1.0")
-MEDIA_MARKS = ("dump_extra=freq=keyframe", "payload_type 97", "udpsrc port=5004")
+MEDIA_MARKS = ("dump_extra=freq=keyframe", "payload_type 97", "udpsrc port=5004", "rtpopuspay pt=97")
 
 
 def _proc_name(pid):
@@ -3334,16 +3341,12 @@ async function recoverFromReboot(){
 }
 
 let legRepairDone=false;
-async function repairLegs(){
+async function repairLegs(missing){
   if(legRepairDone)return; legRepairDone=true;
-  $('m2').textContent='media path lost — reconnecting…';
-  // keep_session: a dropped media leg is not a Stop - the bridge session (and its ticket) stay.
-  await j('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({keep_session:true})});
-  // setLive(false) before restarting: startSession() reads the button to tell a reconnect
-  // from a PIN re-entry mid-session.
-  setLive(false);
-  await startSession({reconnect:true});
+  // Transport legs repair independently in the mesh helper. Never stop a healthy
+  // camera/microphone to fix a return-audio socket.
+  $('m2').textContent='Media path unavailable';
+
 }
 async function previewSupport(){
  try{const r=await j('/api/support-report',{method:'POST',body:JSON.stringify({submit:false})});
@@ -3411,9 +3414,9 @@ async function poll(){
     const names={5000:'video',5002:'voice',5004:'return audio'};
     const lost=(legs.missing||[]).map(p=>names[p]||p).join(' and ');
     $('ckfix').textContent='This app stopped sending — the '+lost+' path to the bridge dropped '
-      +(legs.down_for_s||0)+'s ago. Your camera and mic are fine. Reconnecting…';
+      +(legs.down_for_s||0)+'s ago. Your camera and mic are fine. Waiting for the affected path.';
     $('ckfix').style.display='';
-    repairLegs();
+    repairLegs(legs.missing||[]);
     return;
   }
   legRepairDone=false;   // healthy again: re-arm for the next outage

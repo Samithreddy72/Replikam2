@@ -2,16 +2,17 @@
 Description=NetBridge network video receiver (RTP H264 -> loopback)
 After=bridge-gadget.service
 Wants=bridge-gadget.service
-StartLimitIntervalSec=0
+StartLimitIntervalSec=120
+StartLimitBurst=3
 [Service]
 # Cache lives on writable /var/cache; read-only /root cannot retain plugin scans.
 CacheDirectory=netbridge/gstreamer-1.0
 Environment=GST_REGISTRY=/var/cache/netbridge/gstreamer-1.0/registry.bin
 ExecStartPre=/usr/local/bin/bridge-wait.sh video40
 ExecStart=/usr/local/bin/bridge-run.sh bridge-feeder-net.sh
-Restart=always
+Restart=on-failure
 TimeoutStopSec=5
 KillMode=mixed
-RestartSec=2
+RestartSec=5
 [Install]
 WantedBy=multi-user.target

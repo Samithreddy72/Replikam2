@@ -98,7 +98,7 @@ busy(){
     case "$(cat "$f" 2>/dev/null)" in configured|suspended) echo "the meeting laptop is attached"; return 0 ;; esac
   done
   if [ -n "$LIVE_CMD" ]; then eval "$LIVE_CMD" && { echo "a presenter session is live"; return 0; }; return 1; fi
-  pid=$(pgrep -f 'udpsrc port=5000' | head -1)
+  pid=$(pgrep -f 'udpsrc port=5000|bridge-video-receiver.py' | head -1)
   [ -n "$pid" ] || return 1
   t0=$(awk '{print $14+$15}' "/proc/$pid/stat" 2>/dev/null); sleep 2
   t1=$(awk '{print $14+$15}' "/proc/$pid/stat" 2>/dev/null)

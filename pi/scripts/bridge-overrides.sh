@@ -152,7 +152,7 @@ session_live(){
   if [ -n "$LIVE_CMD" ]; then eval "$LIVE_CMD"; return; fi
   # Same test jitter-sentry uses: the video feeder is burning CPU = presenter video is flowing.
   local pid t0 t1
-  pid=$(pgrep -f 'udpsrc port=5000' | head -1); [ -n "$pid" ] || return 1
+  pid=$(pgrep -f 'udpsrc port=5000|bridge-video-receiver.py' | head -1); [ -n "$pid" ] || return 1
   t0=$(awk '{print $14+$15}' "/proc/$pid/stat" 2>/dev/null) || return 1
   sleep 1
   t1=$(awk '{print $14+$15}' "/proc/$pid/stat" 2>/dev/null) || return 1

@@ -39,7 +39,7 @@ jobs:
       - name: Install isolated Python and media test runtime
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-venv python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools ffmpeg bc
+          sudo apt-get install -y meson ninja-build python3-venv python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools ffmpeg bc
           /usr/bin/python3 -m venv --system-site-packages .test-venv
           .test-venv/bin/pip install -r control-plane/backend/requirements.txt httpx==0.28.1 numpy==2.4.6 -r app/netbridge-source/requirements-build.txt
       - name: Run all Python and shell tests; skips block release
@@ -47,6 +47,8 @@ jobs:
           NB_TEST_LOG_DIR: ${{ runner.temp }}/netbridge-test-logs
           FLEET_TEST_PY: ${{ github.workspace }}/.test-venv/bin/python
         run: bash tools/run-tests.sh --suite common --python .test-venv/bin/python --media-python .test-venv/bin/python
+      - name: Compile shipped UVC source with warnings as errors
+        run: NB_UVC_BUILD_ONLY=1 bash tools/build-uvc-source.sh "$RUNNER_TEMP/uvc-source"
       - name: Validate production proxy configuration
         run: docker run --rm -e FLEET_DOMAIN=fleet.test -v "$PWD/control-plane/deploy/aws/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: Check desktop interface

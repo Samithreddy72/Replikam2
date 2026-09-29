@@ -24,7 +24,7 @@ apt-get install -y --no-install-recommends \
   gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
   gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-alsa \
   v4l2loopback-dkms v4l2loopback-utils v4l-utils alsa-utils \
-  python3 python3-pil git meson ninja-build build-essential \
+  python3 python3-pil python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 git meson ninja-build build-essential \
   gcc-12 cpp-12 gcc-12-base libgcc-12-dev \
   network-manager dnsmasq-base rsync ca-certificates curl \
   cloud-guest-utils parted e2fsprogs \
@@ -129,10 +129,7 @@ for f in pi/scripts/*; do
   if [ "$b" = "uvc-raw-setup.sh" ]; then install -m 0755 "$f" /home/pi/; else install -m 0755 "$f" /usr/local/bin/; fi
 done
 install -m 0644 pi/systemd/*.service pi/systemd/*.timer /etc/systemd/system/
-install -m 0755 restore/binaries/uvc-gadget /usr/local/bin/
-install -m 0755 restore/binaries/libuvcgadget.so.0.4.0 /usr/local/lib/aarch64-linux-gnu/
-ln -sf libuvcgadget.so.0.4.0 /usr/local/lib/aarch64-linux-gnu/libuvcgadget.so.0
-ldconfig
+bash tools/build-uvc-source.sh /tmp/netbridge-uvc-build || exit 1
 install -d /etc/netbridge
 printf 'required\n' > /etc/netbridge/script-signature-v2
 install -d /etc/modprobe.d /etc/systemd/journald.conf.d /etc/systemd/system.conf.d /etc/NetworkManager/conf.d

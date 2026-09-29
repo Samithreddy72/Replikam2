@@ -27,7 +27,7 @@ PEER_FILE=/etc/default/bridge-return-audio
 # bridge-web's own health check uses, sampled over 1s so it costs almost nothing.
 media_live(){
   local pid t0 t1
-  pid=$(pgrep -f 'udpsrc port=5000' | head -1)
+  pid=$(pgrep -f 'udpsrc port=5000|bridge-video-receiver.py' | head -1)
   [ -n "$pid" ] || return 1
   t0=$(awk '{print $14+$15}' "/proc/$pid/stat" 2>/dev/null) || return 1
   sleep 1

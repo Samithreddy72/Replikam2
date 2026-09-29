@@ -316,5 +316,17 @@ check("udp dport 5000" in scripts and "udp dport 5002" in scripts and "5004" not
 check('udp dport { 5000, 5002 } counter name "refused_in" drop' in scripts and 'iifname "lo" accept' in scripts,
       "everyone else is dropped on those two ports; the bridge's own loopback is untouched")
 
+# Real session lifecycle drives the camera's non-secret marker without service restarts.
+pin("set", "-", stdin="567890\n")
+rc, binding, _ = pin("unlock", "-", "--peer", A, stdin="567890\n")
+marker = (RUN / "video-session").read_text().split()
+check(rc == 0 and marker[0] == hashlib.sha256(binding["ticket"].encode()).hexdigest()[:16]
+      and marker[1] == "1", "unlock publishes this session's video epoch")
+pin("end", "-", stdin=binding["ticket"] + "\n")
+check((RUN / "video-session").read_text() == "0 0 0\n", "Stop clears video independently of the media processes")
+pin("unlock", "-", "--peer", A, stdin="567890\n")
+pin("gate-init")
+check((RUN / "video-session").read_text() == "0 0 0\n", "gate initialization clears any surviving video marker")
+
 print("\n  %d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

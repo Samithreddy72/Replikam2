@@ -2,7 +2,8 @@
 Description=NetBridge speaker-return audio (UAC2 host playback -> RTP Opus -> peer)
 After=bridge-gadget.service
 Wants=bridge-gadget.service
-StartLimitIntervalSec=0
+StartLimitIntervalSec=120
+StartLimitBurst=3
 [Service]
 # Cache lives on writable /var/cache; read-only /root cannot retain plugin scans.
 CacheDirectory=netbridge/gstreamer-1.0
@@ -13,6 +14,6 @@ ExecStart=/usr/local/bin/bridge-run.sh bridge-return-audio.sh
 Restart=always
 TimeoutStopSec=5
 KillMode=mixed
-RestartSec=2
+RestartSec=5
 [Install]
 WantedBy=multi-user.target

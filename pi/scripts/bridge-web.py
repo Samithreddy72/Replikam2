@@ -513,9 +513,40 @@ USB_STATES = {
 #
 # /proc/<pid>/io wchar counts bytes the process passed to write(), which for this pipeline is
 # the v4l2sink. It costs one small read.
+def video_output_state(control="/run/bridge-pin/video-session", frame="/run/bridge-video/frame", now=None):
+    """Source-side evidence only: cannot prove a meeting app displayed the USB frame."""
+    try:
+        with open(control) as f:
+            epoch, active, deadline = f.read().split()
+            deadline = int(deadline)
+            int(epoch, 16)
+    except (OSError, ValueError):
+        return None  # retained compatibility with older firmware
+    clock = time.monotonic_ns() if now is None else now
+    result = {"state": "black", "age_s": None, "frames": 0, "receiver_verified": False}
+    if active != "1" or clock >= deadline:
+        return result
+    try:
+        with open(frame, "rb") as f:
+            parts = f.read(96).decode("ascii").split()
+        if len(parts) < 5 or parts[0] != "NBV1" or int(parts[1], 16) != int(epoch, 16) or int(parts[3]) != 203520:
+            return result
+        age = (clock - int(parts[2])) / 1e9
+        if age < 0:
+            return result
+        result.update(age_s=round(age, 3), frames=int(parts[4]),
+                      state="live" if age < 2 else "frozen" if age < 60 else "black")
+    except (OSError, ValueError, UnicodeError):
+        pass
+    return result
+
+
 def _video_bytes(pid):
     if not pid:
         return None
+    output = video_output_state()
+    if output is not None:
+        return output["frames"] * 203520
     try:
         for ln in (read("/proc/%s/io" % pid) or "").splitlines():
             if ln.startswith("wchar:"):
@@ -921,6 +952,9 @@ def _gather_uncached():
         "return": attached and svc.get("bridge-return-audio") == "active"
                   and _stream_live("return", _rp, _now),
     }
+    d["video_output"] = video_output_state()
+    if d["video_output"] is not None:
+        d["streams"]["video"] = attached and d["video_output"]["state"] == "live"
     d["restarts"] = {
         "feeder_net": svc_restarts("bridge-feeder-net"),
         "uvcd": svc_restarts("bridge-uvcd"),
@@ -1081,7 +1115,7 @@ def _pid_for(pattern):
 
 def _feeder_cpu_ticks():
     """(pid, utime+stime clock ticks) of the net video feeder, or (None, None)."""
-    pid = _pid_for("udpsrc port=5000")
+    pid = _pid_for("bridge-video-receiver.py") or _pid_for("udpsrc port=5000")
     pids = [pid] if pid else []
     if not pids:
         return None, None
@@ -1250,6 +1284,13 @@ def checks():
             if fps < want * 0.66:
                 video_ok = False
                 video_detail += " — DEGRADED: the room is seeing a stuttering picture"
+
+    output = video_output_state()
+    if output is not None:
+        video_ok = output["state"] == "live"
+        video_detail = {"live": "Fresh video decoded", "frozen": "Holding the last frame", "black": "Black output"}[output["state"]]
+        if output["age_s"] is not None:
+            video_detail += " — last decoded frame %.1fs ago" % output["age_s"]
 
     if p0 is None or p1 is None:
         audio_ok, audio_detail = False, ("the meeting laptop is not playing audio into NetBridge — "

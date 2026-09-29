@@ -218,9 +218,8 @@ echo
 # ---- every real pipeline, captured from the real script ---------------------------------
 echo "  ---- captured from the shipped scripts ----"
 
-S=$(stage pi/scripts/bridge-feeder-net.sh) && [ "$S" != "STAGE-FAILED" ] \
-  && check "bridge-feeder-net.sh (video)" "$(capture "$S" | defake)" \
-  || no "bridge-feeder-net.sh — could not stage"
+VIDEO=$(python3 -c 'import runpy; print(runpy.run_path("pi/scripts/bridge-video-receiver.py")["pipeline_description"](100))')
+check "bridge-video-receiver.py (video)" "$(printf '%s' "$VIDEO" | defake)"
 
 S=$(stage pi/scripts/bridge-feeder-audio.sh)
 if [ "$S" = "STAGE-FAILED" ] || [ -z "$S" ]; then

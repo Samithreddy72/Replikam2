@@ -55,7 +55,7 @@ for t in tests/test-*.py tests/test-*.sh; do
   test_py="$PY"
   # PyGObject is tied to the system GStreamer Python ABI; the backend may need a
   # different supported interpreter. Both runtimes remain explicit in the release run.
-  [ "$name" = "test-audio-engine.py" ] && test_py="$MEDIA_PY"
+  case "$name" in test-audio-engine.py|test-video-receiver-gst.py) test_py="$MEDIA_PY" ;; esac
   case "$t" in
     *.py) out=$("$test_py" "$t" 2>&1); rc=$? ;;
     *)    out=$(bash "$t" 2>&1);  rc=$? ;;

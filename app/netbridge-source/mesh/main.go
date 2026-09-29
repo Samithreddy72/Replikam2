@@ -23,7 +23,6 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -181,47 +180,9 @@ func forward(s *tsnet.Server, port, bridge string) error {
 		local.Close()
 		return fmt.Errorf("mesh dial: %w", err)
 	}
-	go func() {
-		defer local.Close()
-		defer mesh.Close()
-		buf := make([]byte, 1500)
-		var packets, missing uint64
-		var previous uint16
-		var previousSSRC uint32
-		var havePrevious bool
-		var maxWrite time.Duration
-		reportAt := time.Now()
-		for {
-			n, _, err := local.ReadFrom(buf)
-			if err != nil {
-				return
-			}
-			packets++
-			if n >= 12 && buf[0]>>6 == 2 {
-				seq := binary.BigEndian.Uint16(buf[2:4])
-				ssrc := binary.BigEndian.Uint32(buf[8:12])
-				if havePrevious && ssrc == previousSSRC {
-					delta := uint16(seq - previous)
-					if delta > 1 && delta < 32768 {
-						missing += uint64(delta - 1)
-					}
-				}
-				previous, previousSSRC, havePrevious = seq, ssrc, true
-			}
-			start := time.Now()
-			if _, err := mesh.Write(buf[:n]); err != nil {
-				fmt.Fprintf(os.Stderr, "forward %s: mesh write failed after %d packets: %v\n", port, packets, err)
-				return
-			}
-			if elapsed := time.Since(start); elapsed > maxWrite {
-				maxWrite = elapsed
-			}
-			if time.Since(reportAt) >= 10*time.Second {
-				fmt.Fprintf(os.Stderr, "forward %s: packets=%d input_sequence_gaps=%d max_write_ms=%.3f\n", port, packets, missing, float64(maxWrite)/float64(time.Millisecond))
-				reportAt, maxWrite = time.Now(), 0
-			}
-		}
-	}()
+	go relayForward(local, mesh, func(ctx context.Context) (net.Conn, error) {
+		return s.Dial(ctx, "udp", net.JoinHostPort(bridge, port))
+	})
 	return nil
 }
 
@@ -275,15 +236,18 @@ func returnLeg(s *tsnet.Server, tsip string, port int) error {
 	// like. A reader goroutine now only reads, a writer goroutine only writes, and a small
 	// buffered channel joins them.
 	type pkt struct {
-		b []byte
-		n int
+		b        []byte
+		n        int
+		received time.Time
 	}
-	ch := make(chan pkt, 64) // ~1.3 s of Opus at 50 pkt/s: enough to ride out a stall, small
-	//                          enough that we can never add meaningful latency
+	ch := make(chan pkt, 64) // Capacity absorbs bursts; age limit above prevents stale replay.
 	go func() {
 		defer local.Close()
 		var count uint64
 		for p := range ch {
+			if time.Since(p.received) > 100*time.Millisecond {
+				continue
+			}
 			count++
 			if _, err := local.Write(p.b[:p.n]); err != nil {
 				// Never surrender the leg on a transient local send error; the player may
@@ -311,7 +275,7 @@ func returnLeg(s *tsnet.Server, tsip string, port int) error {
 				dbg("returnLeg RX #%d %d bytes from %v (dropped %d)", count, n, from, dropped)
 			}
 			select {
-			case ch <- pkt{buf, n}:
+			case ch <- pkt{buf, n, time.Now()}:
 			default:
 				// Writer is wedged. DROP rather than block: stalling the reader would back
 				// pressure into the netstack and convert a brief hiccup into a long burst.

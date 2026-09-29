@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Real H264/RTP decode and session handover over loopback; no Pi/USB required."""
+import importlib.util
+import pathlib
+import socket
+import subprocess
+import shutil
+import tempfile
+import time
+import unittest
+import gi
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst, GLib
+Gst.init(None)
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location('receiver', ROOT/'pi/scripts/bridge-video-receiver.py')
+r = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(r)
+EPOCH = 0x1234567812345678
+
+class Decode(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.directory = pathlib.Path(self.tmp.name)
+        self.control = self.directory/'session'
+        self.control.write_text('%x 1 %d\n' % (EPOCH, time.monotonic_ns()+120_000_000_000))
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.bind(('127.0.0.1',0)); self.port = s.getsockname()[1]
+        self.receiver = r.make_receiver(Gst, GLib, 20, self.control, self.directory,
+            lambda latency: r.pipeline_description(latency).replace('port=5000','port=%d'%self.port)
+            .replace('v4l2sink device=/dev/video40 sync=false','fakesink sync=false'))
+        self.addCleanup(self.receiver.stop)
+        self.receiver.tick()
+
+    def drive(self, seconds):
+        until = time.monotonic()+seconds
+        ctx = GLib.MainContext.default()
+        while time.monotonic()<until:
+            while ctx.pending(): ctx.iteration(False)
+            self.receiver.tick()
+            time.sleep(.005)
+
+    def sender(self, ssrc):
+        p = Gst.parse_launch('videotestsrc is-live=true pattern=black ! '
+            'video/x-raw,width=424,height=240,framerate=10/1 ! '
+            'x264enc tune=zerolatency key-int-max=10 ! rtph264pay pt=96 config-interval=-1 ssrc=%d ! '
+            'udpsink host=127.0.0.1 port=%d sync=false' % (ssrc,self.port))
+        self.addCleanup(lambda:p.set_state(Gst.State.NULL))
+        self.assertNotEqual(p.set_state(Gst.State.PLAYING),Gst.StateChangeReturn.FAILURE)
+        return p
+
+    def test_static_decoded_frames_advance_then_stop_on_sender_crash(self):
+        p = self.sender(EPOCH>>32)
+        self.drive(.7)
+        first = (self.directory/'frame').read_bytes()
+        self.drive(.3)
+        second = (self.directory/'frame').read_bytes()
+        self.assertEqual(len(second), 96+r.FRAME_BYTES)
+        self.assertEqual(first[96:], second[96:])
+        self.assertNotEqual(first[:96], second[:96])
+        p.set_state(Gst.State.NULL)
+        self.drive(.3)
+        stopped = (self.directory/'frame').read_bytes()
+        self.drive(.3)
+        self.assertEqual((self.directory/'frame').read_bytes(),stopped)
+        self.assertEqual(self.receiver.failures,0)
+
+    def test_ffmpeg_signed_ssrc_matches_receiver(self):
+        # FFmpeg exposes SSRC as signed, RTP serializes the same unsigned bits.
+        epoch = 0xf234567812345678
+        self.control.write_text('%x 1 %d\n' % (epoch,time.monotonic_ns()+120_000_000_000))
+        self.receiver.tick()
+        ff = shutil.which('ffmpeg')
+        self.assertIsNotNone(ff, 'real FFmpeg required')
+        p = subprocess.Popen([ff,'-hide_banner','-loglevel','error','-re','-f','lavfi',
+            '-i','color=c=black:s=424x240:r=10','-t','2','-c:v','libx264','-tune','zerolatency',
+            '-g','10','-ssrc',str((epoch>>32)-2**32),'-f','rtp',
+            'rtp://127.0.0.1:%d?pkt_size=1100'%self.port],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+        self.addCleanup(lambda:p.poll() is None and p.kill())
+        self.drive(1)
+        self.assertTrue((self.directory/'frame').exists())
+        _, err = p.communicate(timeout=5)
+        self.assertEqual(p.returncode,0,err.decode())
+
+    def test_old_presenter_packets_never_publish(self):
+        self.sender((EPOCH>>32)+1)
+        self.drive(.5)
+        self.assertFalse((self.directory/'frame').exists())
+        self.sender(EPOCH>>32)
+        self.drive(.7)
+        self.assertTrue((self.directory/'frame').exists())
+        self.control.write_text('0 0 0\n')
+        self.drive(.2)
+        self.assertIsNone(self.receiver.pipe)
+        stopped = (self.directory/'frame').read_bytes()
+        self.drive(.2)
+        self.assertEqual((self.directory/'frame').read_bytes(),stopped)
+
+if __name__ == '__main__': unittest.main()
