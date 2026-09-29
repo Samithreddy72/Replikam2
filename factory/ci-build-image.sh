@@ -131,6 +131,8 @@ done
 install -m 0644 pi/systemd/*.service pi/systemd/*.timer /etc/systemd/system/
 bash tools/build-uvc-source.sh /tmp/netbridge-uvc-build || exit 1
 install -d /etc/netbridge
+printf "1\n" > /etc/netbridge/video-fallback-v1
+install -d /etc/netbridge
 printf 'required\n' > /etc/netbridge/script-signature-v2
 install -d /etc/modprobe.d /etc/systemd/journald.conf.d /etc/systemd/system.conf.d /etc/NetworkManager/conf.d
 # The script-override TRUST ANCHOR, on the read-only root. Without it every bridge refuses

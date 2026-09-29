@@ -61,7 +61,7 @@ cmd_status(){
   else
     line "watchdog (hardware)" "off by design (boot-with-client spiral) — a hang needs a replug"
   fi
-  line "self-heal timer" "$(systemctl is-active bridge-watchdog.timer)  (restarts dead services every 30s)"
+  line "self-heal timer" "$(systemctl is-active bridge-watchdog.timer)  (observes service health; no automatic USB reset)"
 }
 
 restart_media(){
@@ -80,6 +80,13 @@ case "$1" in
   status|"" ) cmd_status ;;
   start )   echo "Starting all services..."; sudo systemctl start $SERVICES; sleep 2; cmd_status ;;
   stop )    echo "Stopping media services (USB device stays enumerated)..."; sudo systemctl stop $MEDIA ;;
+  recover-video )
+    [ -f /etc/netbridge/video-fallback-v1 ] || { echo "Update the bridge image before using isolated video recovery."; exit 1; }
+    sudo systemctl reset-failed bridge-feeder-net || exit 1
+    sudo systemctl restart bridge-feeder-net || exit 1
+    sudo systemctl is-active --quiet bridge-feeder-net || exit 1
+    echo "Video receiver restarted. Waiting for fresh video; audio and USB remain active."
+    ;;
   restart ) echo "Restarting media (safe - does NOT touch the USB gadget)..."; restart_media; sleep 1; cmd_status ;;
   restart-all )
     echo "WARNING: this rebuilds the USB gadget - the client may need a replug."
@@ -248,6 +255,7 @@ bridge - NetBridge control
                            known-good config baseline: save it when the audio is verified,
                            diff to see what drifted, restore the tunable parts
   bridge setup-pass        print the setup-label details (AP name, random password, pairing code)
+  bridge recover-video     restart only the video receiver (new fallback image required)
   bridge logs [service]    tail+follow logs (e.g. bridge logs feeder-net)
   bridge help              this help
 H

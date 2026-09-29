@@ -484,17 +484,17 @@ function store(k, v){ try { if (v) localStorage.setItem(k, v); else localStorage
 
 // Commands the BACKEND refuses without confirm:true (CONFIRM_REQUIRED in main.py).
 // tests/test-fleet-ui-contract.py fails if the two sets ever differ.
-const BACKEND_CONFIRM = new Set(["free-space","reboot","update","deploy-script","revert-script",
+const BACKEND_CONFIRM = new Set(["recover-video","free-space","reboot","update","deploy-script","revert-script",
                                  "unquarantine","golden-restore","reset-clock","lock"]);
 // Anything here interrupts media or ends a session: it always asks first, and says so plainly
 // when a presenter is live on that bridge. Every member carries ⚠ in its label and nothing else
 // does (tests/test-command-gates.py).
-const DISRUPTIVE = new Set(["mesh-key","restart","reset-clock","reboot","lock","stop","profile","update",
+const DISRUPTIVE = new Set(["recover-video","mesh-key","restart","reset-clock","reboot","lock","stop","profile","update",
   "unquarantine","jitter-fix:3","deploy-script","revert-script","golden-restore"]);
 // Queued for an offline bridge, these expire if it does not collect them within 30 min
 // (INTERRUPTS_MEETING / STALE_UNCOLLECTED_S in main.py): a reboot must not run days later.
 // A lock is not one of them: arriving late, it still keeps people out.
-const GOES_STALE = new Set(["reboot","restart","start","stop","profile","reset-clock",
+const GOES_STALE = new Set(["recover-video","reboot","restart","start","stop","profile","reset-clock",
   "golden-restore","jitter-fix","jitter-reset"]);
 // Organised by what the admin can SEE, not by what the code does: an admin arrives with a
 // symptom, never a diagnosis. The single most important distinction: the audio YOU hear from
@@ -517,6 +517,9 @@ const ACTIONS = [
 
   ["#Robotic, crackling, or devices missing in the meeting", null],
   ["reset-clock",     "Reset the audio clock ⚠ their camera+mic+speakers re-enumerate"],
+
+  ["#Video stopped; audio still works", null],
+  ["recover-video", "Recover video only ⚠ holds the last frame; audio stays active"],
 
   ["#Nothing is arriving at all", null],
   ["restart",         "Restart media ⚠ ~5 s video freeze"],

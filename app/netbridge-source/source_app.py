@@ -2435,12 +2435,18 @@ class BridgeWatch:
         # someone else's PIN). It now refuses our media, so every "repair" would be noise: drop
         # the ticket, say why, and let the page ask for the PIN.
         pin = checks.get("pin") or {}
-        if pin.get("locked") and int(pin.get("protocol") or 1) >= PIN_PROTOCOL:
-            reason = pin.get("last_end") or "locked"
-            if PINS.ticket():
-                PINS.clear(lost=reason)
+        ticket = PINS.ticket()
+        epoch = (pin.get("session") or {}).get("video_epoch")
+        replaced = bool(ticket and epoch and epoch != hashlib.sha256(ticket.encode()).hexdigest()[:16])
+        if replaced or (pin.get("locked") and int(pin.get("protocol") or 1) >= PIN_PROTOCOL):
+            ended = pin.get("last_end") or "locked"
+            reason = "superseded" if replaced else ended.get("reason", "locked") if isinstance(ended, dict) else ended
+            message = SESSION_LOST.get(reason, SESSION_LOST["locked"])
+            PINS.clear(lost=reason)
+            SESSION.stop()
+            SESSION.interruption = message
             with self.lock:
-                self.last = SESSION_LOST.get(reason, SESSION_LOST["locked"])
+                self.last = message
             return
 
         # Publish measurements during startup; only corrective actions need grace.
@@ -3521,12 +3527,12 @@ function setCheckTone(ready){
   $('ckfix').style.borderColor=ready?'var(--ok)':'rgba(198,57,44,.28)';
 }
 async function poll(){
-  const state=await j('/api/state');
-  if(state.interruption&&!state.wanted){setLive(false);$('m2').textContent=state.interruption;return;}
   setCheckTone(false);
   const h=liveHost||host(); if(!h)return;
   let c;
-  try{c=await j('/api/checks?host='+encodeURIComponent(h));}
+  try{const state=await j('/api/state');
+    if(state&&state.interruption&&!state.wanted){setLive(false);$('m2').textContent=state.interruption;return;}
+    c=await j('/api/checks?host='+encodeURIComponent(h));}
   catch(e){checksUnavailable('Cannot reach the bridge checks. Your session has not been stopped.');return;}
   if(!c||c._error){checksUnavailable((c&&c._error)||'Bridge checks unavailable.');return;}
   // The bridge ended our PIN session (10 min without video, an admin lock, someone else's PIN).

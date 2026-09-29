@@ -39,7 +39,7 @@ SYSTEMD_RUN = os.environ.get("BRIDGE_AGENT_SYSTEMD_RUN", "/usr/bin/systemd-run")
 # waiting for a live meeting to end before the heavy write. bridge-update.sh BUDGET_S matches it,
 # and the fleet's TIMEOUT_S["update"] is this plus time to report.
 DETACHED = {"deploy-script": 900, "revert-script": 600, "unquarantine": 600, "update": 10800,
-            "diagnose": 900, "restart": 600, "start": 600, "stop": 300, "profile": 600,
+            "diagnose": 900, "restart": 600, "recover-video": 60, "start": 600, "stop": 300, "profile": 600,
             "reset-clock": 300, "gadget-tune": 120, "gadget-tune-clear": 120,
             "jitter-diagnose": 300, "jitter-fix": 600, "jitter-reset": 600,
             "golden-save": 300, "golden-restore": 600}
@@ -48,6 +48,7 @@ DETACHED = {"deploy-script": 900, "revert-script": 600, "unquarantine": 600, "up
 # in this table is refused, so the control plane can never run arbitrary commands.
 ALLOWED = {
     "free-space": lambda a: ["journalctl", "--vacuum-size=64M"],
+    "recover-video": lambda a: ["bridge", "recover-video"],
     "restart":     lambda a: ["bridge", "restart"],
     "reset-clock": lambda a: ["bridge", "reset-clock"],
     "profile":     lambda a: ["bridge", "profile", _enum(a.get("mode"), ("lan", "wan"))],

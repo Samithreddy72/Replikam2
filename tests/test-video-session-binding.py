@@ -67,4 +67,24 @@ class Binding(unittest.TestCase):
             self.assertEqual(guard.repairs,{})
             self.assertEqual(guard.giving_up,[])
 
+    def test_superseded_presenter_stops_capture_without_touching_new_session(self):
+        watch=app.BridgeWatch()
+        with patch.object(app,'SESSION') as session,patch.object(app,'PINS') as pins, \
+                patch.object(watch,'_fetch',return_value={'pin':{'protocol':2,'locked':False,
+                    'session':{'video_epoch':'different-session'}}}),patch.object(watch,'_repair') as repair:
+            session.wanted=True;session.live=True;pins.ticket.return_value='old-ticket'
+            watch._tick()
+            session.stop.assert_called_once();pins.clear.assert_called_once_with(lost='superseded')
+            repair.assert_not_called()
+            self.assertTrue(session.interruption)
+
+    def test_admin_lock_dict_reason_stops_capture(self):
+        watch=app.BridgeWatch()
+        with patch.object(app,'SESSION') as session,patch.object(app,'PINS') as pins, \
+                patch.object(watch,'_fetch',return_value={'pin':{'protocol':2,'locked':True,
+                    'last_end':{'reason':'admin'}}}):
+            session.wanted=True;session.live=True;pins.ticket.return_value='old-ticket'
+            watch._tick();session.stop.assert_called_once()
+            pins.clear.assert_called_once_with(lost='admin')
+
 if __name__=='__main__':unittest.main()

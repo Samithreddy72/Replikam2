@@ -50,7 +50,7 @@ OWNER_KEY = pathlib.Path("~/.netbridge/keys/netbridge-owner-ssh").expanduser()
 KNOWN_HOSTS = pathlib.Path("~/.netbridge/known_hosts").expanduser()
 REPO = pathlib.Path(__file__).resolve().parent.parent
 DONE = {"done", "failed", "rejected", "timeout", "expired", "cancelled", "error"}
-CHANGES = {"free-space", "deploy-script", "revert-script", "unquarantine", "update", "reboot", "restart", "start",
+CHANGES = {"recover-video", "free-space", "deploy-script", "revert-script", "unquarantine", "update", "reboot", "restart", "start",
            "stop", "profile", "set-peer", "reset-clock", "gadget-tune", "gadget-tune-clear",
            "jitter-fix", "jitter-reset", "golden-restore", "set-pin", "clear-lockout", "lock"}
 WAIT_S = {"update": 1800, "deploy-script": 1000, "diagnose": 1000, "revert-script": 700,

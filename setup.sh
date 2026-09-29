@@ -66,6 +66,8 @@ S 'cd /home/pi/replikam2
    sudo cp pi/scripts/* /usr/local/bin/ && sudo mv /usr/local/bin/uvc-raw-setup.sh /home/pi/uvc-raw-setup.sh
    sudo cp -r pi/systemd/* /etc/systemd/system/
    sudo bash tools/build-uvc-source.sh "$(mktemp -d /tmp/netbridge-uvc.XXXXXX)" || exit 1
+   sudo install -d /etc/netbridge
+   printf "1\n" | sudo tee /etc/netbridge/video-fallback-v1 >/dev/null
    sudo cp pi/configs/v4l2loopback.conf /etc/modprobe.d/
    sudo mkdir -p /etc/systemd/journald.conf.d /etc/systemd/system.conf.d /etc/NetworkManager/conf.d
    sudo cp pi/configs/size-cap.conf /etc/systemd/journald.conf.d/ 2>/dev/null

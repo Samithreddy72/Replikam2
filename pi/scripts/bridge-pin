@@ -418,7 +418,7 @@ def render(s=None, gate=None):
     if s:
         m = mono()
         created = s.get("created_m", m)
-        st["session"] = {"active": True, "peer": s.get("peer"),
+        st["session"] = {"active": True, "video_epoch": s.get("ticket_sha256", "")[:16], "peer": s.get("peer"),
                          "age_s": int(m - created),
                          "idle_s": int(m - s.get("last_video_m", created)),
                          "expires_in": int(max(0, created + MAX_AGE_S - m))}

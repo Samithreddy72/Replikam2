@@ -39,7 +39,7 @@ from .schemas import (EnrollIn, EnrollOut, CommandOut, CommandResultIn,
 # before they were ever queued, so every new button would have failed on first click.
 # No "set-peer" (2026-09-25 audit): it let any admin token point a room's microphone at any address
 # with no PIN session. The return destination is set only by the presenter app, with its ticket.
-ALLOWED_COMMANDS = {"free-space", "restart", "reset-clock", "profile", "update", "reboot",
+ALLOWED_COMMANDS = {"recover-video", "free-space", "restart", "reset-clock", "profile", "update", "reboot",
                     "start", "stop", "diagnose",
                     # PIN gate (2026-09-25): set a PIN, lift a brute-force lockout, end the live
                     # session. There is deliberately NO remote unlock: only a presenter typing the
@@ -101,7 +101,7 @@ DEFAULT_TIMEOUT_S = 240
 # panel. The FRONTEND already warns; that is not a control, because the API is reachable
 # without it - which is exactly how the accidental reboot happened. The backend now refuses
 # them unless the caller states the intent explicitly.
-CONFIRM_REQUIRED = {"free-space", "reboot", "update", "deploy-script", "revert-script",
+CONFIRM_REQUIRED = {"recover-video", "free-space", "reboot", "update", "deploy-script", "revert-script",
                     "unquarantine", "golden-restore", "reset-clock",
                     # ends the live session at once: the presenter's video stops arriving
                     "lock"}
@@ -118,7 +118,7 @@ CONFIRM_REQUIRED = {"free-space", "reboot", "update", "deploy-script", "revert-s
 # DIFFERENT one of these while another is in flight is refused (409) rather than queued: the
 # bridge runs each in its own background job with no lock between them, so two OS updates or
 # two deploys would run at the same time.
-NO_DOUBLE_EXECUTE = {"reboot", "restart", "update", "deploy-script", "revert-script",
+NO_DOUBLE_EXECUTE = {"recover-video", "reboot", "restart", "update", "deploy-script", "revert-script",
                      "golden-restore", "golden-save", "unquarantine", "reset-clock",
                      "set-pin", "profile", "gadget-tune", "gadget-tune-clear"}
 
@@ -144,7 +144,7 @@ DEVICE_RESULT_STATES = ("done", "failed", "rejected")
 # bridge late still does what the admin asked - keeps people out - so it neither goes stale nor
 # skips a busy bridge. Expiring it would quietly leave a bridge open that an admin locked.
 # A forced OS update counts too (_goes_stale): it skips the bridge's own "not during a meeting" check.
-INTERRUPTS_MEETING = {"reboot", "restart", "start", "stop", "profile", "reset-clock",
+INTERRUPTS_MEETING = {"recover-video", "reboot", "restart", "start", "stop", "profile", "reset-clock",
                       "golden-restore", "jitter-fix", "jitter-reset"}
 STALE_UNCOLLECTED_S = 30 * 60
 
@@ -207,6 +207,8 @@ OLD_SOFTWARE_REFUSALS = {
 
 
 def _refuse_for_old_software(dev, ctype: str) -> None:
+    if ctype == "recover-video" and ((dev.latest or {}).get("pin") or {}).get("video_binding") != "ssrc-sha256-31-v1":
+        raise HTTPException(409, "This bridge needs the new video fallback image before isolated recovery is available.")
     if ctype in OLD_SOFTWARE_REFUSALS and _pin_protocol(dev) < 2:
         raise HTTPException(409, OLD_SOFTWARE_REFUSALS[ctype])
 
