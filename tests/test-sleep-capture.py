@@ -18,4 +18,10 @@ class Sleep(unittest.TestCase):
  def test_idle_sleep_does_not_send_session_commands(self):
   with patch.object(app,'SESSION') as session,patch.object(app.threading,'Thread') as thread:
    session.wanted=False;app.suspend_capture();thread.assert_not_called();session.stop.assert_not_called()
+ def test_inflight_go_live_cannot_start_after_sleep_notification(self):
+  app._SUSPENDING.set()
+  session=app.Session()
+  with patch.object(app.subprocess,'Popen') as launch:
+   with self.assertRaises(RuntimeError):session.start('127.0.0.1',0,0)
+   launch.assert_not_called()
 if __name__=='__main__':unittest.main()

@@ -49,6 +49,7 @@ def mac_microphone_argv(executable, name, host, port, gain_db=0):
     # the default input in its own process; retain explicit selection for named inputs.
     device_id = 0 if name == 'System default microphone' else mac_microphone_device_id(name)
     argv = [executable, '-e', 'osxaudiosrc', 'device=%d' % device_id,
+            'name=netbridge_presenter_microphone',
             'buffer-time=40000', 'latency-time=10000', '!',
             'audioconvert', '!', 'audioresample', '!',
             'audio/x-raw,rate=48000,channels=2,format=F32LE', '!']

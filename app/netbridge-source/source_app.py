@@ -779,6 +779,8 @@ class Session:
 
     @_locked
     def start(self, pi_host, video_idx, audio_idx, fps=STREAM_FPS, mic_gain=0, return_port=5004, mic_name=None):
+        if _SUSPENDING.is_set():
+            raise RuntimeError("Wait for the computer to finish waking before presenting.")
         self.stop()
         self.interruption = None
         self.video_quality = VideoQuality()
@@ -1409,7 +1411,7 @@ SESSION = Session()
 
 MESH_PROC = "netbridge-mesh.exe" if IS_WIN else "netbridge-mesh"
 MEDIA_PROCS = ("ffmpeg", "gst-launch-1.0")
-MEDIA_MARKS = ("dump_extra=freq=keyframe", "payload_type 97", "udpsrc port=5004", "rtpopuspay pt=97")
+MEDIA_MARKS = ("dump_extra=freq=keyframe", "payload_type 97", "udpsrc port=5004", "name=netbridge_presenter_microphone")
 
 
 def _proc_name(pid):
@@ -3067,7 +3069,10 @@ class Handler(BaseHTTPRequestHandler):
                                    "need_pin": True, "reason": reason}, 401)
             if not isinstance(peer, dict) or peer.get("ok") is not True:
                 return self._send({"_error":"The bridge did not confirm your session. Media has not been started; try again."},502)
-            SESSION.start(route["media_host"], vidx, aidx, return_port=port, mic_name=aname)
+            try:
+                SESSION.start(route["media_host"], vidx, aidx, return_port=port, mic_name=aname)
+            except RuntimeError as exc:
+                return self._send({"_error": str(exc)}, 409)
             SESSION.capture_names = {"video": vname, "voice": aname}
             st.update({"bridge_host": host, "camera_name": vname, "mic_name": aname})
             save_state(st)
