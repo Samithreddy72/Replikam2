@@ -8,10 +8,8 @@ export PATH=/usr/local/bin:/usr/bin:/bin
 VLAT=${NET_VIDEO_LATENCY:-100}
 case "$VLAT" in ''|*[!0-9]*) VLAT=100 ;; esac      # not a plain number: use the default
 [ "$VLAT" -gt 100 ] && VLAT=100
-# sync=false: write decoded frames to /dev/video40 as they arrive (paced by the rtpjitterbuffer's
-# RTP-timestamp release). sync=true was tried but with a live RTP source the PTS don't align to
-# pipeline running-time, so v4l2sink rendered ~nothing (frozen). The real judder fix is in the
-# uvc-gadget pump (re-send the cached latest frame on EAGAIN), not here.
+# The receiver publishes one atomic latest RAM frame for the STATIC UVC source.
+# It does not write to a V4L2 loopback device; the USB pump owns output pacing.
 # Software decoder (avdec_h264), deliberately. The Pi's hardware decoder (v4l2h264dec) was tried
 # on 2026-09-22 and measured WORSE live: 74% of a core against 51%, because converting frames out
 # of the decoder's buffers into YUY2 cost ~70% of one core on a single thread.

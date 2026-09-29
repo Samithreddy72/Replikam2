@@ -87,3 +87,18 @@ test('Claim refreshes actions and PIN fix; offline readings are historical',asyn
  await expect(page.getByText('Last 24 h: 98% · currently offline; readings are historical',{exact:true})).toBeVisible();
  expect(errors).toEqual([]);
 });
+
+
+test('Common Fleet actions expose targeted video recovery and keep broad resets advanced',async({page})=>{
+ await page.route('http://fleet.test/**',async route=>{
+  if(new URL(route.request().url()).pathname==='/')return route.fulfill({contentType:'text/html',body:html});
+  return route.fulfill({json:{}});
+ });
+ await page.goto('http://fleet.test/');
+ await page.evaluate(()=> (window as any).eval(`S.devices.set('a',{id:'a',name:'Room A',state:'active',claimed:true,online:true,latest:{},alerts:[]});openDrawer('a','actions');`));
+ await expect(page.getByRole('button',{name:/Recover video only/})).toBeVisible();
+ await expect(page.getByRole('button',{name:/Show all actions/})).toBeVisible();
+ await expect(page.getByRole('button',{name:/Restart all|Reboot the bridge/})).toHaveCount(0);
+ await page.evaluate(()=> (window as any).selectTab('updates'));
+ await expect(page.getByText(/Signed files are stored on the Pi in/)).toBeVisible();
+});

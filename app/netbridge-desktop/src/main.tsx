@@ -54,10 +54,10 @@ import "./styles.css";
 type Page = "Studio" | "Bridges" | "Sessions" | "Settings";
 type HistoryEntry = { started: string; ended: string; bridge: string };
 const meetingChecks = [
-  { key: "video_arriving", name: "Video received", icon: Video },
-  { key: "voice_arriving", name: "Voice received", icon: Mic },
-  { key: "client_sees_camera", name: "Meeting camera", icon: Monitor },
-  { key: "return_audio", name: "Meeting audio", icon: Headphones },
+  { key: "video_arriving", name: "Your video arriving at bridge", icon: Video },
+  { key: "voice_arriving", name: "Your voice arriving at bridge", icon: Mic },
+  { key: "client_sees_camera", name: "Meeting laptop sees the camera", icon: Monitor },
+  { key: "return_audio", name: "Meeting audio flowing back", icon: Headphones },
 ];
 const emptyDevices: Devices = { video: [], audio: [] };
 function readHistory(): HistoryEntry[] {
@@ -738,14 +738,20 @@ function App() {
                 <h3>Meeting checks</h3>
                 <span className="muted tiny">{meetingChecks.filter(({key}) => deliveryStatus(engineError ? null : state, key).tone === "good").length}/4 confirmed</span>
               </div>
-              <div className="meeting-check-grid">
-                {meetingChecks.map(({key, name, icon: Icon}) => {
-                  const check = deliveryStatus(engineError ? null : state, key);
-                  return <div className="meeting-check" key={key}>
-                    <Icon size={18} aria-hidden="true" />
-                    <div><strong>{name}</strong><span className={check.tone}>{check.label}</span></div>
-                  </div>;
-                })}
+              <div className="meeting-check-table-wrap">
+                <table className="meeting-check-table" aria-label="Live delivery checks">
+                  <thead><tr><th scope="col">Check</th><th scope="col">Status</th><th scope="col">Evidence from the bridge</th></tr></thead>
+                  <tbody>{meetingChecks.map(({key, name, icon: Icon}) => {
+                    const check = deliveryStatus(engineError ? null : state, key);
+                    return <tr key={key}>
+                      <th scope="row"><div className="meeting-check-name"><Icon size={18} aria-hidden="true" /><span>{name}</span></div></th>
+                      <td><span className={`meeting-check-status ${check.tone}`}>{check.label}</span></td>
+                      <td><p className="meeting-check-meaning">{check.detail}</p>
+                        <details className="meeting-check-evidence"><summary>About this check</summary><code>{key}</code><p>{key === "video_arriving" ? "Decoded frames confirm delivery to the bridge, not smooth playback in the meeting app." : key === "voice_arriving" ? "Receiver activity alone cannot confirm that people in the meeting hear your voice." : key === "client_sees_camera" ? "Select the camera in your meeting app and confirm its picture there." : "Captured samples confirm the return path, not audible playback through your headphones."}</p></details>
+                      </td>
+                    </tr>;
+                  })}</tbody>
+                </table>
               </div>
               <p className="field-note">Bridge delivery checks update while live. USB status alone cannot confirm the picture in the meeting app.</p>
               <button className="meeting-check-details" onClick={() => setHealth(true)}>View check details <ArrowRight size={14} /></button>

@@ -160,6 +160,7 @@ populate_root(){ # populate_root <part> <mnt> <root-partuuid> <label>
   mount "$part" "$mp"
   log "$label: extracting rootfs"
   tar -xf "$ROOTTAR" -C "$mp" --numeric-owner --acls --xattrs 2>/dev/null || tar -xf "$ROOTTAR" -C "$mp" --numeric-owner
+  python3 "$(dirname "$0")/configure-service-policy.py" "$mp"
   # authoritative real fstab (overlayroot rewrites '/' at boot; this is the underlying one)
   cat > "$mp/etc/fstab" <<FSTAB
 proc                  /proc           proc    defaults          0       0

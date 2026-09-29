@@ -8,6 +8,11 @@ test('browser preview shows honest states and navigates without overflow',async(
  await expect(page.getByRole('button',{name:/Personas/})).toHaveCount(0);
  await expect(page.getByRole('region',{name:'Meeting checks'})).toBeVisible();
  await expect(page.getByText('0/4 confirmed',{exact:true})).toBeVisible();
+ const checks=page.getByRole('table',{name:'Live delivery checks'});
+ await expect(checks.getByRole('row')).toHaveCount(5);
+ for(const label of ['Your video arriving at bridge','Your voice arriving at bridge','Meeting laptop sees the camera','Meeting audio flowing back']) await expect(checks.getByRole('rowheader',{name:label})).toBeVisible();
+ await checks.locator('summary').first().click();
+ await expect(checks.getByText('video_arriving',{exact:true})).toBeVisible();
  await page.getByRole('button',{name:'Connection health',exact:true}).click();
  await expect(page.locator('aside').getByText('Not streaming',{exact:true})).toHaveCount(4);
  await page.getByRole('button',{name:'Close diagnostics'}).click();

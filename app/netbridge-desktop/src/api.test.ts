@@ -42,6 +42,11 @@ describe("bridge delivery evidence", () => {
     expect(deliveryStatus({...state, voice_muted: true}, "voice_arriving").tone).toBe("neutral");
     expect(deliveryStatus({...state, return_on: false}, "return_audio").tone).toBe("neutral");
   });
+  it("rejects invalid measurement ages", () => {
+    for (const age_s of [NaN, Infinity, -1]) {
+      expect(deliveryStatus({...live, bridge_checks: {...live.bridge_checks, age_s}}, "video_arriving").tone).toBe("neutral");
+    }
+  });
   it("prefers the mesh destination and does not invent an address", () => {
     expect(
       bridgeHost({

@@ -87,6 +87,13 @@ done
 [ $bad -eq 0 ] && ok "$n scripts identical to $COMMIT" || no "$bad of $n scripts differ from $COMMIT"
 bad=0; n=0
 for f in $(git -C "$REPO" ls-tree --name-only "$COMMIT" pi/systemd/ | grep -E '\.(service|timer)$'); do
+  case "$(basename "$f")" in
+    bridge-feeder.service|bridge-testpattern.service|bridge-idle-frame.timer|bridge-crackle-sentry.service|bridge-pitch.service)
+      "$DEBUGFS" -R "stat /etc/systemd/system/$(basename "$f")" "$ROOT" 2>/dev/null | grep -q 'Fast link dest: "/dev/null"' \
+        && ok "$(basename "$f") has the required production mask" \
+        || no "$(basename "$f") missing production mask"
+      continue ;;
+  esac
   n=$((n+1)); cmp_git "$f" "/etc/systemd/system/$(basename "$f")" || { bad=$((bad+1)); echo "        differs/missing: $(basename "$f")"; }
 done
 [ $bad -eq 0 ] && ok "$n systemd units identical to git" || no "$bad of $n units differ"

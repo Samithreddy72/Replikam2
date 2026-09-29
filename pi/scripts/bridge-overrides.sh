@@ -295,6 +295,14 @@ apply_all(){
   tries="$(cat "$DIR/.boot-attempts" 2>/dev/null)"; case "$tries" in ''|*[!0-9]*) tries=0 ;; esac
   if [ "$tries" -ge "$BOOT_LIMIT" ]; then
     : > "$RUN/safe-mode"
+    # Only updates present at entry can be suspects for the failed boots.
+    # A repair installed later during this recovery boot did not cause them.
+    : > "$RUN/safe-mode-suspects"
+    for name in $(names); do
+      [ -f "$DIR/$name" ] || continue
+      superseded "$name" && continue
+      printf '%s %s\n' "$name" "$(sha "$DIR/$name")" >> "$RUN/safe-mode-suspects"
+    done
     log "SAFE MODE — $tries boots in a row never became healthy; every override stays OFF this boot"
     write_status; return 0
   fi
@@ -358,6 +366,7 @@ health(){
         for name in $(names); do
           [ -f "$DIR/$name" ] || continue
           superseded "$name" && continue          # not in use on this OS: not a suspect
+          grep -qx "$name $(sha "$DIR/$name")" "$RUN/safe-mode-suspects" 2>/dev/null || continue
           grep -qx "$name $(sha "$DIR/$name")" "$DIR/.known-good" 2>/dev/null ||
             quarantine "$name" "never part of a healthy boot, and 3 boots in a row failed while it was installed"
         done

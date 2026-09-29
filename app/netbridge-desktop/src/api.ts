@@ -76,6 +76,8 @@ export function deliveryStatus(
   const check = state.bridge_checks?.checks?.[key];
   if (
     age == null ||
+    !Number.isFinite(age) ||
+    age < 0 ||
     age > 20 ||
     !check ||
     state.bridge_checks?.reachable === false
@@ -86,8 +88,8 @@ export function deliveryStatus(
       detail: "No fresh bridge measurement available.",
     };
   return {
-    tone: key === "client_sees_camera" ? "neutral" : check.ok ? "good" : "warn",
-    label: check.ok ? (key === "client_sees_camera" ? "USB reported configured" : "Confirmed by bridge") : "Needs attention",
+    tone: key === "client_sees_camera" ? "neutral" : check.ok === true ? "good" : "warn",
+    label: check.ok === true ? (key === "client_sees_camera" ? "USB reported configured" : "Confirmed by bridge") : "Needs attention",
     detail: key === "client_sees_camera" ? "USB state can remain stale after unplugging. Physical attachment and the room picture are unverified." : check.detail || "No details provided",
   };
 }

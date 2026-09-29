@@ -247,10 +247,15 @@ sed -e "s#^BAKED=.*#BAKED=\"$T/lb/\$NAME\"#" -e "s#^DIR=.*#DIR=\"$T/lo\"#" -e "s
     -e "s#^STATE=.*#STATE=\"$T/lo/.state\"#" "$REPO/pi/scripts/bridge-run.sh" > "$T/run.sh"
 [ "$(BRIDGE_RUN_SAFE_FLAG="$T/run/safe-mode" bash "$T/run.sh" demo.sh 2>/dev/null)" = BAKED ] && ok "safe mode: the media loader runs the built-in too" || no "loader ignored safe mode"
 [ "$(BRIDGE_RUN_SAFE_FLAG="$T/nope" bash "$T/run.sh" demo.sh 2>/dev/null)" = OVERRIDE ] && ok "outside safe mode the loader still runs a signed override" || no "loader broke"
+# New repair published during safe mode must not be blamed for preceding boots.
+printf '#!/bin/bash\necho RECOVERY-REPAIR\n' > "$T/repair.sh"
+publish bridge-status.sh "$T/repair.sh"; deploy bridge-status.sh
 bash "$OVR" health >/dev/null 2>&1          # uptime 200, core units active -> healthy safe-mode boot
 if [ -e "$D/bridge-web.py" ] && [ ! -e "$D/jitter-sentry.sh" ] && [ "$(cat "$D/.boot-attempts")" = 0 ]; then
   ok "safe-mode boot turns healthy: the unproven update is quarantined, the known-good ones stay"
 else no "safe-mode resolution wrong (web=$( [ -e "$D/bridge-web.py" ] && echo kept || echo gone ), sentry=$( [ -e "$D/jitter-sentry.sh" ] && echo kept || echo gone ))"; fi
+
+[ -f "$D/bridge-status.sh" ] && ok "safe-mode health preserves a repair installed after boot" || no "new recovery repair was wrongly quarantined"
 
 # ===================== 12. status for the fleet =====================
 rm -f "$T/run/safe-mode"

@@ -28,8 +28,7 @@ class Decode(unittest.TestCase):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.bind(('127.0.0.1',0)); self.port = s.getsockname()[1]
         self.receiver = r.make_receiver(Gst, GLib, 20, self.control, self.directory,
-            lambda latency: r.pipeline_description(latency).replace('port=5000','port=%d'%self.port)
-            .replace('v4l2sink device=/dev/video40 sync=false','fakesink sync=false'))
+            lambda latency: r.pipeline_description(latency).replace('port=5000','port=%d'%self.port))
         self.addCleanup(self.receiver.stop)
         self.receiver.tick()
 
@@ -65,6 +64,24 @@ class Decode(unittest.TestCase):
         self.drive(.3)
         self.assertEqual((self.directory/'frame').read_bytes(),stopped)
         self.assertEqual(self.receiver.failures,0)
+
+    def test_slow_publication_does_not_block_rtp_decode(self):
+        original = r.publish_frame
+        def slow_publish(*args, **kwargs):
+            time.sleep(.15)
+            return original(*args, **kwargs)
+        r.publish_frame = slow_publish
+        self.addCleanup(setattr, r, 'publish_frame', original)
+        p = Gst.parse_launch('videotestsrc is-live=true pattern=black ! '
+            'video/x-raw,width=424,height=240,framerate=30/1 ! '
+            'x264enc tune=zerolatency key-int-max=30 ! rtph264pay pt=96 config-interval=-1 ssrc=%d ! '
+            'udpsink host=127.0.0.1 port=%d sync=false' % (EPOCH>>32,self.port))
+        self.addCleanup(lambda:p.set_state(Gst.State.NULL))
+        p.set_state(Gst.State.PLAYING)
+        self.drive(1.3)
+        self.assertGreaterEqual(self.receiver.counts['decoder_frames'], 28)
+        self.assertLess(self.receiver.frames, self.receiver.counts['decoder_frames'])
+        self.assertEqual(self.receiver.counts['drop_on_latency'], 0)
 
     def test_ffmpeg_high_bit_hash_matches_receiver(self):
         # Use a hash with the high bit set; transport masks it for FFmpeg compatibility.

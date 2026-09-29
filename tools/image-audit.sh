@@ -533,6 +533,12 @@ grepf bridge-read.py 'text, redacted = redact\(text\)' \
 grepf bridge-agent.py 'read-file' && ok "agent allows the read-file command" \
   || no "agent does not know read-file — the panel button will be refused on the device"
 
+sec "Obsolete services cannot return after first-boot presets"
+for unit in bridge-feeder.service bridge-testpattern.service bridge-idle-frame.timer bridge-crackle-sentry.service bridge-pitch.service ssh.service ssh.socket; do
+  "$DEBUGFS" -R "stat /etc/systemd/system/$unit" "$ROOTDEV" 2>/dev/null | grep -q 'Fast link dest: "/dev/null"' \
+    && ok "$unit permanently masked" || no "$unit missing production mask"
+done
+
 sec "Services that must be enabled, not merely installed"
 # bridge-crackle-sentry shipped in every image for weeks and was never enabled, so the metric
 # it feeds could only ever report 'false'. Installed != enabled.

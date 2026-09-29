@@ -557,10 +557,8 @@ const ACTIONS = [
 ];
 // The short list shown first: what you would reach for DELIBERATELY. Everything else is one
 // click away ("Show all actions"). Diagnose answers "which one do I click?".
-const COMMON = new Set(["jitter-diagnose", "jitter-fix:1", "jitter-reset",
-                        "profile:wan", "reset-clock", "restart", "reboot",
-                        "set-pin", "clear-lockout", "running",
-                        "golden-save", "golden-restore"]);
+const COMMON = new Set(["diagnose", "recover-video", "jitter-diagnose",
+                        "set-pin", "clear-lockout", "running", "logs"]);
 const ACTION_LABEL = Object.fromEntries(ACTIONS.filter(([v]) => v && !v.startsWith("#")));
 const TERMINAL = new Set(["done", "succeeded", "failed", "rejected", "cancelled", "expired"]);
 const STATE_LABEL = {live: "Live", active: "Active", degraded: "Needs attention", offline: "Offline", new: "New"};
@@ -1143,6 +1141,7 @@ function buildActions(p, d){
 function buildUpdates(p, d){
   DR.f.upState = h("dl", {class: "kv"});
   p.append(h("h3", {}, "What is installed"), DR.f.upState,
+    h("p", {class: "hint"}, "Signed files are stored on the Pi in /data/overrides and persist across restarts. Waiting means stored but not applied; rolled back means the update is parked. Full OS updates write the inactive slot and are complete only after the trial boot is committed."),
     h("h3", {}, "Change it"),
     h("div", {class: "actlist"},
       h("button", {class: "act warnact", type: "button", onclick: () => doAction(d.id, "deploy-script")}, h("span", {}, "Install a signed file from the catalog…"), h("span", {class: "go"}, "›")),
@@ -1162,7 +1161,7 @@ function paintUpdatesTab(d){
     h("dt", {}, "Not in use"), h("dd", {}, !Array.isArray(ov.superseded) ? "not reported" : ov.superseded.length
       ? ov.superseded.join(", ") + " — installed on another OS version; this OS runs its own copy (deploy again to use one here)" : "nothing"),
     h("dt", {}, "Rolled back"), h("dd", {class: (t.quarantined || []).length ? "bad" : ""}, (t.quarantined || []).length ? t.quarantined.join(", ") : "nothing"),
-    h("dt", {}, "Safe mode"), h("dd", {class: ov.safe_mode ? "bad" : ""}, ov.safe_mode ? "ON — every update is off this boot (" + (ov.boot_attempts || 0) + " unhealthy boots)"
+    h("dt", {}, "Safe mode"), h("dd", {class: ov.safe_mode ? "bad" : ""}, ov.safe_mode ? "ON — automatic overrides are disabled for this boot. " + ((ov.boot_attempts || 0) === 0 ? "Recovery health passed; a verified maintenance boot is still needed." : (ov.boot_attempts + " unhealthy boots recorded."))
       : Array.isArray(ov.active) ? "off" : "not reported"),
     h("dt", {}, "Last OS update"), h("dd", {}, ota.state ? ota.state + " " + (ota.version || "") + (ota.detail ? " — " + ota.detail : "") + (ota.ts ? " · " + rel(parseTs(ota.ts)) : "") : "none recorded")]);
 }
