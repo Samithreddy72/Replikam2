@@ -1,6 +1,6 @@
 #!/bin/bash
 # The video jitter buffer is capped at 100 ms whatever the profile says, and the feeder decodes in
-# software. Runs the REAL script with a stub gst-launch and checks the argv it would execute.
+# software. Runs the REAL launcher with a stub Python and checks the actual pipeline.
 #   bash tests/test-feeder-net-buffer.sh
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
@@ -19,5 +19,5 @@ run(){ # run <profile-file-contents or NONE>
 [ "$(run 'NET_VIDEO_LATENCY=junk')" = 100 ] && ok "non-numeric value -> 100 ms default" || no "non-numeric value not replaced by the default"
 python3 -c 'import runpy; print(runpy.run_path("pi/scripts/bridge-video-receiver.py")["pipeline_description"](100))' > "$T/argv"
 grep -q 'avdec_h264' "$T/argv" && ! grep -q 'v4l2h264dec' "$T/argv" && ok "software decoder (avdec_h264) only" || no "decoder is not avdec_h264"
-grep -q 'v4l2sink device=/dev/video40 sync=false' "$T/argv" && ok "writes /dev/video40 with sync=false (unchanged)" || no "sink changed"
+grep -q 'appsink name=frames.*sync=false.*max-buffers=1.*drop=true' "$T/argv" && ! grep -q 'v4l2sink\|videorate' "$T/argv" && ok "publishes latest complete frame without redundant loopback or generated freshness" || no "frame delivery pipeline changed"
 echo; echo "  $pass passed, $fail failed"; [ "$fail" -eq 0 ]

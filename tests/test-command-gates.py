@@ -165,25 +165,20 @@ if _headings and all(h.strip() for h in _headings):
 else:
     no("ungrouped actions", _headings)
 
-print("\n  ---- the short menu still covers every symptom ----")
-# The dropdown shows COMMON by default and hides the rest behind "Show all actions". That is
-# only safe if the short list still answers each symptom an admin can arrive with. A quiet
-# drop here would leave someone with a problem and no visible action for it.
+print("\n  ---- default diagnosis and targeted recovery; advanced tools remain available ----")
 _common = set(re.findall(r'"([^"]+)"',
               re.search(r"const COMMON = new Set\(\[(.*?)\]\)", _p, re.S).group(1)))
 _all = {v for v, _ in _acts}
-for need, why in (("jitter-diagnose", "the entry that answers 'which one do I click?'"),
-                  ("jitter-fix:1",    "you cannot hear the room"),
-                  ("profile:wan",     "the room cannot hear you"),
-                  ("reset-clock",     "robotic / crackling"),
-                  ("restart",         "nothing is arriving"),
-                  ("jitter-reset",    "putting the buffer back"),
-                  ("golden-save",     "recording a known-good state"),
-                  ("golden-restore",  "config drifted")):
+for need in ("diagnose", "recover-video", "jitter-diagnose", "set-pin", "clear-lockout", "running", "logs"):
     if need in _common:
-        ok("short menu keeps %-16s (%s)" % (need, why))
+        ok("short menu keeps " + need)
     else:
-        no("short menu dropped %s — %s has no visible action" % (need, why))
+        no("short menu dropped " + need)
+for advanced in ("jitter-fix:1", "profile:wan", "reset-clock", "restart", "reboot", "jitter-reset", "golden-save", "golden-restore"):
+    if advanced in _all and advanced not in _common:
+        ok("advanced action remains available: " + advanced)
+    else:
+        no("advanced action missing or exposed by default: " + advanced)
 if _common <= _all:
     ok("every COMMON entry actually exists in ACTIONS")
 else:
