@@ -30,6 +30,19 @@ class ShutdownRecovery(unittest.TestCase):
         self.assertFalse(s.respawn_leg('video'))
         s.stop()  # idempotent
 
+    def test_fast_new_session_gets_fresh_repair_budget(self):
+        s = a.Session(); s.wanted = True; s.generation = 2
+        guard = a.StreamGuard()
+        guard.generation = (id(s), 1)
+        guard.repairs = {'video': 5}; guard.giving_up = ['video']
+        guard.live_since = 1
+        with patch.object(a, 'SESSION', s), patch.object(s, 'respawn_leg') as repair:
+            guard._tick()
+            repair.assert_not_called()  # new startup grace period
+        self.assertEqual(guard.repairs, {})
+        self.assertEqual(guard.giving_up, [])
+        self.assertEqual(guard.generation, (id(s), 2))
+
     def test_forced_media_exit_is_reaped(self):
         p = Mock(spec=POPEN, stdin=io.BytesIO())
         p.poll.return_value = None

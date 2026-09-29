@@ -707,6 +707,7 @@ class Session:
         self._lock = threading.RLock()
         self.procs = []
         self.logs = []
+        self.generation = 0
         self.bridge = None
         self.return_port = 5004
         self.return_player = "none"
@@ -782,6 +783,7 @@ class Session:
         if _SUSPENDING.is_set():
             raise RuntimeError("Wait for the computer to finish waking before presenting.")
         self.stop()
+        self.generation += 1
         self.interruption = None
         self.video_quality = VideoQuality()
         self.capture_names = {}
@@ -2074,6 +2076,7 @@ class StreamGuard:
         self.repairs = {}          # leg -> count of repairs this session
         self.last = None           # human-readable last action
         self.live_since = 0.0
+        self.generation = None
         self.giving_up = []        # legs that exceeded MAX_PER_LEG
         self.waiting_for_mic = False
 
@@ -2097,6 +2100,14 @@ class StreamGuard:
                     self.repairs, self.giving_up, self.last = {}, [], None
             return
         with self.lock:
+            generation = (id(SESSION), SESSION.generation)
+            if self.generation != generation:
+                # Stop -> Go live may finish between watchdog ticks. A new session
+                # must not inherit an exhausted repair budget from the previous one.
+                self.generation = generation
+                self.repairs, self.giving_up, self.last = {}, [], None
+                self.waiting_for_mic = False
+                self.live_since = 0.0
             if not self.live_since:
                 self.live_since = time.time()
             if (time.time() - self.live_since) < self.GRACE_S:
