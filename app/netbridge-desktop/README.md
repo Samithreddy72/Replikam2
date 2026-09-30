@@ -172,3 +172,10 @@ Windows and the receiving meeting laptop before release.
 Session history is local, migrated from the existing localStorage list to IndexedDB
 and read in pages of eight. It still records sessions ended from this app, not
 Fleet-wide meeting attendance or recordings.
+
+Studio 0.1.12 bounds offline-bridge presence checks to one 1.5-second budget across
+the entire list, with at most eight parallel probes. The last selected bridge is
+checked first; probes only use known literal IP addresses. A responding bridge
+can still override a stale Fleet heartbeat, while unsuccessful or unfinished checks
+leave Fleet's status unchanged. Loading no longer adds several seconds per offline
+bridge, and no background result can mutate a response already shown to the user.

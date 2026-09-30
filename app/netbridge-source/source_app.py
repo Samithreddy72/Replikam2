@@ -1532,6 +1532,52 @@ def _bridge_reachable(host, st):
     return False
 
 
+def _bridge_list_presence(bridges, preferred=None, budget=1.5):
+    """Best-effort presence checks share one deadline, regardless of fleet size.
+
+    Fleet's heartbeat stays authoritative unless a known address answers. Only
+    literal addresses are probed: a hardware ID must never become a DNS lookup.
+    Pending checks are cancelled, and late results cannot modify the response.
+    """
+    import concurrent.futures
+    import ipaddress
+
+    offline = [b for b in bridges if not b.get("online")]
+    if not offline:
+        return
+    offline.sort(key=lambda b: b.get("id") != preferred)
+
+    def reachable(record):
+        seen = set()
+        for value in (record.get("ip"), record.get("tailscale_ip")):
+            try:
+                address = ipaddress.ip_address(value)
+            except (ValueError, TypeError):
+                continue
+            if address in seen:
+                continue
+            seen.add(address)
+            host = "[%s]" % address if address.version == 6 else str(address)
+            result = api("GET", "http://%s:8080/api/status" % host, timeout=.5)
+            if isinstance(result, dict) and not result.get("_error"):
+                return True
+        return False
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="bridge-presence")
+    futures = {}
+    try:
+        futures = {pool.submit(reachable, dict(b)): b for b in offline}
+        completed, _ = concurrent.futures.wait(futures, timeout=budget)
+        for future in completed:
+            try:
+                if future.result():
+                    futures[future].update(online=True, online_via="probe")
+            except Exception:
+                pass  # A failed probe cannot hide the Fleet list or invent success.
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def _mesh_bin():
     """The embedded mesh client. PREFER a SIDECAR next to the app binary: PyInstaller
     strips/re-signs any Mach-O it bundles, which corrupts this Go binary and silently kills
@@ -2882,12 +2928,7 @@ class Handler(BaseHTTPRequestHandler):
             #
             # So when the fleet says offline, ASK THE DEVICE. If it answers, it is online for
             # our purposes — a stale record must never veto a working bridge.
-            for b in out:
-                if b.get("online"):
-                    continue
-                if _bridge_reachable(b.get("id") or "", st):
-                    b["online"] = True
-                    b["online_via"] = "probe"     # fleet says stale; the device itself answered
+            _bridge_list_presence(out, preferred=st.get("bridge_id"))
             return self._send(out)
         if self.path.startswith("/api/checks"):
             if not self._csrf_ok() or self.headers.get("Sec-Fetch-Site") == "cross-site":
