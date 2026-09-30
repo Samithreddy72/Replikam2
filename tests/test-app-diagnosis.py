@@ -45,15 +45,15 @@ guard = types.SimpleNamespace(snapshot=lambda: {"repairs": {}})
 # Without a stand-in the whole file died with NameError - and because it crashed BEFORE
 # printing a summary line, the runner recorded it as "no result" rather than a failure and it
 # went unnoticed for two phases. A test that cannot fail loudly is not a test.
-session = types.SimpleNamespace(leg_cpu_rate=lambda name: None, CPU_FLOOR=0.02)
+session = types.SimpleNamespace(leg_cpu_rate=lambda name: None, CPU_FLOOR=0.02, video_muted=False)
 exec("class W:\n" + m.group(0).rstrip() + "\n", {"GUARD": guard, "SESSION": session}, ns)
 W = ns["W"]
 
-def watcher(deaths, others, cpu_rate=None):
+def watcher(deaths, others, cpu_rate=None, video_muted=False):
     """cpu_rate=None means "no throughput reading available", which is the case the
     death-counting heuristic below must still handle."""
     W._giving_up_because.__globals__["SESSION"] = types.SimpleNamespace(
-        leg_cpu_rate=lambda name: cpu_rate, CPU_FLOOR=0.02)
+        leg_cpu_rate=lambda name: cpu_rate, CPU_FLOOR=0.02, video_muted=video_muted)
     w = W()
     w.LEG_FOR = {"video_arriving": "video", "voice_arriving": "voice"}
     w.last_checks = others
@@ -123,6 +123,15 @@ if "LOCAL_CAMERA_FAULT" not in msg:
     ok("a leg doing real work (0.33 CPU-s/s) is NOT blamed on the camera")
 else:
     no("would blame the camera on a healthy encoder — false positives train people to ignore it")
+
+print("\n  ---- intentionally camera-off output ----")
+for deaths in ({}, {"video": 3}):
+    msg = watcher(deaths, {"voice_arriving": {"ok": True}}, cpu_rate=0.004,
+                  video_muted=True)._giving_up_because("video_arriving", 3)
+    if "LOCAL_CAMERA_FAULT" not in msg and "fix-camera-macos.sh" not in msg and "black" in msg.lower():
+        ok("camera-off output failures diagnose black video without suggesting camera repair")
+    else:
+        no("intentionally closed camera is reported as faulty", msg)
 
 print("\n  ---- the camera is released, not killed ----")
 # The wedge that cost the 2026-08-14 session was ffmpeg being SIGKILLed while it held

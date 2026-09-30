@@ -2391,6 +2391,9 @@ class BridgeWatch:
         # cannot see, and it is the one that actually happened: a wedged macOS camera leaves
         # ffmpeg running happily while avfoundation delivers nothing. Ask what it is doing, not
         # whether it exists.
+        if leg == "video" and SESSION.video_muted:
+            return ("Camera is intentionally off. Plain black video is not reaching the bridge; "
+                    "check the video encoder and connection. Camera capture will remain off.")
         rate = SESSION.leg_cpu_rate(leg) if leg else None
         if leg == "video" and not SESSION.video_muted and rate is not None and rate < SESSION.CPU_FLOOR:
             return ("LOCAL_CAMERA_FAULT: video is not arriving, and the encoder on THIS Mac is "
