@@ -13,7 +13,6 @@ import {
   Download,
   Headphones,
   LayoutDashboard,
-  LoaderCircle,
   LockKeyhole,
   Mic,
   MicOff,
@@ -29,6 +28,10 @@ import {
   Unplug,
   UserRound,
   Video,
+  VideoOff,
+  Mail,
+  ChevronLeft,
+  ChevronRight,
   Volume2,
   VolumeX,
   X,
@@ -42,6 +45,7 @@ import {
 import {
   api,
   desktop,
+  previewMode,
   bridgeHost,
   deliveryStatus,
   type Bridge,
@@ -49,10 +53,14 @@ import {
   type EngineState,
 } from "./api";
 import { Persona } from "./Persona";
+import {Dialog} from "./Dialog";
+import {sessionPage, saveSession, PAGE_SIZE, type HistoryEntry} from "./history";
 import "./styles.css";
+import "./studio.css";
+import {AppearanceControl, BrandMark, Spinner, ExperienceFrame, Splash, WorkspaceLoading, NameEntry, Welcome, PreviewScenes, useAppearance, previewScene, profileKey, readProfile, storeProfile} from "./Experience";
+import "./theme.css";
 
 type Page = "Studio" | "Bridges" | "Sessions" | "Settings";
-type HistoryEntry = { started: string; ended: string; bridge: string };
 const meetingChecks = [
   { key: "video_arriving", name: "Your video arriving at bridge", icon: Video },
   { key: "voice_arriving", name: "Your voice arriving at bridge", icon: Mic },
@@ -60,14 +68,19 @@ const meetingChecks = [
   { key: "return_audio", name: "Meeting audio flowing back", icon: Headphones },
 ];
 const emptyDevices: Devices = { video: [], audio: [] };
-function readHistory(): HistoryEntry[] {
-  try {
-    return JSON.parse(localStorage.getItem("nb.sessions") || "[]");
-  } catch {
-    return [];
-  }
-}
 function App() {
+  const {appearance,setAppearance}=useAppearance();
+  const [startup,setStartup]=useState(!previewMode || previewScene==='splash');
+  const [workspace,setWorkspace]=useState<"idle"|"loading"|"ready"|"error">("idle");
+  const [workspaceError,setWorkspaceError]=useState("");
+  const [workspaceAttempt,setWorkspaceAttempt]=useState(0);
+  const [workspaceSlow,setWorkspaceSlow]=useState(false);
+  const [profileRevision,setProfileRevision]=useState(0);
+  const [welcome,setWelcome]=useState(false);
+  const [namePreviewDone,setNamePreviewDone]=useState(false);
+  const [sessionProfile,setSessionProfile]=useState<{key:string;name:string}|null>(null);
+  const [nameDraft,setNameDraft]=useState("");
+  useEffect(()=>{if(previewScene==='splash')return;const t=setTimeout(()=>setStartup(false),matchMedia('(prefers-reduced-motion: reduce)').matches?0:850);return()=>clearTimeout(t);},[]);
   const [page, setPage] = useState<Page>("Studio");
   const [state, setState] = useState<EngineState | null>(null);
   const [bridges, setBridges] = useState<Bridge[]>([]);
@@ -79,6 +92,13 @@ function App() {
   const [unlocked, setUnlocked] = useState("");
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
+  const [noticeTone, setNoticeTone] = useState("info");
+  const [pinError, setPinError] = useState("");
+  const [videoOff, setVideoOff] = useState(false);
+  const [micOff, setMicOff] = useState(false);
+  const [inviteMode, setInviteMode] = useState(false);
+  const [resendAt, setResendAt] = useState(0);
+  const pinRef = useRef<HTMLInputElement>(null);
   const [engineError, setEngineError] = useState("");
   const [supportPreview, setSupportPreview] = useState<{report:Record<string,unknown>;notice:string}|null>(null);
   const [setupChecks, setSetupChecks] = useState<{label:string;status:string;detail:string}[]>([]);
@@ -95,7 +115,11 @@ function App() {
   const [level, setLevel] = useState(0);
   const [audioDetails, setAudioDetails] = useState<Record<string, unknown>>({});
   const [palette, setPalette] = useState(false);
-  const [history, setHistory] = useState<HistoryEntry[]>(readHistory);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [historyPage, setHistoryPage] = useState(0);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
   const [started, setStarted] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [quitPrompt, setQuitPrompt] = useState(false);
@@ -113,6 +137,13 @@ function App() {
   const bridge = bridges.find((b) => b.id === selected);
   const live = !!(state?.live || state?.wanted);
   const host = bridgeHost(bridge);
+  const accountKey=profileKey(state?.email || "",state?.control_url || control);
+  const storedProfile=sessionProfile?.key===accountKey ? {complete:true,name:sessionProfile.name} : readProfile(accountKey);
+  const profile=previewMode && !['name','signin'].includes(previewScene) && !storedProfile.complete ? {complete:true,name:"Sam"} : storedProfile;
+  const greeting=profile.name;
+  const completeName=(name:string)=>{name=name.trim().slice(0,40);setSessionProfile({key:accountKey,name});storeProfile(accountKey,name);setProfileRevision(v=>v+1);setNamePreviewDone(true);setWelcome(true);};
+  const experience=(content:React.ReactNode)=><ExperienceFrame appearance={appearance} onAppearance={setAppearance}>{content}</ExperienceFrame>;
+  useEffect(()=>{setNameDraft(storedProfile.name);},[accountKey,profileRevision]);
   const stopPreview = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
@@ -127,9 +158,11 @@ function App() {
     opening.current = true;
     setBusy(label);
     setNotice("");
+    setNoticeTone("info");
     try {
       await fn();
     } catch (e) {
+      setNoticeTone("error");
       setNotice(String(e instanceof Error ? e.message : e));
     } finally {
       setBusy("");
@@ -140,7 +173,7 @@ function App() {
     try {
       const s = await api<EngineState>("/api/state");
       setState(s);
-      if(s.interruption && !s.wanted) setNotice(s.interruption);
+      if(s.interruption && !s.wanted) {setNoticeTone("error");setNotice(s.interruption);}
       setEngineError("");
       if (!initialized.current) {
         setSelected(s.last_bridge || "");
@@ -162,7 +195,7 @@ function App() {
     setCamera((c) =>
       d.video.some((v) => v.name === c) ? c : d.video[0]?.name || "",
     );
-    setMic((m) => d.audio.some((v) => v.name === m) ? m : d.audio[0]?.name || "");
+    setMic((m) => m === "System default microphone" || d.audio.some((v) => v.name === m) ? m : state?.system_default_mic ? "System default microphone" : d.audio[0]?.name || "");
   };
   const loadBridges = async () => {
     const b = await api<Bridge[]>("/api/bridges");
@@ -184,13 +217,35 @@ function App() {
     };
   }, [refresh]);
   useEffect(() => {
-    if (state?.signed_in) {
-      void action("Loading workspace", async () => {
-        await loadBridges();
-        await loadDevices();
-      });
-    }
-  }, [state?.signed_in]);
+    if (!state?.signed_in) {setWorkspace("idle");setWelcome(false);return;}
+    let cancelled=false;
+    setWorkspace("loading");setWorkspaceError("");setWorkspaceSlow(false);
+    const slow=setTimeout(()=>{if(!cancelled)setWorkspaceSlow(true);},10000);
+    // A completed sign-in owns exactly one load. Stale results from a previous
+    // account or retry cannot replace the current workspace.
+    void Promise.all([api<Bridge[]>("/api/bridges"),api<Devices>("/api/devices")]).then(([b,d])=>{
+      if(cancelled)return;
+      if(d.error)throw new Error(d.error);
+      setBridges(b);setDevices(d);
+      setSelected(s=>b.some(v=>v.id===s)?s:b[0]?.id || "");
+      setCamera(c=>d.video.some(v=>v.name===c)?c:d.video[0]?.name || "");
+      setMic(m=>m==="System default microphone" || d.audio.some(v=>v.name===m)?m:state.system_default_mic?"System default microphone":d.audio[0]?.name || "");
+      setWorkspace("ready");
+    }).catch(e=>{if(!cancelled){setWorkspaceError(String(e instanceof Error?e.message:e));setWorkspace("error");}}).finally(()=>clearTimeout(slow));
+    return()=>{cancelled=true;clearTimeout(slow);};
+  }, [state?.signed_in,accountKey,workspaceAttempt]);
+  useEffect(() => {
+    if (live) {setVideoOff(!!state?.video_muted);setMicOff(!!state?.voice_muted);}
+  }, [live, state?.video_muted, state?.voice_muted]);
+  useEffect(() => {
+    if (page !== "Sessions" || !state?.signed_in) return;
+    let cancelled = false; setHistoryLoading(true); setHistoryError("");
+    sessionPage(historyPage).then(result => {
+      if (!cancelled) {setHistory(result.entries);setHistoryTotal(result.total);}
+    }).catch(() => {if (!cancelled) setHistoryError("Session history could not be loaded. Try reopening Sessions.");})
+      .finally(() => {if (!cancelled) setHistoryLoading(false);});
+    return () => {cancelled = true;};
+  }, [page, historyPage, state?.signed_in]);
   useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = preview;
   }, [preview, page, source]);
@@ -223,6 +278,7 @@ function App() {
     if (!desktop) return;
     let dispose: (() => void) | undefined;
     let gone = false;
+    if (previewMode) return;
     import("@tauri-apps/api/window").then(async ({ getCurrentWindow }) => {
       const off = await getCurrentWindow().onCloseRequested(async (e) => {
         if (live || preview) {
@@ -247,10 +303,11 @@ function App() {
     await api("/api/remember", {
       bridge_id: selected,
       camera_name: camera,
-      mic_name: state?.system_default_mic ? "System default microphone" : mic,
+      mic_name: mic,
     });
   };
   const startPreview = async () => {
+    if (previewMode) throw new Error("Local interface preview: camera and microphone are not opened.");
     if (live)
       throw new Error(
         "End your live session before testing camera or microphone capture.",
@@ -262,32 +319,23 @@ function App() {
       );
     let s: MediaStream | null = null;
     try {
-      s = await navigator.mediaDevices.getUserMedia({
-        video: source === "Camera",
-        audio: true,
-      });
-      if (source === "Camera" && camera) {
-        const inputs = await navigator.mediaDevices.enumerateDevices();
-        const match = inputs.find(
-          (d) => d.kind === "videoinput" && d.label === camera,
-        );
-        if (
-          match &&
-          s.getVideoTracks()[0]?.getSettings().deviceId !== match.deviceId
-        ) {
-          s.getTracks().forEach((t) => t.stop());
-          s = await navigator.mediaDevices.getUserMedia({
-            video: { deviceId: { exact: match.deviceId } },
-            audio: true,
-          });
-        } else if (!match) {
-          setNotice(
-            "Preview uses the system camera; exact device matching is unavailable. Streaming uses the selected engine camera.",
-          );
-        }
+      if (videoOff && micOff) throw new Error("Turn on your camera or microphone to preview it.");
+      s = await navigator.mediaDevices.getUserMedia({video: !videoOff, audio: !micOff});
+      const inputs = await navigator.mediaDevices.enumerateDevices();
+      const selectedVideo = inputs.find(d => d.kind === "videoinput" && d.label === camera);
+      const selectedAudio = inputs.find(d => d.kind === "audioinput" && d.label === mic);
+      if ((!videoOff && selectedVideo) || (!micOff && mic !== "System default microphone" && selectedAudio)) {
+        s.getTracks().forEach(t => t.stop());
+        s = await navigator.mediaDevices.getUserMedia({
+          video: videoOff ? false : selectedVideo ? {deviceId:{exact:selectedVideo.deviceId}} : true,
+          audio: micOff ? false : mic !== "System default microphone" && selectedAudio ? {deviceId:{exact:selectedAudio.deviceId}} : true,
+        });
       }
+      if ((!videoOff && !selectedVideo) || (!micOff && mic !== "System default microphone" && !selectedAudio))
+        setNotice("Preview uses a system device where exact matching is unavailable. Streaming uses your selected devices.");
       streamRef.current = s;
       setPreview(s);
+      if (!s.getAudioTracks().length) return;
       const ctx = new AudioContext();
       audioContext.current = ctx;
       await ctx.resume();
@@ -310,6 +358,7 @@ function App() {
     }
   };
   const testSpeakers = async () => {
+    if (previewMode) {setNotice("Local preview: no test tone played.");return;}
     const ctx = new AudioContext();
     try {
       await ctx.resume();
@@ -332,26 +381,22 @@ function App() {
   };
   const endSession = async () => {
     await api("/api/stop", {});
+    let historySaved = true;
     if (started) {
-      const next = [
-        {
-          started,
-          ended: new Date().toISOString(),
-          bridge: bridge?.name || "Bridge",
-        },
-        ...history,
-      ].slice(0, 30);
-      setHistory(next);
-      localStorage.setItem("nb.sessions", JSON.stringify(next));
+      try {await saveSession({started, ended: new Date().toISOString(), bridge: bridge?.name || "Bridge"});}
+      catch {historySaved = false;}
     }
+    setHistoryPage(0);
     setStarted("");
     setUnlocked("");
     await refresh();
-    setNotice("Session ended. Camera and microphone released.");
+    setNotice(historySaved ? "Session ended. Camera and microphone released." : "Session ended, but its history could not be saved on this device.");
+    setNoticeTone(historySaved ? "success" : "warning");
   };
   const goLive = async () => {
     if (!host) throw new Error("Select a bridge with a reachable address.");
-    if (!camera) throw new Error("Select an available camera.");
+    setPinError("");
+    if (!videoOff && !camera) throw new Error("Select a camera or turn the camera off to join with audio only.");
     if (source !== "Camera")
       throw new Error(
         "Avatar and screen transmission are not available in this build. Select Camera.",
@@ -359,28 +404,32 @@ function App() {
     stopPreview();
     await remember();
     if (unlocked !== host) {
-      if (!pin) throw new Error("Enter your bridge PIN first.");
+      if (!pin.trim()) {setPinError("Enter the PIN provided by your fleet administrator.");pinRef.current?.focus();throw new Error("Bridge PIN is required. Enter it in Room & devices, then try again.");}
       const r = await api<{
         ok?: boolean;
         unlocked?: boolean;
         detail?: string;
         result?: string;
         message?: string;
-      }>("/api/unlock", { host, pin });
-      if (r.ok !== true && r.unlocked !== true)
+      }>("/api/unlock", { host, pin }).catch(e => {setPinError(String(e.message || e));pinRef.current?.focus();throw e;});
+      if (r.ok !== true && r.unlocked !== true) {
+        setPinError(r.message || "PIN not accepted. Check the PIN and try again.");pinRef.current?.focus();
         throw new Error(
-          r.message || r.detail || r.result || "Bridge refused the PIN.",
+          r.message || r.detail || r.result || "PIN not accepted. Check the PIN and try again.",
         );
+      }
       setUnlocked(host);
       setPin("");
     }
     const r = await api<{
       return_note?: string;
+      return_player?: string;
       peer_result?: { _error?: string };
     }>("/api/golive", {
+      video_muted: videoOff, voice_muted: micOff,
       host,
       camera_name: camera,
-      mic_name: state?.system_default_mic ? "System default microphone" : mic,
+      mic_name: mic,
     }).catch((error) => {
       // A rejected/expired ticket must not trap retries behind cached UI unlock state.
       setUnlocked("");
@@ -388,16 +437,15 @@ function App() {
     });
     setStarted(new Date().toISOString());
     await refresh();
-    setNotice(
-      r.peer_result?._error
-        ? `Streaming started, but return routing failed: ${r.peer_result._error}`
-        : r.return_note ||
-            "Session started. Waiting for bridge delivery checks.",
-    );
+    const audioProblem = r.peer_result?._error || r.return_player === "none";
+    setNoticeTone(audioProblem ? "warning" : "success");
+    setNotice(previewMode ? "Demo session only. No media is transmitted." : audioProblem
+      ? "Your session started, but meeting audio needs attention. Open Connection health to check it."
+      : "You’re live. Camera, microphone and meeting audio can be controlled below.");
   };
   const checkSetup = async () => {
     const result = await api<{checks:{label:string;status:string;detail:string}[]}>("/api/preflight", {
-      bridge_id: bridge?.id, camera_name: camera, mic_name: mic,
+      bridge_id: bridge?.id, camera_name: camera, mic_name: mic, video_muted: videoOff, voice_muted: micOff,
     });
     setSetupChecks(result.checks);
   };
@@ -458,7 +506,7 @@ function App() {
         <span className="glass">
           <span className={`dot ${live ? "red" : ""}`} />
           {live
-            ? "Camera stream active"
+            ? state?.video_muted ? "Camera off · black output" : "Camera stream active"
             : personaOnly || source === "Avatar"
               ? "Avatar · local preview"
               : "Preview only"}
@@ -491,7 +539,7 @@ function App() {
           </h2>
           <p>
             {live
-              ? "Your selected camera is sending to the bridge."
+              ? state?.video_muted ? "Your camera is off. The bridge receives plain black video." : "Your selected camera is sending to the bridge."
               : source === "Screen"
                 ? "Screen transmission is planned for a future release."
                 : "Check your camera and sound before joining the room."}
@@ -536,8 +584,9 @@ function App() {
       <label>
         Camera
         <select
+          aria-label="Camera"
           value={camera}
-          disabled={live || !!busy}
+          disabled={live || !!busy || videoOff}
           onChange={(e) => {
             stopPreview();
             setCamera(e.target.value);
@@ -552,25 +601,19 @@ function App() {
       </label>
       <label>
         Microphone
-        {state?.system_default_mic ? (
-          <div className="select-like">
-            <Mic size={15} />
-            System default microphone
-          </div>
-        ) : (
           <select
+            aria-label="Microphone"
             value={mic}
-            disabled={live}
-            onChange={(e) => setMic(e.target.value)}
+            disabled={live || !!busy || micOff}
+            onChange={(e) => {stopPreview();setMic(e.target.value);}}
           >
-            {!devices.audio.length && (
+            {(state?.system_default_mic || !devices.audio.length) && (
               <option>System default microphone</option>
             )}
             {devices.audio.map((d) => (
               <option key={d.name}>{d.name}</option>
             ))}
           </select>
-        )}
       </label>
       <div className="meter" aria-label="Local microphone test level">
         {Array.from({ length: 28 }, (_, i) => (
@@ -579,29 +622,55 @@ function App() {
       </div>
       <p className="field-note">
         {preview
-          ? "Local test uses the system microphone."
-          : "Enable preview to test your system microphone."}
+          ? "Local microphone preview is active."
+          : "Preview to check your microphone level."}
       </p>
-      <label>
-        Speaker
-        <div className="select-like">
-          <Headphones size={15} />
-          System audio output
-        </div>
-      </label>
-      {button(
-        "Test speakers",
-        testSpeakers,
-        <Volume2 size={16} />,
-        "wide secondary",
-      )}
+      <div className="speaker-row"><span><Headphones size={15}/> System output</span>{button("Test speakers", testSpeakers, <Volume2 size={16}/>, "secondary")}</div>
     </>
   );
+  const message = notice && <div className={`banner ${noticeTone}`} role={noticeTone === "error" ? "alert" : "status"}><AlertCircle size={18}/><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={()=>setNotice("")}><X size={16}/></button></div>;
+  const requestCode = async () => {
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) throw new Error("Enter a valid work email address.");
+    if (new URL(control).protocol !== "https:") throw new Error("Use an HTTPS Fleet URL.");
+    const r=await api<{note:string}>("/api/signin-request",{control_url:control,email:email.trim()});
+    setSent(true);setCode("");setResendAt(Date.now()+60000);setNotice(r.note);
+  };
+  const redeemCode = async () => {
+    if (!inviteMode && !/^[0-9]{6}$/.test(code)) throw new Error("Enter the six-digit code from your email.");
+    if (!inviteMode && !email.includes("@")) throw new Error("Enter the email address that received your code.");
+    await api("/api/signin-redeem",{control_url:control,email:email.trim(),code});
+    setCode("");setSent(false);setNotice("");
+    await refresh();
+  };
+  if (startup || (desktop && !state && !engineError)) return experience(<Splash/>);
+  if (state?.signed_in && !live) {
+    if (!profile.complete || (previewScene==='name' && !namePreviewDone)) return experience(<NameEntry onComplete={completeName}/>);
+    if (workspace!=="ready" || previewScene==='connecting') return experience(<WorkspaceLoading error={workspaceError} slow={workspaceSlow} retry={()=>setWorkspaceAttempt(v=>v+1)}/>);
+    if (welcome || previewScene==='welcome') return experience(<Welcome name={greeting} onContinue={()=>{setWelcome(false);if(previewScene==='welcome')location.href='/?preview=studio';}}/>);
+  }
+  if (!state?.signed_in) return experience(<div className="auth-shell">
+    <main className="auth-card">
+      <div className="auth-icon"><LockKeyhole size={25}/></div><span className="experience-kicker">A BETTER WAY TO CONNECT</span>
+      <h1>{sent ? inviteMode ? "Use your invitation" : "Check your email" : "Welcome to NetBridge"}</h1>
+      <p>{sent ? inviteMode ? "Paste the invitation code provided by your fleet administrator." : "Enter your six-digit code to open your workspace." : "Sign in to access your meeting bridges and set up your session."}</p>
+      {!desktop && <div className="banner info">Interface preview. Open NetBridge Studio to connect to Fleet.</div>}
+      {engineError && <div role="alert" className="banner error">{engineError}<button onClick={()=>void refresh()}>Retry</button></div>}
+      {message}
+      <form onSubmit={e=>{e.preventDefault();void action(sent ? "Signing in" : "Sending code",sent ? redeemCode : requestCode);}}>
+        <label>Work email<input type="email" autoComplete="email" placeholder="you@company.com" value={email} required onChange={e=>{setEmail(e.target.value);setCode("");}}/></label>
+        {sent && <label>{inviteMode ? "Invitation code" : "Sign-in code"}<input className="code-input" inputMode={inviteMode ? "text" : "numeric"} autoComplete="one-time-code" autoFocus maxLength={inviteMode ? 256 : 6} placeholder={inviteMode ? "Paste your invitation" : "000000"} value={code} onChange={e=>setCode(inviteMode ? e.target.value : e.target.value.replace(/[^0-9]/g,"").slice(0,6))}/></label>}
+        <button className="primary wide" type="submit" disabled={!!busy || !desktop}>{busy ? <Spinner/> : sent ? <ArrowRight size={18}/> : <Mail size={18}/>} {sent ? "Sign in" : "Send sign-in code"}</button>
+      </form>
+      {sent ? <div className="auth-options">{!inviteMode && <button className="text-button" disabled={!!busy || Date.now()<resendAt} onClick={()=>void action("Sending code",requestCode)}>{Date.now()<resendAt ? "Resend available after 60 seconds" : "Resend code"}</button>}<button className="text-button" onClick={()=>{setSent(false);setInviteMode(false);setNotice("");setCode("");}}>Back</button></div> : <button className="text-button" onClick={()=>{setSent(true);setInviteMode(true);}}>Use an invitation code</button>}
+      <details className="fleet-address"><summary>Fleet connection settings</summary><label>Fleet URL<input type="url" value={control} onChange={e=>{setControl(e.target.value);setSent(false);setCode("");}}/></label></details>
+      <div className="auth-foot"><ShieldCheck size={15}/> Camera and microphone stay off until you choose.</div>
+    </main>{previewMode && <p className="auth-caption">Try the preview with code 123456. No email is sent.</p>}
+  </div>);
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <a className="brand" onClick={() => navigate("Studio")}>
-          <span className="brand-mark">N</span>NetBridge
+          <BrandMark/>NetBridge
           
         </a>
         <div className="workspace-label">YOUR WORKSPACE</div>
@@ -637,10 +706,10 @@ function App() {
           </button>
           <div className="account">
             <div className="account-avatar">
-              {(state?.email || "D")[0].toUpperCase()}
+              {(greeting || state?.email || "P")[0].toUpperCase()}
             </div>
             <div>
-              <strong>{state?.email?.split("@")[0] || "Presenter"}</strong>
+              <strong>{greeting || state?.email?.split("@")[0] || "Presenter"}</strong>
               <span>
                 {state?.signed_in ? "Fleet account" : "Not signed in"}
               </span>
@@ -651,11 +720,11 @@ function App() {
       </aside>
       <div className="main-shell">
         <header className="topbar">
-          <div className="breadcrumb">
+          <div className="breadcrumb"><PreviewScenes/>
             Workspace<span>/</span>
             <strong>{page}</strong>
           </div>
-          <div className="topbar-right">
+          <div className="topbar-right"><AppearanceControl value={appearance} onChange={setAppearance}/>
             {live ? (
               <span className="live-pill">
                 <span className="dot red" />
@@ -667,7 +736,7 @@ function App() {
               </span>
             ) : (
               <span className="muted tiny">
-                {desktop ? "DESKTOP STUDIO" : "BROWSER PREVIEW"}
+                {previewMode ? "SIMULATED" : desktop ? "" : "BROWSER PREVIEW"}
               </span>
             )}
             <button
@@ -682,21 +751,6 @@ function App() {
           </div>
         </header>
         <main>
-          {supportPreview && <section className="card" aria-label="Support report preview">
-            <h2>Send a report to your fleet administrator</h2><p>{supportPreview.notice}</p>
-            <pre>{JSON.stringify(supportPreview.report,null,2)}</pre>
-            <button onClick={() => void action("Sending report", async () => {
-              const r=await api<{reference:string}>("/api/support-report",{submit:true,bridge_id:bridge?.id});
-              setNotice("Sent: "+r.reference);setSupportPreview(null);
-            })}>Send report</button>
-            <button onClick={() => void downloadReport()}>Save local report instead</button>
-            <button onClick={() => setSupportPreview(null)}>Cancel</button>
-          </section>}
-          {setupChecks.length > 0 && <section className="card" aria-label="Setup results" aria-live="polite">
-            <h2>Setup check</h2>
-            {setupChecks.map((c) => <p key={c.label}><strong>{c.label} — {c.status}</strong>: {c.detail}</p>)}
-            <button onClick={() => setSetupChecks([])}>Close setup results</button>
-          </section>}
           <div className="page-heading">
             <div>
               <div className="eyebrow">
@@ -708,7 +762,7 @@ function App() {
                 {page === "Studio"
                   ? live
                     ? "Live session"
-                    : "Set up your session"
+                    : greeting ? `Hi, ${greeting}!` : "Your Studio"
                   : page === "Bridges"
                       ? "Meeting bridges"
                       : page === "Sessions"
@@ -733,28 +787,13 @@ function App() {
             )}
           </div>
           {page === "Studio" && (
-            <section className="meeting-checks panel" aria-label="Meeting checks">
-              <div className="card-heading">
-                <h3>Meeting checks</h3>
-                <span className="muted tiny">{meetingChecks.filter(({key}) => deliveryStatus(engineError ? null : state, key).tone === "good").length}/4 confirmed</span>
-              </div>
-              <div className="meeting-check-table-wrap">
-                <table className="meeting-check-table" aria-label="Live delivery checks">
-                  <thead><tr><th scope="col">Check</th><th scope="col">Status</th><th scope="col">Evidence from the bridge</th></tr></thead>
-                  <tbody>{meetingChecks.map(({key, name, icon: Icon}) => {
-                    const check = deliveryStatus(engineError ? null : state, key);
-                    return <tr key={key}>
-                      <th scope="row"><div className="meeting-check-name"><Icon size={18} aria-hidden="true" /><span>{name}</span></div></th>
-                      <td><span className={`meeting-check-status ${check.tone}`}>{check.label}</span></td>
-                      <td><p className="meeting-check-meaning">{check.detail}</p>
-                        <details className="meeting-check-evidence"><summary>About this check</summary><code>{key}</code><p>{key === "video_arriving" ? "Decoded frames confirm delivery to the bridge, not smooth playback in the meeting app." : key === "voice_arriving" ? "Receiver activity alone cannot confirm that people in the meeting hear your voice." : key === "client_sees_camera" ? "Select the camera in your meeting app and confirm its picture there." : "Captured samples confirm the return path, not audible playback through your headphones."}</p></details>
-                      </td>
-                    </tr>;
-                  })}</tbody>
-                </table>
-              </div>
-              <p className="field-note">Bridge delivery checks update while live. USB status alone cannot confirm the picture in the meeting app.</p>
-              <button className="meeting-check-details" onClick={() => setHealth(true)}>View check details <ArrowRight size={14} /></button>
+            <section className="meeting-strip" aria-label="Meeting checks">
+              <button className="strip-heading" onClick={() => setHealth(true)}><Activity size={16}/><strong>Meeting checks</strong><span>{meetingChecks.filter(({key}) => deliveryStatus(engineError ? null : state,key).tone === "good").length}/4 confirmed</span></button>
+              <div className="strip-checks">{meetingChecks.map(({key,name,icon:Icon},i)=>{
+                const check=deliveryStatus(engineError ? null : state,key);
+                return <button key={key} onClick={()=>setHealth(true)} title={`${name}: ${check.label}`} aria-label={`${name}: ${check.label}`}><Icon size={16}/><span>{["Video","Microphone","Room camera","Return audio"][i]}</span><i className={`check-dot ${check.tone}`}/></button>;
+              })}</div>
+              <button className="text-button" onClick={()=>setHealth(true)} aria-label="View check details"><ChevronRight size={16}/></button>
             </section>
           )}
           {!desktop && (
@@ -765,146 +804,38 @@ function App() {
             </div>
           )}
           {engineError && (
-            <div className="banner warning">
+            <div className="banner error" role="alert">
               <AlertCircle size={18} />
               <span>{engineError}</span>
               <button onClick={() => void refresh()}>Retry</button>
             </div>
           )}
-          {notice && (
-            <div className="banner notice" role="status">
-              <CircleHelp size={18} />
-              <span>{notice}</span>
-              <button
-                aria-label="Dismiss message"
-                className="icon-button"
-                onClick={() => setNotice("")}
-              >
-                <X size={16} />
-              </button>
-            </div>
-          )}
+          {message}
           {busy && (
             <div className="working" role="status">
-              <LoaderCircle size={14} className="spin" />
+              <Spinner/>
               {busy}…
             </div>
           )}
           {page === "Studio" && (
             <>
-              {!state?.signed_in && (
-                <section className="signin-card">
-                  <div className="signin-intro">
-                    <div className="small-icon">
-                      <LockKeyhole size={19} />
-                    </div>
-                    <h3>1. Sign in to your fleet</h3>
-                    <p>Use your work email to access the rooms shared with you.</p>
-                  </div>
-                  <div className="signin-fields">
-                    <label>
-                      Fleet URL
-                      <input
-                        type="url"
-                        value={control}
-                        onChange={(e) => setControl(e.target.value)}
-                      />
-                    </label>
-                    <label>
-                      Work email
-                      <input
-                        type="email"
-                        autoComplete="email"
-                        placeholder="you@company.com"
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                      />
-                    </label>
-                    {button(
-                      "Send sign-in code",
-                      async () => {
-                        if (!email.includes("@"))
-                          throw new Error("Enter your work email.");
-                        const url = new URL(control);
-                        if (url.protocol !== "https:")
-                          throw new Error("Use an HTTPS fleet URL.");
-                        const r = await api<{
-                          note: string;
-                          raw?: { _error?: string };
-                        }>("/api/signin-request", {
-                          control_url: control,
-                          email,
-                        });
-                        if (r.raw?._error) throw new Error(r.raw._error);
-                        setSent(true);
-                        setNotice(r.note);
-                      },
-                      <ArrowRight size={16} />,
-                      "primary",
-                    )}
-                    {(sent || code) && (
-                      <>
-                        <label>
-                          Sign-in or invitation code
-                          <input
-                            value={code}
-                            onChange={(e) => setCode(e.target.value)}
-                            autoComplete="one-time-code"
-                          />
-                        </label>
-                        {button(
-                          "Sign in",
-                          async () => {
-                            await api("/api/desktop/configure", {
-                              control_url: control,
-                            });
-                            await api("/api/signin-redeem", { code });
-                            setCode("");
-                            // The sign-in action owns the busy lock; the signed-in effect
-                            // cannot load the workspace until that action has completed.
-                            await loadBridges();
-                            await loadDevices();
-                            await refresh();
-                          },
-                          <ArrowRight size={16} />,
-                          "primary",
-                        )}
-                      </>
-                    )}
-                    {!sent && !code && (
-                      <button
-                        className="text-button"
-                        onClick={() => setSent(true)}
-                      >
-                        I already have a code
-                      </button>
-                    )}
-                  </div>
-                </section>
-              )}
-              <ol className="setup-progress" aria-label="Session setup progress">
-                <li className={state?.signed_in ? "complete" : "current"}><span>{state?.signed_in ? <Check size={14}/> : "1"}</span><div><strong>Sign in</strong><small>{state?.signed_in ? "Fleet account connected" : "Use your work email"}</small></div></li>
-                <li className={state?.signed_in && !live ? "current" : live ? "complete" : ""}><span>{live ? <Check size={14}/> : "2"}</span><div><strong>Choose room & devices</strong><small>{bridge?.name || "Select your meeting bridge"}</small></div></li>
-                <li className={live ? "current" : ""}><span>3</span><div><strong>{live ? "Session running" : "Go live"}</strong><small>{live ? "You control when to stop" : "Camera and microphone start only when you choose"}</small></div></li>
-              </ol>
               <div className="studio-grid">
                 <section className="stage">
                   {previewPanel()}
-                  {live && <div className="toolbar" aria-label="Live audio controls">
+                  {<div className="toolbar" aria-label="Media controls">
+                    <div className="toolbar-item"><button className={`round ${!(live ? state?.video_muted : videoOff) ? "mint" : ""}`} disabled={!!busy} aria-pressed={live ? !!state?.video_muted : videoOff} aria-label={(live ? state?.video_muted : videoOff) ? "Turn camera on" : "Turn camera off"} onClick={()=>{
+                      stopPreview(); if (!live) {setVideoOff(v=>!v);return;}
+                      void action("Updating camera",async()=>{await api("/api/video",{muted:!state?.video_muted});await refresh();});
+                    }}>{(live ? state?.video_muted : videoOff) ? <VideoOff size={22}/> : <Video size={22}/>}</button><span>{(live ? state?.video_muted : videoOff) ? "Camera off" : "Camera on"}</span></div>
                     <div className="toolbar-item">
                       <button
-                        className={`round ${live && !state?.voice_muted ? "mint" : ""}`}
+                        className={`round ${!(live ? state?.voice_muted : micOff) ? "mint" : ""}`}
                         disabled={!!busy}
-                        aria-label={
-                          live
-                            ? state?.voice_muted
-                              ? "Unmute microphone"
-                              : "Mute microphone"
-                            : "Microphone settings"
-                        }
+                        aria-label={(live ? state?.voice_muted : micOff) ? "Unmute microphone" : "Mute microphone"}
+                        aria-pressed={live ? !!state?.voice_muted : micOff}
                         onClick={() => {
                           if (!live) {
-                            navigate("Settings");
+                            stopPreview();setMicOff(v=>!v);
                             return;
                           }
                           void action("Updating microphone", async () => {
@@ -915,14 +846,14 @@ function App() {
                           });
                         }}
                       >
-                        {state?.voice_muted ? (
+                        {(live ? state?.voice_muted : micOff) ? (
                           <MicOff size={22} />
                         ) : (
                           <Mic size={22} />
                         )}
                       </button>
                       <span>
-                        {state?.voice_muted ? "Mic muted" : "Microphone"}
+                        {(live ? state?.voice_muted : micOff) ? "Mic muted" : "Microphone"}
                       </span>
                     </div>
                     <div className="toolbar-item">
@@ -958,12 +889,13 @@ function App() {
                 </section>
                 <aside className="setup-card">
                   <div className="card-heading">
-                    <h3>{live ? "Your session" : "2. Room & devices"}</h3>
-                    <span className={`dot ${live ? "green" : ""}`} />
+                    <h3>{live ? "Your session" : "Room & devices"}</h3>
+                    <button className="icon-button" title="Refresh devices" aria-label="Refresh devices" disabled={!!busy || live} onClick={()=>void action("Refreshing devices",loadDevices)}><RefreshCw size={14}/></button>
                   </div>
                   <label>
                     Meeting bridge
                     <select
+                      aria-label="Meeting bridge"
                       disabled={live}
                       value={selected}
                       onChange={(e) => selectBridge(e.target.value)}
@@ -987,22 +919,21 @@ function App() {
                           autoComplete="off"
                           inputMode="numeric"
                           placeholder="Enter your bridge PIN"
+                          aria-label="Bridge PIN"
+                          ref={pinRef}
+                          aria-invalid={!!pinError}
+                          aria-describedby={pinError ? "pin-error" : undefined}
                           value={pin}
-                          onChange={(e) => setPin(e.target.value)}
+                          onChange={(e) => {setPin(e.target.value);setPinError("");}}
                         />
                       </div>
+                      {pinError && <span id="pin-error" className="field-error">{pinError}</span>}
                     </label>
                   )}
                   <div className="separator" />
                   {deviceFields}
-                  {button(
-                    "Refresh devices",
-                    loadDevices,
-                    <RefreshCw size={14} />,
-                    "text-button wide",
-                  )}
                   <div className="session-action-area">
-                    <p>{live ? "Ending the session stops your camera and microphone." : !state?.signed_in ? "Sign in above to continue." : !host ? "Choose a meeting bridge to continue." : !camera ? "Connect and select a camera to continue." : "3. Enter the bridge PIN above, then start your session."}</p>
+                    <p>{live ? "Ending the session stops your camera and microphone." : !state?.signed_in ? "Sign in above to continue." : !host ? "Choose a meeting bridge to continue." : !camera && !videoOff ? "Select a camera or turn it off to join with audio only." : videoOff ? "Joining with camera off. The room receives black video." : "Enter your bridge PIN, then go live when you’re ready."}</p>
                       <button
                         className={`session-action ${live ? "end-action" : "primary"}`}
                         disabled={
@@ -1011,7 +942,7 @@ function App() {
                           (!live &&
                             (!state?.signed_in ||
                               !host ||
-                              !camera ||
+                              (!camera && !videoOff) ||
                               source !== "Camera"))
                         }
                         aria-label={live ? "End session" : "Go live"}
@@ -1092,7 +1023,8 @@ function App() {
                 <h3>Recent sessions</h3>
                 <span className="muted tiny">ON THIS DEVICE</span>
               </div>
-              {history.length ? (
+              {historyError && <p role="alert" className="field-error">{historyError}</p>}
+              {historyLoading ? <p role="status">Loading sessions…</p> : history.length ? (
                 <div className="session-list">
                   {history.map((s, i) => (
                     <div key={i}>
@@ -1127,10 +1059,20 @@ function App() {
                   </p>
                 </div>
               )}
+              <nav className="pagination" aria-label="Session history pages"><span>{historyTotal} sessions · Page {historyPage+1} of {Math.max(1,Math.ceil(historyTotal/PAGE_SIZE))}</span><button disabled={historyLoading || historyPage===0} onClick={()=>setHistoryPage(p=>p-1)}><ChevronLeft size={16}/> Previous</button><button disabled={historyLoading || (historyPage+1)*PAGE_SIZE>=historyTotal} onClick={()=>setHistoryPage(p=>p+1)}>Next <ChevronRight size={16}/></button></nav>
             </div>
           )}
           {page === "Settings" && (
             <div className="settings-grid">
+              <section className="panel appearance-panel">
+                <h3><UserRound size={18}/> Personal preferences</h3>
+                <p>Make Studio feel at home.</p>
+                <label>Display name<input value={nameDraft} maxLength={40} onChange={e=>setNameDraft(e.target.value)}/></label>
+                <button className="secondary wide" onClick={()=>{setSessionProfile({key:accountKey,name:nameDraft.trim().slice(0,40)});storeProfile(accountKey,nameDraft);setProfileRevision(v=>v+1);setNoticeTone("success");setNotice("Your display name is saved on this computer.");}}>Save name</button>
+                <div className="separator"/><h3>Appearance</h3>
+                <AppearanceControl value={appearance} onChange={setAppearance}/>
+                <p className="field-note">Auto follows your computer’s light or dark appearance.</p>
+              </section>
               <section className="panel">
                 <div className="card-heading">
                   <h3>
@@ -1146,9 +1088,9 @@ function App() {
                   "wide secondary",
                 )}
                 <p className="field-note">
-                  The media engine follows the macOS system microphone and
-                  output. Select them in System Settings. The microphone button
-                  in Studio mutes outgoing capture during a session.
+                  Choose your microphone here, or use System default microphone on macOS
+                  to follow System Settings. Speaker output follows your operating system.
+                  The microphone button mutes outgoing capture during a session.
                 </p>
               </section>
               <section className="panel">
@@ -1331,14 +1273,14 @@ function App() {
           <footer>
             <span>
               <span className={`dot ${state && !engineError ? "green" : ""}`} />
-              {state && !engineError
+              {previewMode ? "Simulated workspace · No stream" : state && !engineError
                 ? "Media engine connected"
                 : desktop
                   ? "Connecting to media engine"
                   : "Design preview"}
             </span>
             <span>
-              NETBRIDGE STUDIO <b>{studioVersion}</b>
+              NETBRIDGE STUDIO <b>{previewMode ? "DESIGN REVIEW" : studioVersion}</b>
             </span>
             <button
               onClick={() => {
@@ -1354,6 +1296,18 @@ function App() {
           </footer>
         </main>
       </div>
+      {setupChecks.length > 0 && <Dialog title="Setup check" close={()=>setSetupChecks([])}>
+        {message}<p className="dialog-intro">A quick check before you join. Nothing is recorded or broadcast.</p>
+        <div className="setup-results">{setupChecks.map(c=><div className={`setup-result ${c.status}`} key={c.label}>{c.status === "pass" ? <CheckCircle2 size={20}/> : <AlertCircle size={20}/>}<div><strong>{c.label}</strong><p>{c.detail}</p></div><span>{c.status === "pass" ? "Ready" : c.status === "unknown" ? "Not verified" : "Check needed"}</span></div>)}</div>
+        <div className="dialog-actions"><button onClick={()=>setSetupChecks([])}>Close setup results</button>{button("Run again",checkSetup,<RefreshCw size={16}/>,"primary")}</div>
+      </Dialog>}
+      {supportPreview && <Dialog title="Get help" close={()=>setSupportPreview(null)}>
+        {message}<div className="help-intro"><div className="auth-icon"><CircleHelp size={26}/></div><div><h3>Send a report to your fleet administrator</h3><p>Share a snapshot so your admin can help you get connected.</p></div></div>
+        <div className="support-summary"><span><Radio size={18}/> {bridge?.name || "No bridge selected"}</span><span><Activity size={18}/> {live ? "Session active" : "Not broadcasting"}</span></div>
+        <p className="privacy-note"><ShieldCheck size={18}/>{supportPreview.notice}</p>
+        <details className="report-details"><summary>Review report details</summary><pre>{JSON.stringify(supportPreview.report,null,2)}</pre></details>
+        <div className="dialog-actions"><button onClick={()=>void action("Saving report",downloadReport)}><Download size={16}/>Save local report</button>{button("Send report",async()=>{const r=await api<{reference:string}>("/api/support-report",{submit:true,bridge_id:bridge?.id});setNoticeTone("success");setNotice("Sent: "+r.reference);setSupportPreview(null);},<ArrowRight size={16}/>,"primary")}</div>
+      </Dialog>}
       {health && (
         <aside className="health-drawer">
           <div className="card-heading">

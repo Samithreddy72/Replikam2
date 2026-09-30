@@ -24,6 +24,7 @@ export type EngineState = {
   wanted?: boolean;
   interruption?: string;
   voice_muted?: boolean;
+  video_muted?: boolean;
   return_on: boolean;
   return_gain: string;
   return_jitter_ms: string;
@@ -38,8 +39,10 @@ export type EngineState = {
   guard?: { last?: string };
   update_note?: string;
 };
-export const desktop = isTauri();
+export const previewMode = import.meta.env.DEV && typeof location !== "undefined" && new URLSearchParams(location.search).has("preview");
+export const desktop = isTauri() || previewMode;
 export async function api<T>(path: string, body?: unknown): Promise<T> {
+  if (previewMode) {const {previewRequest}=await import("./preview");return await previewRequest(path,body) as T;}
   if (!desktop)
     throw new Error(
       "Open NetBridge Studio to connect to the media engine. This browser view is a UI preview.",
@@ -64,6 +67,8 @@ export function deliveryStatus(
       label: "Not streaming",
       detail: "Checks start when you go live.",
     };
+  if (key === "video_arriving" && state.video_muted)
+    return {tone:"neutral",label:"Camera off",detail:"Camera capture is off. Plain black video is sent to the bridge."};
   if (key === "voice_arriving" && state.voice_muted)
     return {
       tone: "neutral",

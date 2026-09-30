@@ -1,6 +1,6 @@
 # NetBridge Studio
 
-Tauri 2 desktop application with the approved graphite/mint studio design. The UI
+Tauri 2 desktop application with the approved light/dark Studio design. The UI
 is local React/TypeScript; a private authenticated Python engine owns the existing
 FFmpeg, GStreamer and mesh processes. No customer shell scripts or browser tabs.
 
@@ -15,14 +15,15 @@ FFmpeg, GStreamer and mesh processes. No customer shell scripts or browser tabs.
 - Audio recovery and tuning, an expandable diagnostic drawer, and minimal support
   report export to Downloads (no account identifiers, credentials, or recordings).
 - Local completed-session history and a Cmd/Ctrl+K navigation palette.
-- Illustrated/robot personas with a local microphone-amplitude mouth animation.
-  **Persona transmission, photorealistic AI rendering, autonomous responses, screen
-  transmission, camera-off slates, and arbitrary speaker selection are not implemented.**
-  These sources are marked as labs and cannot start a live stream.
+- Camera-off sessions send plain black video without opening the camera. Camera
+  and microphone mute controls work independently before and during a session.
+- Light, Dark and system appearance, an animated launch and connection flow, and
+  an optional local display name. Personas are not exposed in Studio navigation.
+  Screen transmission and arbitrary speaker selection are not implemented.
 - Signed whole-app updater integration. Installation refuses active or desired
   sessions, and serializes with Go live. No endpoint/key is configured in dev builds.
 
-The meeting-room laptop still installs nothing. Studio runs on the presenter Mac.
+The meeting-room laptop still installs nothing. Studio runs on the presenter Mac or Windows PC.
 The existing source application and its browser interface remain available.
 
 ## Development
@@ -37,7 +38,24 @@ npm run desktop
 ```
 
 `NB_PYTHON` selects a different development Python. `npm run dev` opens a browser
-**UI preview only**, with no engine bridge and no simulated live metrics.
+**UI preview only**, with no engine bridge. The default route shows the signed-out
+entry screen. For a clearly labelled, development-only interactive fixture, open
+`http://127.0.0.1:1420/?preview=studio` or `?preview=signin`. Sample sign-in code
+and bridge PIN: `123456`. These routes do not contact Fleet or start media, and
+the fixture is excluded from production builds.
+
+Design review screens: `?preview=splash`, `?preview=signin`, `?preview=name`,
+`?preview=connecting`, `?preview=welcome`, and `?preview=studio`. Add `&theme=light`
+or `&theme=dark`, or use the appearance switch. The screen picker is development-only.
+Connecting/splash/welcome routes stay on that stage for visual review; ordinary sign-in
+loads real workspace data once and proceeds when ready, with retry on errors.
+
+Appearance follows the OS by default and can be changed to Light or Dark. Animations
+respect reduced-motion preferences. A first sign-in asks for an optional display name,
+stored locally per account and Fleet URL; Settings can change it. It is not a Fleet account
+rename, and it does not affect authentication. Existing live controls remain accessible
+without completing name onboarding. The design was approved for the 0.1.11 release.
+
 
 ## Build a self-contained app
 
@@ -136,3 +154,21 @@ credentials are configured. Windows installers remain unsigned pending customer
 signing integration. Real Pi/meeting qualification is still required.
 See [the release runbook](../../release.md#trigger-releases-from-github-actions-recommended).
 Mobile is outside the current scope.
+
+## Studio 0.1.11 UX (2026-09-30)
+
+Email sign-in now uses six digits plus the receiving email address. Fleet and the
+new presenter engine must ship together; older presenter binaries do not send
+the email during redemption. Existing signed-in sessions and pending long
+invitation codes remain valid. Upgrade presenter apps before deploying the matching
+Fleet sign-in changes; older signed-out apps cannot redeem the new short codes.
+
+Camera-off uses the existing authenticated video route to send plain black H.264
+frames without camera capture, while microphone and return audio run independently.
+This needs no Pi image change. The Pi's interruption freeze/black policy remains
+in place if the connection itself fails. Validate mute/unmute on physical Mac,
+Windows and the receiving meeting laptop before release.
+
+Session history is local, migrated from the existing localStorage list to IndexedDB
+and read in pages of eight. It still records sessions ended from this app, not
+Fleet-wide meeting attendance or recordings.

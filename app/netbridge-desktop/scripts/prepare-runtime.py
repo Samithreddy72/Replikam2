@@ -44,6 +44,9 @@ def prepare(destination):
     for codec in ('libopus', 'h264_videotoolbox' if sys.platform == 'darwin' else 'libx264'):
         if codec not in encoders:
             raise RuntimeError('FFmpeg is missing ' + codec)
+    filters = subprocess.check_output([str(ffmpeg), "-hide_banner", "-filters"], text=True)
+    if "lavfi" not in devices or not any(" color " in line for line in filters.splitlines()):
+        raise RuntimeError("FFmpeg is missing the camera-off black video source (lavfi/color)")
     capture = 'avfoundation' if sys.platform == 'darwin' else 'dshow'
     if capture not in devices:
         raise RuntimeError('FFmpeg is missing capture device ' + capture)

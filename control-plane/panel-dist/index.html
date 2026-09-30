@@ -300,14 +300,14 @@
   <!-- sign in -->
   <section id="gate" class="gate card" hidden>
     <h2>Sign in to the fleet</h2>
-    <p>Admins only. Use the email link, a one-time invite from another admin, or a sign-in code.</p>
+    <p>Admins only. Enter your work email and the six-digit code we send you.</p>
     <input id="emailin" type="email" placeholder="you@work.com" autocomplete="email">
-    <button class="btn danger" id="magicBtn" type="button">Email me a sign-in link</button>
+    <button class="btn danger" id="magicBtn" type="button">Send sign-in code</button>
     <div class="or">— or —</div>
     <input id="invitein" type="password" placeholder="invite from your admin" autocomplete="off">
     <button class="btn primary" id="redeemBtn" type="button">Redeem invite &amp; sign in</button>
     <div class="or">— or —</div>
-    <input id="keyin" type="password" placeholder="sign-in code or personal token" autocomplete="off">
+    <input id="keyin" type="password" placeholder="six-digit code or personal token" autocomplete="off">
     <button class="btn primary" id="keyBtn" type="button">Sign in with a code or token</button>
     <div class="err" id="gateerr" role="alert"></div>
   </section>
@@ -2240,7 +2240,7 @@ async function trySignIn(token){
 async function redeemCode(code){
   // An emailed link lands here as ?code=... - trade it for a personal token.
   try {
-    const r = await fetch("/auth/magic-redeem", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({code})});
+    const r = await fetch("/auth/magic-redeem", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({code, email:$("emailin").value.trim()})});
     if (!r.ok) return false;
     const d = await r.json();
     KEY = d.token; WHO = d.email; ROLE = d.role; store("nb_admin_key", KEY); store("nb_who", WHO); store("nb_role", ROLE);
@@ -2250,8 +2250,9 @@ async function redeemCode(code){
 }
 $("magicBtn").addEventListener("click", async () => {
   const email = $("emailin").value.trim(); if (!email) return $("emailin").focus();
-  try { await fetch("/auth/magic-link", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({email, base_url: location.origin})});
-    gate("If that address has an admin account, a sign-in link is on its way (valid 15 min).", true); }
+  try { const response = await fetch("/auth/magic-link", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({email, base_url: location.origin})});
+    if (!response.ok) throw new Error("Email request failed. Please try again.");
+    gate("If that address has an account, check your email for a six-digit code. Enter it below with the same email. Wait 60 seconds before resending.", true); }
   catch (e) { gate("Could not send: " + e.message); }
 });
 $("redeemBtn").addEventListener("click", async () => {
@@ -2267,7 +2268,7 @@ $("keyBtn").addEventListener("click", async () => {
   // One box, either credential: a personal token, or the code from a sign-in email.
   if (await trySignIn(v)){ $("keyin").value = ""; return; }
   if (await redeemCode(v)){ $("keyin").value = ""; start(); return; }
-  gate("That code or token was not accepted — request a fresh sign-in link.");
+  gate("That code or token was not accepted — check your email and request a new sign-in code.");
 });
 for (const [inp, btn] of [["emailin", "magicBtn"], ["invitein", "redeemBtn"], ["keyin", "keyBtn"]])
   $(inp).addEventListener("keydown", e => { if (e.key === "Enter") $(btn).click(); });

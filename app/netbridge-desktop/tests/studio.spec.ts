@@ -1,29 +1,11 @@
 import {test,expect} from '@playwright/test';
-test('browser preview shows honest states and navigates without overflow',async({page})=>{
- const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+test('signed-out landing only offers sign-in',async({page})=>{
  await page.goto('/');
- await expect(page.getByRole('heading',{name:'Set up your session'})).toBeVisible();
- await expect(page.getByRole('button',{name:'Go live',exact:true})).toBeDisabled();
- await page.screenshot({path:'test-results/studio.png',fullPage:true});
- await expect(page.getByRole('button',{name:/Personas/})).toHaveCount(0);
- await expect(page.getByRole('region',{name:'Meeting checks'})).toBeVisible();
- await expect(page.getByText('0/4 confirmed',{exact:true})).toBeVisible();
- const checks=page.getByRole('table',{name:'Live delivery checks'});
- await expect(checks.getByRole('row')).toHaveCount(5);
- for(const label of ['Your video arriving at bridge','Your voice arriving at bridge','Meeting laptop sees the camera','Meeting audio flowing back']) await expect(checks.getByRole('rowheader',{name:label})).toBeVisible();
- await checks.locator('summary').first().click();
- await expect(checks.getByText('video_arriving',{exact:true})).toBeVisible();
- await page.getByRole('button',{name:'Connection health',exact:true}).click();
- await expect(page.locator('aside').getByText('Not streaming',{exact:true})).toHaveCount(4);
- await page.getByRole('button',{name:'Close diagnostics'}).click();
- for(const name of ['Bridges','Sessions','Settings']){await page.getByRole('button',{name,exact:true}).first().click();await expect(page.locator('h1')).toBeVisible()}
- await page.setViewportSize({width:960,height:680});
- expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBeTruthy();
- await page.getByRole('button',{name:'Studio',exact:true}).first().click();
- const action=await page.getByRole('button',{name:'Go live',exact:true}).boundingBox();
- expect(action).not.toBeNull();expect(action!.y+action!.height).toBeLessThanOrEqual(680);
- await page.screenshot({path:'test-results/studio-compact.png',fullPage:true});
- expect(errors).toEqual([]);
+ await expect(page.getByRole('heading',{name:'Welcome to NetBridge'})).toBeVisible();
+ await expect(page.getByRole('button',{name:'Go live',exact:true})).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'Sessions',exact:true})).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'Send sign-in code',exact:true})).toBeDisabled();
+ await page.screenshot({path:'test-results/signin.png',fullPage:true});
 });
 
 test('desktop UI unlocks before streaming, handles mute, and ends session',async({page})=>{
@@ -53,15 +35,17 @@ test('desktop UI unlocks before streaming, handles mute, and ends session',async
  await page.goto('/');
  await page.getByLabel('Work email',{exact:true}).fill('developer@example.test');
  await page.getByRole('button',{name:'Send sign-in code',exact:true}).click();
- await page.getByLabel('Sign-in or invitation code',{exact:true}).fill('test-code');
+ await page.getByLabel('Sign-in code',{exact:true}).fill('123456');
  await page.getByRole('button',{name:'Sign in',exact:true}).click();
+ await page.getByRole('button',{name:'Skip for now',exact:true}).click();
+ await page.getByRole('button',{name:'Open Studio',exact:true}).click();
  await expect(page.getByRole('button',{name:'Go live',exact:true})).toBeEnabled();
- await expect(page.getByRole('list',{name:'Session setup progress'})).toBeVisible();
+ await expect(page.getByRole('heading',{name:'Room & devices'})).toBeVisible();
  await expect(page.getByRole('button',{name:'Go live',exact:true})).toHaveCount(1);
  await page.screenshot({path:'test-results/studio-ready.png',fullPage:true});
  await page.getByPlaceholder('Enter your bridge PIN').fill('000000');
  await page.getByRole('button',{name:'Go live',exact:true}).click();
- await expect(page.getByText('Wrong PIN',{exact:true})).toBeVisible();
+ await expect(page.getByRole('alert')).toContainText('Wrong PIN');
  expect(await page.evaluate(()=>(window as any).calls.some((c:any)=>c.path==='/api/golive'))).toBeFalsy();
  await page.getByRole('button',{name:'Check my setup',exact:true}).click();
  await expect(page.getByText('Displayed picture not verified.',{exact:false})).toBeVisible();
@@ -80,7 +64,7 @@ test('desktop UI unlocks before streaming, handles mute, and ends session',async
  expect(await page.evaluate(()=>(window as any).calls.filter((c:any)=>c.path==='/api/golive').at(-1).body.mic_name)).toBe('Test mic');
  await expect(page.getByRole('button',{name:'End session',exact:true})).toBeEnabled();
  await expect(page.getByText('3/4 confirmed',{exact:true})).toBeVisible();
- await expect(page.getByText('USB reported configured',{exact:true})).toBeVisible();
+ await expect(page.getByRole('button',{name:'Meeting laptop sees the camera: USB reported configured'})).toBeVisible();
  await page.screenshot({path:'test-results/studio-live.png',fullPage:true});
  await expect(page.getByRole('region',{name:'Meeting checks'})).toBeVisible();
  await page.getByRole('button',{name:'Mute microphone',exact:true}).click();

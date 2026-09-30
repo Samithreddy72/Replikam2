@@ -21,8 +21,7 @@ class Email(unittest.TestCase):
      r=client.post('/auth/magic-link',json={'email':role+'@example.com'})
      self.assertEqual(r.status_code,200);self.assertTrue(delivered.wait(3))
     body=messages[0][2]
-    if role=='presenter':self.assertNotIn('/?code=',body);self.assertIn('Mac or Windows',body)
-    else:self.assertIn('https://fleet.example.com/?code=',body)
+    self.assertNotIn('/?code=',body);self.assertIn('six-digit',body);self.assertIn('Mac or Windows',body)
    unknown=client.post('/auth/magic-link',json={'email':'unknown@example.com'})
    self.assertEqual(unknown.json(),r.json())
 if __name__=='__main__':unittest.main()

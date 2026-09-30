@@ -98,6 +98,8 @@ class User(Base):
     # POST /auth/magic-link, consumed by POST /auth/magic-redeem to mint the bearer.
     login_hash: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     login_expires: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    login_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    login_sent_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_seen: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

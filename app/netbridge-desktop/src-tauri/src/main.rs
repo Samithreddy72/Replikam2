@@ -18,7 +18,7 @@ struct Engine {
 fn allowed(method: &str, path: &str) -> bool {
     match method {
         "GET" => matches!(path, "/api/state" | "/api/devices" | "/api/bridges" | "/api/audio/diagnostics" | "/api/desktop/status"),
-        "POST" => matches!(path, "/api/support-report" | "/api/preflight" | "/api/signin-request" | "/api/signin-redeem" | "/api/signout" | "/api/remember" | "/api/unlock" | "/api/golive" | "/api/stop" | "/api/return" | "/api/return-tuning" | "/api/audio/recover" | "/api/microphone" | "/api/desktop/configure"),
+        "POST" => matches!(path, "/api/support-report" | "/api/preflight" | "/api/signin-request" | "/api/signin-redeem" | "/api/signout" | "/api/remember" | "/api/unlock" | "/api/golive" | "/api/stop" | "/api/return" | "/api/return-tuning" | "/api/audio/recover" | "/api/microphone" | "/api/video" | "/api/desktop/configure"),
         _ => false,
     }
 }
@@ -175,6 +175,8 @@ mod tests {
     #[test]
     fn rejects_arbitrary_urls_and_mutations() {
         assert!(allowed("POST", "/api/golive"));
+        assert!(allowed("POST", "/api/video"));
+        assert!(!allowed("GET", "/api/video"));
         for path in ["https://example.com", "/api/desktop/quit", "/api/stop?x=1", "/api/../admin", "/api/audio/capture"] { assert!(!allowed("POST", path)); }
         assert!(!allowed("GET", "/api/stop"));
         assert!(!allowed("DELETE", "/api/state"));

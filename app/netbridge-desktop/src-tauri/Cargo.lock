@@ -2238,7 +2238,7 @@ dependencies = [
 
 [[package]]
 name = "netbridge-desktop"
-version = "0.1.0"
+version = "0.1.11"
 dependencies = [
  "reqwest 0.12.28",
  "serde_json",

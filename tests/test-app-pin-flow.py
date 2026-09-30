@@ -162,8 +162,10 @@ class FakeSession:
         self.return_port = 5004; self.return_player = "gstreamer"; self.voice_muted = False
     def __getattr__(self, name):
         return getattr(self._real, name)
-    def start(self, host, v, a, return_port=5004, mic_name=None):
+    def start(self, host, v, a, return_port=5004, mic_name=None, video_muted=False, voice_muted=False):
         self.live, self.bridge, self.wanted = True, host, True; self.starts += 1
+        self.video_muted, self.voice_muted = video_muted, voice_muted
+        self.selected_mic = mic_name
     def stop(self):
         self.live, self.bridge, self.wanted = False, None, False; self.stops += 1
     def voice_sending(self):
@@ -322,6 +324,14 @@ def run(platform):
         st, r = call("/api/golive", {"host":H,"camera_name":"Cam","mic_name":"Mic","pin":"864200"})
         check(st == 502 and not r.get("ok") and ses.starts == 5,
               "[%s] failed peer confirmation prevents capture from starting" % platform,r)
+        call("/api/stop", {})
+        with patch.object(app, "av_devices", lambda: {"video": [], "audio": [{"name":"Mic","index":"0"}]}):
+            st, r = call("/api/golive", {"host":H,"mic_name":"Mic","video_muted":True})
+            check(st == 401 and r.get("need_pin"), "[%s] camera-off still requires a PIN" % platform, r)
+            st, r = call("/api/golive", {"host":H,"mic_name":"Mic","video_muted":True,"voice_muted":True,"pin":"864200"})
+            check(st == 200 and ses.video_muted and ses.voice_muted,
+                  "[%s] camera-off can start with no camera and respects microphone mute" % platform, r)
+            check(ses.selected_mic == "Mic", "[%s] explicit microphone selection reaches the media engine" % platform)
         call("/api/stop", {})
         blob = json.dumps(FLEET_LOG)
         check("864200" not in blob and "111111" not in blob and (not tk or tk not in blob),

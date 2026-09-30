@@ -372,7 +372,7 @@ def _signin_url(value):
 def _signin_error(result, redeem=False):
     code = (result or {}).get("_code")
     if code in (401, 403):
-        return ("This code is invalid, expired or already used. Request a new code."
+        return ("This code is invalid, expired or already used. Check the email and code. Request a new code; after five attempts, wait 15 minutes."
                 if redeem else "Your sign-in is no longer valid. Sign out and sign in again.")
     if code == 429:
         return "Too many attempts. Wait a moment before trying again."
@@ -381,8 +381,8 @@ def _signin_error(result, redeem=False):
     return "Fleet could not complete this request. Try again or contact your fleet admin."
 
 
-def _redeem_signin(url, code):
-    result = api("POST", url + "/auth/magic-redeem", body={"code": code})
+def _redeem_signin(url, code, email=""):
+    result = api("POST", url + "/auth/magic-redeem", body={"code": code, "email": email})
     # Only a rejected code can be an invite. An outage must not trigger a second
     # redemption attempt or hide its cause behind an invite error.
     if not (result or {}).get("token") and (result or {}).get("_code") == 401:
@@ -715,6 +715,7 @@ class Session:
         self.video_quality = VideoQuality()
         self.capture_names = {}
         self.waiting_for_devices = {}
+        self.video_muted = False
         self.voice_muted = False
         self.return_proc = None     # the return-audio player, tracked so it can be toggled
         self.return_on = True
@@ -779,12 +780,13 @@ class Session:
         return bool(self.voice_proc and self.voice_proc.poll() is None)
 
     @_locked
-    def start(self, pi_host, video_idx, audio_idx, fps=STREAM_FPS, mic_gain=0, return_port=5004, mic_name=None):
+    def start(self, pi_host, video_idx, audio_idx, fps=STREAM_FPS, mic_gain=0, return_port=5004, mic_name=None, video_muted=False, voice_muted=False):
         if _SUSPENDING.is_set():
             raise RuntimeError("Wait for the computer to finish waking before presenting.")
         self.stop()
         self.generation += 1
         self.interruption = None
+        self.video_muted, self.voice_muted = bool(video_muted), bool(voice_muted)
         self.video_quality = VideoQuality()
         self.capture_names = {}
         self.waiting_for_devices = {}
@@ -823,6 +825,14 @@ class Session:
             "-b:v", STREAM_BITRATE, "-g", str(fps), "-bsf:v", "dump_extra=freq=keyframe", "-an",
             "-f", "rtp", "rtp://%s:%d?pkt_size=1100" % (pi_host, RTP_VIDEO)]
         v = bind_video_ticket(v, PINS.ticket())
+        self.camera_argv = list(v)
+        # A camera-off session still supplies a plain black frame to the existing
+        # Pi receiver. No camera device is opened, and USB/audio stay in place.
+        black_input = ["-re", "-f", "lavfi", "-i",
+                       "color=c=black:s=%dx%d:r=%d" % (STREAM_W, STREAM_H, fps)]
+        self.black_argv = common + black_input + v[len(common) + len(vin):]
+        if self.video_muted:
+            v = list(self.black_argv)
         a = common + ain + [
             # The Pi owns voice AGC. Avoid stacked boosts; disable the limiter's
             # automatic makeup gain so this safety ceiling really stays at 0.9.
@@ -865,6 +875,8 @@ class Session:
         logdir = _logdir()
         try:
             for name, argv in (("video", v), ("voice", a)):
+                if name == "voice" and self.voice_muted:
+                    continue
                 if name == "voice" and not argv:
                     self.voice_proc = WaitingMicrophone()
                     self.leg_proc[name] = self.voice_proc
@@ -889,6 +901,28 @@ class Session:
             self.stop()
             raise RuntimeError("Media could not start. Camera and microphone have been released; try again.") from exc
 
+
+    @_locked
+    def set_video_muted(self, muted):
+        if not self.wanted:
+            raise RuntimeError("Start a session before changing the camera")
+        muted = bool(muted)
+        if not muted and not self.capture_names.get("video"):
+            raise RuntimeError("No camera was selected. End the session and select a camera to enable video.")
+        old = self.leg_proc.get("video")
+        if old is not None:
+            _quit(old)
+            if old.poll() is None:
+                raise RuntimeError("Camera did not stop. End the session to release it.")
+        self.video_muted = muted
+        self.leg_argv["video"] = list(self.black_argv if muted else self.camera_argv)
+        if not self.respawn_leg("video"):
+            # An unmute failure must not permit a watchdog to capture later.
+            self.video_muted = True
+            self.leg_argv["video"] = list(self.black_argv)
+            self.respawn_leg("video")
+            raise RuntimeError("Camera is off. Video output could not switch; check your camera and connection.")
+        return self.video_muted
 
     @_locked
     def set_voice_muted(self, muted):
@@ -945,7 +979,7 @@ class Session:
         if not argv and not (name == "voice" and getattr(self, "voice_backend", None) == "gstreamer-coreaudio"):
             return False
         selected = getattr(self, "capture_names", {}).get(name)
-        if selected and (name == "video" or IS_WIN):
+        if selected and (name == "video" or IS_WIN) and not (name == "video" and self.video_muted):
             devices = av_devices(timeout=3).get("video" if name == "video" else "audio", [])
             matches = [d for d in devices if d.get("name") == selected]
             if not matches:
@@ -992,7 +1026,7 @@ class Session:
 
     @_locked
     def adapt_video(self, check, now):
-        if not self.wanted or not isinstance(check, dict) or check.get("source_state") != "live":
+        if not self.wanted or self.video_muted or not isinstance(check, dict) or check.get("source_state") != "live":
             return None
         choice = self.video_quality.observe(check.get("fps"), now)
         if choice is None:
@@ -1320,6 +1354,7 @@ class Session:
         # Record the intent FIRST. If this were set after the kills, a supervisor tick landing
         # in between would see dead legs, believe they crashed, and restart them.
         self.wanted = False
+        self.video_muted = False
         self.voice_muted = False
         # Ask every leg to quit and release its device, in parallel, before escalating. The
         # old version went terminate -> kill on a 4s budget shared across ALL processes, so
@@ -2357,7 +2392,7 @@ class BridgeWatch:
         # ffmpeg running happily while avfoundation delivers nothing. Ask what it is doing, not
         # whether it exists.
         rate = SESSION.leg_cpu_rate(leg) if leg else None
-        if leg == "video" and rate is not None and rate < SESSION.CPU_FLOOR:
+        if leg == "video" and not SESSION.video_muted and rate is not None and rate < SESSION.CPU_FLOOR:
             return ("LOCAL_CAMERA_FAULT: video is not arriving, and the encoder on THIS Mac is "
                     "running but doing almost no work (%.3f CPU-seconds per second, against "
                     "~0.3 for a real stream). The camera has been handed out but is delivering "
@@ -2693,8 +2728,10 @@ def setup_check(selection):
     for key,label,field in (("video","Camera","camera_name"),("audio","Microphone","mic_name")):
         names = [d.get("name") for d in devices.get(key,[])]
         wanted = selection.get(field) or st.get(field)
-        system_mic = key == "audio" and IS_MAC
-        if SESSION.live:
+        system_mic = key == "audio" and IS_MAC and wanted == "System default microphone"
+        if selection.get("video_muted" if key == "video" else "voice_muted") is True:
+            row(key,label,"pass","Intentionally off for this session. Capture will not start.")
+        elif SESSION.live:
             row(key,label,"unknown","A session is active; setup does not open or replace its capture devices.")
         else:
             found = bool(names) and (system_mic or wanted in names)
@@ -2793,7 +2830,7 @@ class Handler(BaseHTTPRequestHandler):
                 "control_url": st.get("control_url", ""),
                 "last_bridge": st.get("bridge_id"),
                 "last_camera": st.get("camera_name"),
-                "last_mic": "System default microphone" if IS_MAC else st.get("mic_name"),
+                "last_mic": st.get("mic_name") or ("System default microphone" if IS_MAC else None),
                 "system_default_mic": IS_MAC,
                 "voice_backend": getattr(SESSION, "voice_backend", None),
                 "live": SESSION.live,
@@ -2802,6 +2839,7 @@ class Handler(BaseHTTPRequestHandler):
                 "live_host": (PINS.host() or st.get("bridge_host")) if SESSION.wanted else None,
                 "live_bridge_id": MESH.bridge_id if SESSION.wanted else None,
                 "pin": PINS.snapshot(),      # never the ticket itself
+                "video_muted": SESSION.video_muted,
                 "voice_muted": SESSION.voice_muted and not SESSION.voice_sending(),
                 "legs": LEGS.snapshot(),
                 # Reported SEPARATELY from legs, because a dead helper used to make the legs
@@ -2951,6 +2989,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(r, dict) or r.get("_error") or r.get("ok") is not True:
                 return self._send({"_error": _signin_error(r if isinstance(r,dict) else {})}, 502)
             st["control_url"] = url
+            st["signin_email"] = email.lower()
             save_state(st)
             return self._send({"ok": True, "note": "If that address has an account, a sign-in code is on its way."})
 
@@ -2962,7 +3001,7 @@ class Handler(BaseHTTPRequestHandler):
             code = (b.get("code") or "").strip()
             if not code:
                 return self._send({"_error": "Enter your sign-in or invite code."}, 400)
-            r = _redeem_signin(url, code)
+            r = _redeem_signin(url, code, (b.get("email") or st.get("signin_email") or "").strip().lower())
             tok = (r or {}).get("token")
             if not tok:
                 return self._send({"_error": _signin_error(r, redeem=True)}, 401 if (r or {}).get("_code") in (401,403) else 502)
@@ -3056,14 +3095,17 @@ class Handler(BaseHTTPRequestHandler):
                                    "note": "already live — nothing to do"})
             devs = av_devices()
             vidx, vname, found_video = resolve_by_name(devs.get("video", []), b.get("camera_name"))
-            if b.get("camera_name") and not found_video:
+            video_muted, voice_muted = b.get("video_muted", False), b.get("voice_muted", False)
+            if not isinstance(video_muted, bool) or not isinstance(voice_muted, bool):
+                return self._send({"_error": "Media mute choices must be boolean."}, 400)
+            if not video_muted and not found_video:
                 return self._send({"_error": "Selected camera is unavailable. Reconnect it or select another camera."}, 409)
-            if IS_MAC and _gst():
-                # Follow macOS input preference, including USB disconnect/reconnect.
+            if IS_MAC and _gst() and b.get("mic_name") in (None, "", "System default microphone"):
+                # Follow macOS only when the user chose the default input.
                 aidx, aname = "default", "System default microphone"
             else:
                 aidx, aname, found_audio = resolve_by_name(devs.get("audio", []), b.get("mic_name"), "0")
-                if b.get("mic_name") and not found_audio:
+                if not voice_muted and b.get("mic_name") and not found_audio:
                     return self._send({"_error": "Selected microphone is unavailable. Reconnect it or select another microphone."}, 409)
             port = int(b.get("return_port") or 5004)
             # THE PIN. A go-live from the page carries it; Studio unlocked a moment ago; an
@@ -3102,10 +3144,11 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(peer, dict) or peer.get("ok") is not True:
                 return self._send({"_error":"The bridge did not confirm your session. Media has not been started; try again."},502)
             try:
-                SESSION.start(route["media_host"], vidx, aidx, return_port=port, mic_name=aname)
+                SESSION.start(route["media_host"], vidx, aidx, return_port=port, mic_name=aname,
+                              video_muted=video_muted, voice_muted=voice_muted)
             except RuntimeError as exc:
                 return self._send({"_error": str(exc)}, 409)
-            SESSION.capture_names = {"video": vname, "voice": aname}
+            SESSION.capture_names = {"video": vname if found_video else None, "voice": aname}
             st.update({"bridge_host": host, "camera_name": vname, "mic_name": aname})
             save_state(st)
             BRIDGEWATCH.request_refresh()
@@ -3178,6 +3221,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not result.get("running"):
                     return self._send({**result, "error": "Return audio could not restart; inspect diagnostics"}, 503)
                 return self._send(result)
+
+        if self.path == "/api/video":
+            if not isinstance(b.get("muted"), bool):
+                return self._send({"error": "muted must be a boolean"}, 400)
+            try:
+                muted = SESSION.set_video_muted(b["muted"])
+                return self._send({"ok": True, "video_muted": muted})
+            except RuntimeError as exc:
+                return self._send({"error": str(exc)}, 409)
 
         if self.path == "/api/microphone":
             if not isinstance(b.get("muted"), bool):

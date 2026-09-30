@@ -18,7 +18,7 @@ import time
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, desc, update, func
+from sqlalchemy import select, desc, update, func, or_
 from sqlalchemy.orm import Session
 
 from .request_limits import RequestLimits
@@ -449,6 +449,10 @@ def _migrate():
                 conn.execute(_text("ALTER TABLE users ADD COLUMN login_hash VARCHAR"))
             if "login_expires" not in ucols:
                 conn.execute(_text("ALTER TABLE users ADD COLUMN login_expires DATETIME"))
+            if "login_attempts" not in ucols:
+                conn.execute(_text("ALTER TABLE users ADD COLUMN login_attempts INTEGER NOT NULL DEFAULT 0"))
+            if "login_sent_at" not in ucols:
+                conn.execute(_text("ALTER TABLE users ADD COLUMN login_sent_at DATETIME"))
         # Command lifecycle (2026-08-25). Existing rows keep their status; the new columns are
         # nullable or defaulted, so a fleet database written by the previous build upgrades in
         # place with no data loss. timeout_s defaults to the conservative class value rather
@@ -2073,30 +2077,42 @@ def request_magic_link(body: dict, db: Session = Depends(get_db)):
     # (reset-poisoning → account takeover). If public_base_url is unset the email
     # carries just the paste-in code, which is all the app needs anyway.
     base = (settings.public_base_url or "").rstrip("/")
-    generic = {"ok": True, "message": "If that email has an account, a sign-in link is on its way."}
+    generic = {"ok": True, "message": "If that email has an account, a six-digit sign-in code is on its way."}
     if not _re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         return generic
     u = db.scalar(select(User).where(User.email == email))
     if not u:
         return generic                      # no enumeration: same response
-    code = _s.token_urlsafe(24)
-    u.login_hash = auth.hash_token(code)
-    u.login_expires = utcnow() + dt.timedelta(minutes=15)
+    now = utcnow()
+    expiry = u.login_expires
+    if expiry is not None and expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=dt.timezone.utc)
+    fresh_window = expiry is None or expiry <= now
+    # A resend replaces the code, but cannot replenish guesses or extend the window.
+    if not fresh_window and u.login_attempts >= 5:
+        return generic
+    code = "%06d" % _s.randbelow(1000000)
+    digest = "otp$" + auth.hash_token(email + ":" + code)
+    result = db.execute(update(User).where(User.id == u.id,
+        or_(User.login_sent_at.is_(None), User.login_sent_at <= now - dt.timedelta(seconds=60)),
+        User.login_hash == u.login_hash if u.login_hash else User.login_hash.is_(None)
+    ).execution_options(synchronize_session=False).values(login_hash=digest, login_expires=now + dt.timedelta(minutes=15) if fresh_window else expiry,
+             login_attempts=0 if fresh_window else u.login_attempts, login_sent_at=now))
     db.commit()
-    # A presenter must redeem in the app: opening the admin panel would consume
-    # this one-time code without signing the presenter app in.
-    link = ("%s/?code=%s" % (base, code)) if base and u.role == "admin" else None
-    lines = ["Sign in to NetBridge.", ""]
-    if link:
-        lines += ["Open this link to sign in:", link, ""]
-    lines += [("Or paste this code into the NetBridge app:" if link else "Open NetBridge on your Mac or Windows PC and paste this code:"), "", "    %s" % code, "",
-              "It expires in 15 minutes. If you didn't ask to sign in, ignore this email."]
+    if result.rowcount != 1:
+        return generic
+    lines = ["Sign in to NetBridge.", "", "Your six-digit sign-in code:", "", "    %s" % code, "",
+             "Enter this code with %s in NetBridge on your Mac or Windows PC." % email,
+             "Fleet admins can also enter it on their Fleet sign-in page.",
+             "It is valid for up to 15 minutes, can be used once, and allows five attempts.",
+             "Requesting another code does not extend this time or reset the attempts.",
+             "If you didn't ask to sign in, ignore this email."]
     # Send in a background thread so the response time does NOT reveal whether the
     # account exists (a synchronous SMTP round-trip only on the found path would be
     # a timing side channel that defeats the no-enumeration guarantee above).
     def _send():
         try:
-            ok = notifier.send_mail(email, "Your NetBridge sign-in link", "\n".join(lines))
+            ok = notifier.send_mail(email, "Your NetBridge sign-in code", "\n".join(lines))
             if not ok:
                 print("[signin] SMTP not configured — no link sent; the code is still valid "
                       "and can be pasted into the app", flush=True)
@@ -2118,13 +2134,35 @@ def redeem_magic_link(body: dict, db: Session = Depends(get_db)):
     import secrets as _s
     from .models import User, utcnow
     code = str(body.get("code") or "").strip()
-    u = db.scalar(select(User).where(User.login_hash == auth.hash_token(code))) if code else None
+    email = str(body.get("email") or "").strip().lower()
+    numeric = bool(re.fullmatch(r"[0-9]{6}", code))
     now = utcnow()
-    exp = u.login_expires if u else None
-    if exp is not None and exp.tzinfo is None:
-        exp = exp.replace(tzinfo=dt.timezone.utc)
-    if not u or exp is None or exp < now:
-        raise HTTPException(401, "invalid or expired code")
+    if numeric:
+        if not email:
+            raise HTTPException(401, "Enter your email and request a new sign-in code.")
+        # Reserve a guess atomically before testing it. Concurrent requests cannot
+        # exceed five attempts, and retries survive server restarts.
+        attempted = db.execute(update(User).where(User.email == email,
+            User.login_hash.is_not(None), User.login_expires > now, User.login_attempts < 5
+        ).execution_options(synchronize_session=False).values(login_attempts=User.login_attempts + 1))
+        db.commit()
+        if attempted.rowcount != 1:
+            raise HTTPException(401, "Invalid or expired code. Check your email and code. After five attempts, wait 15 minutes before requesting another code.")
+        digest = "otp$" + auth.hash_token(email + ":" + code)
+        u = db.scalar(select(User).where(User.email == email, User.login_hash == digest))
+    else:
+        # Previously issued high-entropy links remain redeemable until expiry.
+        digest = auth.hash_token(code)
+        u = db.scalar(select(User).where(User.login_hash == digest)) if code else None
+    if not u:
+        raise HTTPException(401, "Invalid or expired code. Check your email and code. After five attempts, wait 15 minutes before requesting another code.")
+    # Consume in the same transaction as issuing the session, including concurrent
+    # submissions of a correct code. Only one caller can win.
+    consumed = db.execute(update(User).where(User.id == u.id, User.login_hash == digest,
+        User.login_expires > now).execution_options(synchronize_session=False).values(login_hash=None, login_expires=None))
+    if consumed.rowcount != 1:
+        db.rollback()
+        raise HTTPException(401, "Invalid or expired code.")
     token = _s.token_urlsafe(32)
     # Record this sign-in as its own session rather than overwriting the user's only
     # token — signing in here must not sign you out of the panel or the presenter app.
