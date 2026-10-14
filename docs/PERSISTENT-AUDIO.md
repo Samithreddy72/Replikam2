@@ -70,8 +70,10 @@ cancellation must never cost meeting audio.
 - If anything prevents the in-process microphone from starting (no plugin, device not found by
   GStreamer, canceller error), the session uses the existing ffmpeg/CoreAudio leg and
   `/api/state` → `echo_cancel.note` says why. Losing echo cancellation never costs the voice.
-- The official Windows GStreamer ships `webrtcdsp`; Homebrew's does not, so macOS builds from
-  Homebrew report it unavailable.
+- The official Windows GStreamer ships `webrtcdsp`; Homebrew's does not, so the macOS release
+  build compiles that one plugin against Homebrew's GStreamer
+  (`app/netbridge-desktop/scripts/build-mac-webrtcdsp.sh`). Persistent-audio release builds fail
+  their smoke test unless the packaged engine reports both elements (`NB_REQUIRE_ECHO_CANCEL`).
 - `tests/test-echo-gst.py` measures cancellation end to end: speech-like meeting audio plays, and
   the microphone hears exactly what the speaker played, about 15 dB quieter and 40 ms later. What
   leaves for the bridge must be at least 10 dB quieter than through a microphone without a

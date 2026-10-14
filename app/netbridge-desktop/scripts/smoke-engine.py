@@ -47,3 +47,8 @@ if os.environ.get('NB_PERSISTENT_AUDIO')=='1':
  print((r.stdout+r.stderr).strip())
  if r.returncode!=0:raise SystemExit('FAIL: bundled persistent receiver did not start')
  print('PASS: bundled persistent receiver loads GI/GStreamer and receives RTP in-process.')
+ if os.environ.get('NB_REQUIRE_ECHO_CANCEL')=='1':
+  # Without these the app quietly falls back to a microphone the room hears itself through.
+  echo=json.loads(r.stdout.strip().splitlines()[-1])['echo_cancellation']
+  if not all(echo.values()):raise SystemExit('FAIL: bundle lacks echo cancellation: %s'%echo)
+  print('PASS: bundle includes webrtcdsp/webrtcechoprobe for presenter echo cancellation.')

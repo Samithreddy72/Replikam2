@@ -38,6 +38,9 @@ env:
   # package.mjs adds the Gst binding to the frozen engine; smoke-engine.py then requires
   # the packaged persistent receiver to pass its self-test.
   NB_PERSISTENT_AUDIO: ${{ inputs.persistent_audio && '1' || '0' }}
+  # Such a build must also carry echo cancellation on both platforms (smoke-engine.py fails
+  # it otherwise): without it a presenter on speakers makes the room hear itself again.
+  NB_REQUIRE_ECHO_CANCEL: ${{ inputs.persistent_audio && '1' || '0' }}
 
 jobs:
   tests:
@@ -142,6 +145,9 @@ jobs:
           # Homebrew's own Pythons, and gstreamer installs its gi overrides only into
           # python@3.14 (the one setup-audio-dev.sh uses locally).
           brew install pygobject3
+          # Homebrew's GStreamer has no webrtcdsp; build that one plugin so the presenter's
+          # echo cancellation runs on macOS too (see the script).
+          bash app/netbridge-desktop/scripts/build-mac-webrtcdsp.sh "$RUNNER_TEMP/webrtcdsp"
           base="$(brew --prefix python@3.14)/bin/python3.14"
           "$base" -m venv --system-site-packages "$RUNNER_TEMP/gi-python"
           gi_python="$RUNNER_TEMP/gi-python/bin/python"
