@@ -38,18 +38,11 @@ function run(bin, args) {
 const resources = path.join(root, "src-tauri/resources");
 const work = path.join(root, "src-tauri/target/engine-build");
 fs.mkdirSync(resources, { recursive: true });
-const args = [
-  "-m",
-  "PyInstaller",
-  "--noconfirm",
-  "--clean",
+const build = ["--noconfirm", "--clean", "--distpath", resources, "--workpath", work];
+const spec = [
   "--onedir",
   "--name",
   "NetBridgeEngine",
-  "--distpath",
-  resources,
-  "--workpath",
-  work,
   "--specpath",
   work,
   "--paths",
@@ -63,10 +56,27 @@ const args = [
   "--hidden-import",
   "audio_diagnostics",
 ];
-if (process.env.NB_PERSISTENT_AUDIO === "1")
-  args.push("--hidden-import", "gi.repository.Gst");
-args.push(path.join(source, "desktop_engine.py"));
-run(python, args);
+if (process.env.NB_PERSISTENT_AUDIO === "1") {
+  // PyInstaller's Gst hook otherwise copies EVERY plugin installed on the build machine
+  // (hundreds on Windows, including gstpython, which links its own Python DLL). The plugin
+  // filter exists only as a .spec option, so write the spec, then add the filter to it.
+  spec.push("--hidden-import", "gi.repository.Gst",
+    "--runtime-hook", path.join(root, "scripts/pyi-rth-gi-dlls.py"),
+    path.join(source, "desktop_engine.py"));
+  run(python, ["-c", "from PyInstaller.utils.cliutils.makespec import run; run()", ...spec]);
+  const specFile = path.join(work, "NetBridgeEngine.spec");
+  const plugins = ["coreelements", "udp", "rtpmanager", "rtp", "opus", "audioconvert",
+    "audioresample", "audiofx", "volume", "autodetect", "webrtcdsp",
+    ...(windows ? ["wasapi2", "wasapi", "directsound"] : ["osxaudio"])];
+  const hooksconfig = { gstreamer: { include_plugins: plugins }, gi: { languages: ["en_US"] } };
+  const text = fs.readFileSync(specFile, "utf8");
+  if (!text.includes("hooksconfig={},"))
+    throw new Error(`Cannot restrict GStreamer plugins: no hooksconfig in ${specFile}`);
+  fs.writeFileSync(specFile, text.replace("hooksconfig={},", `hooksconfig=${JSON.stringify(hooksconfig)},`));
+  run(python, ["-m", "PyInstaller", ...build, specFile]);
+} else {
+  run(python, ["-m", "PyInstaller", ...build, ...spec, path.join(source, "desktop_engine.py")]);
+}
 const engine = path.join(resources, "NetBridgeEngine");
 // Copy verbatim AFTER freezing: PyInstaller must not rewrite the Go mesh helper.
 fs.cpSync(media, path.join(engine, "runtime"), { recursive: true });

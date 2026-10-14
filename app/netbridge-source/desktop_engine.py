@@ -18,6 +18,15 @@ if __name__ == '__main__' and len(sys.argv) == 3 and sys.argv[1] == '--netbridge
     guard_main(int(sys.argv[2]))
     raise SystemExit(0)
 
+if __name__ == '__main__' and len(sys.argv) == 2 and sys.argv[1] == '--netbridge-audio-selftest':
+    # Release CI only: does the bundled persistent receiver load? No network, no devices.
+    import tempfile
+    from audio_engine import selftest
+    with tempfile.TemporaryDirectory() as directory:
+        result = selftest(directory)
+    print(json.dumps(result))
+    raise SystemExit(0 if result['ok'] else 1)
+
 import source_app as engine
 
 TOKEN = os.environ.get('NB_DESKTOP_TOKEN', '')

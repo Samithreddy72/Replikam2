@@ -8,6 +8,7 @@ import struct
 import sys
 import tempfile
 import time
+import types
 import unittest
 import wave
 from unittest.mock import patch
@@ -15,7 +16,7 @@ from unittest.mock import patch
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'app/netbridge-source'))
 from audio_diagnostics import PacketTiming, Capture
-from audio_engine import AudioEngine, gst_runtime, mac_microphone_argv
+from audio_engine import AudioEngine, gst_runtime, mac_microphone_argv, selftest
 
 
 def port():
@@ -51,6 +52,15 @@ class Diagnostics(unittest.TestCase):
                 self.assertEqual((size,plen),(len(data)+8,len(data)))
                 self.assertEqual(f.read(plen),data)
             with wave.open(str(c.directory/'decoded.wav')) as w:self.assertEqual(w.getnframes(),480)
+
+
+class Runtime(unittest.TestCase):
+    def test_gi_without_gst_typelib_falls_back_like_missing_gi(self):
+        gi=types.ModuleType('gi')
+        def require_version(namespace,version):raise ValueError('Namespace %s not available'%namespace)
+        gi.require_version=require_version
+        with patch.dict(sys.modules,{'gi':gi}):
+            with self.assertRaises(ImportError):gst_runtime()
 
 
 class Media(unittest.TestCase):
@@ -135,6 +145,13 @@ class Media(unittest.TestCase):
         self.assertGreaterEqual(snapshot['jitter']['num-lost'],1,snapshot)
         self.assertGreaterEqual(snapshot['jitter']['num-late'],1,snapshot)
         self.assertEqual(snapshot['packets']['sequence_gap_observations'],1)
+
+    def test_packaged_selftest_receives_rtp_in_process(self):
+        result=selftest(self.tmp.name)
+        self.assertTrue(result['ok'],result)
+        self.assertGreater(result['packets'],0)
+        self.assertIsNone(result['failure'])
+        self.assertIn('webrtcdsp',result['echo_cancellation'])
 
     def test_shutdown_releases_port_and_closes_capture(self):
         self.engine.start_capture(60)

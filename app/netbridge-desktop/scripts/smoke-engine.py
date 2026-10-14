@@ -39,3 +39,11 @@ with tempfile.TemporaryDirectory() as profile:
    for stream in (p.stdin,p.stdout):
     if stream and not stream.closed:stream.close()
  print('PASS: bundled engine starts, rejects old/absent credentials, quits, restarts on the same port/profile, and exits when its owner disappears.')
+if os.environ.get('NB_PERSISTENT_AUDIO')=='1':
+ # A build that bundles GI must prove it loads; otherwise every presenter silently gets the legacy player.
+ # Hide the build machine's own GStreamer: a DLL missing from the bundle must fail here, not load from the runner.
+ path=os.pathsep.join(p for p in os.environ.get('PATH','').split(os.pathsep) if 'gstreamer' not in p.lower())
+ r=subprocess.run([str(binary),'--netbridge-audio-selftest'],env={**os.environ,'NB_MEDIA_DIR':str(root/'runtime'),'PATH':path},capture_output=True,text=True,timeout=120)
+ print((r.stdout+r.stderr).strip())
+ if r.returncode!=0:raise SystemExit('FAIL: bundled persistent receiver did not start')
+ print('PASS: bundled persistent receiver loads GI/GStreamer and receives RTP in-process.')

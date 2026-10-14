@@ -19,6 +19,10 @@ on:
         description: 'Generate signed updater artifacts (requires updater secrets/variables)'
         type: boolean
         default: false
+      persistent_audio:
+        description: 'Bundle PyGObject for the persistent audio receiver (NB_PERSISTENT_AUDIO)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -31,6 +35,9 @@ env:
   PYTHONUTF8: '1'
   PYTHONIOENCODING: utf-8
   STUDIO_VERSION: ${{ inputs.version }}
+  # package.mjs adds the Gst binding to the frozen engine; smoke-engine.py then requires
+  # the packaged persistent receiver to pass its self-test.
+  NB_PERSISTENT_AUDIO: ${{ inputs.persistent_audio && '1' || '0' }}
 
 jobs:
   tests:
@@ -127,6 +134,20 @@ jobs:
         run: |
           test "$(uname -m)" = arm64
           brew install gstreamer
+      - name: Install GI Python for the persistent receiver on macOS
+        if: runner.os == 'macOS' && inputs.persistent_audio
+        run: |
+          # PyInstaller must run under a Python that imports gi against this same Homebrew
+          # GStreamer; the setup-python interpreter has no GI. pygobject3 installs gi for
+          # Homebrew's own Pythons, and gstreamer installs its gi overrides only into
+          # python@3.14 (the one setup-audio-dev.sh uses locally).
+          brew install pygobject3
+          base="$(brew --prefix python@3.14)/bin/python3.14"
+          "$base" -m venv --system-site-packages "$RUNNER_TEMP/gi-python"
+          gi_python="$RUNNER_TEMP/gi-python/bin/python"
+          "$gi_python" -m pip install pyinstaller==6.22.3 certifi -r app/netbridge-source/requirements-build.txt
+          "$gi_python" -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst; Gst.init(None); print(Gst.version_string()); print("webrtcdsp:", Gst.ElementFactory.find("webrtcdsp") is not None)'
+          echo "NB_PYTHON=$gi_python" >> "$GITHUB_ENV"
       # Keyed by the pinned checksum, so a cached installer is the exact file verified below.
       - name: Restore verified GStreamer installer
         if: runner.os == 'Windows'
@@ -166,6 +187,44 @@ jobs:
           if (!(Test-Path "$root\bin\gst-launch-1.0.exe")) { throw 'GStreamer installation missing' }
           "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root" >> $env:GITHUB_ENV
           "$root\bin" >> $env:GITHUB_PATH
+      - name: Find the Python that GStreamer's PyGObject was built for
+        if: runner.os == 'Windows' && inputs.persistent_audio
+        id: windows_gi
+        shell: pwsh
+        run: |
+          # The MSI ships gi\_gi.cp3XY-win_amd64.pyd for ONE CPython version, not 3.11, and
+          # PyGObject has no Windows wheels. Freeze the engine with exactly that version.
+          $site = 'C:\gstreamer\1.0\msvc_x86_64\lib\site-packages'
+          $pyd = Get-ChildItem -Path (Join-Path $site 'gi') -Filter '_gi.cp3*-win_amd64.pyd' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $pyd) {
+            Get-ChildItem -Path $site -Depth 1 -ErrorAction SilentlyContinue | Out-String | Write-Host
+            throw "No PyGObject extension under $site"
+          }
+          $minor = [regex]::Match($pyd.Name, '^_gi\.cp3(\d+)-').Groups[1].Value
+          Write-Host "GStreamer PyGObject: $($pyd.Name) -> Python 3.$minor"
+          "python=3.$minor" >> $env:GITHUB_OUTPUT
+          "site=$site" >> $env:GITHUB_OUTPUT
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows' && inputs.persistent_audio
+        id: windows_gi_python
+        with:
+          python-version: ${{ steps.windows_gi.outputs.python }}
+          update-environment: false
+      - name: Install GI Python for the persistent receiver on Windows
+        if: runner.os == 'Windows' && inputs.persistent_audio
+        env:
+          BASE_PYTHON: ${{ steps.windows_gi_python.outputs.python-path }}
+          GI_SITE: ${{ steps.windows_gi.outputs.site }}
+        run: |
+          "$BASE_PYTHON" -m venv "$RUNNER_TEMP/gi-python"
+          gi_python="$RUNNER_TEMP/gi-python/Scripts/python.exe"
+          "$gi_python" -m pip install pyinstaller==6.22.3 certifi -r app/netbridge-source/requirements-build.txt
+          # Put GStreamer's own PyGObject/gst-python on this venv's path. Imported from its
+          # install location, the MSI's patched gi finds C:\gstreamer\...\bin by itself; the
+          # frozen engine gets PYGI_DLL_DIRS from scripts/pyi-rth-gi-dlls.py instead.
+          "$gi_python" -c 'import os, site, pathlib; pathlib.Path(site.getsitepackages()[-1], "gstreamer-gi.pth").write_text(os.environ["GI_SITE"] + "\n")'
+          "$gi_python" -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst; Gst.init(None); print(Gst.version_string()); print("webrtcdsp:", Gst.ElementFactory.find("webrtcdsp") is not None)'
+          echo "NB_PYTHON=$gi_python" >> "$GITHUB_ENV"
       - name: Prepare and verify native media runtime
         run: python app/netbridge-desktop/scripts/prepare-runtime.py "$NB_MEDIA_DIR"
       - name: Test Studio

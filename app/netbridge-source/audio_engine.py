@@ -16,10 +16,57 @@ from audio_diagnostics import Capture, PacketTiming
 
 def gst_runtime():
     import gi
-    gi.require_version('Gst', '1.0')
+    try:
+        gi.require_version('Gst', '1.0')
+    except ValueError as exc:
+        # GI without the Gst typelib is as unusable as no GI at all: report it the same
+        # way, so the caller falls back to the legacy player instead of playing nothing.
+        raise ImportError(str(exc)) from exc
     from gi.repository import Gst
     Gst.init(None)
     return Gst
+
+
+def selftest(directory, timeout=5.0):
+    """Prove the persistent receiver works in THIS process: GI, typelibs and plugins.
+
+    A frozen app cannot tell from outside whether its bundled GI runtime loads, so the
+    release build runs this through the packaged engine. fakesink keeps it off the sound
+    device (CI runners have none); the real sinks are only checked to exist.
+    """
+    import socket
+    import struct
+    Gst = gst_runtime()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+    settings = dict(gain=1., jitter_ms=80, dynamics=False, sink_sync=True, fec=True, plc=False)
+    engine = AudioEngine(port, settings, directory, sink='fakesink')
+    try:
+        deadline = time.monotonic() + timeout
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+            seq = 0
+            while engine.snapshot()['packets']['packets'] == 0 and time.monotonic() < deadline:
+                # RTP/Opus PT 97 carrying a valid 20 ms Opus silence frame.
+                sender.sendto(struct.pack('!BBHII', 0x80, 97, seq, seq * 960, 1) + b'\xf8\xff\xfe',
+                              ('127.0.0.1', port))
+                seq += 1
+                time.sleep(.02)
+        snapshot = engine.snapshot()
+    finally:
+        engine.terminate()
+    def present(*names):
+        return {name: Gst.ElementFactory.find(name) is not None for name in names}
+    sinks = present('autoaudiosink', *{
+        'darwin': ('osxaudiosink',), 'win32': ('wasapi2sink', 'wasapisink', 'directsoundsink'),
+    }.get(os.sys.platform, ('pulsesink', 'alsasink')))
+    packets = snapshot['packets']['packets']
+    ok = packets > 0 and snapshot['running'] and sinks['autoaudiosink'] and any(
+        found for name, found in sinks.items() if name != 'autoaudiosink')
+    return {'ok': bool(ok), 'gstreamer': Gst.version_string(), 'packets': packets,
+            'failure': snapshot['failure'], 'sinks': sinks,
+            # Not required yet; reported so echo-cancellation work knows what ships.
+            'echo_cancellation': present('webrtcdsp', 'webrtcechoprobe')}
 
 
 def mac_microphone_uid(name):
