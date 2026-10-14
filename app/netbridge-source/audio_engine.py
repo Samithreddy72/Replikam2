@@ -27,7 +27,7 @@ def gst_runtime():
     return Gst
 
 
-# ECHO CANCELLATION, AND WHY IT HAS TO HAPPEN IN THIS PROCESS.
+# ECHO CANCELLATION, AND WHY THE MICROPHONE JOINS THE RETURN PLAYER'S PIPELINE.
 #
 # Meeting audio plays out of the presenter's speakers, their microphone hears it, and it goes
 # back to the meeting: remote participants hear themselves. The meeting app's own canceller
@@ -35,10 +35,19 @@ def gst_runtime():
 # buffers (roughly half a second, and never the same half second). Only this machine sees
 # both signals a few milliseconds apart: what the speakers play and what the mic captures.
 #
-# GStreamer's webrtcdsp subtracts what a webrtcechoprobe recorded, but it finds that probe by
-# name in a process-wide list - so the return player and the microphone must share a process.
-# That is why the microphone moves in here when echo cancellation is available.
+# webrtcdsp cancels against what a webrtcechoprobe recorded, and asks it for "the far-end audio
+# played N ms after this capture" by comparing RUNNING TIMES. A running time only means the same
+# thing inside one pipeline (one clock, one base time); webrtcdsp's documentation says "the probe
+# can only be used within the same top level GstPipeline". 0.0.104 ran the microphone as its own
+# pipeline: the probe was found (lookup is by name, process-wide), the canceller ran, and it was
+# handed silence or misaligned audio - so on a Mac with speakers the room still heard itself.
+# So the microphone runs INSIDE the return player's pipeline (AudioEngine.attach_microphone),
+# as an independent branch whose failures never take meeting audio down. Without meeting audio
+# playing here there is nothing to cancel, and the microphone runs alone (MicEngine).
 ECHO_PROBE = 'netbridge_echo_probe'
+# The reference branch (AudioEngine._reference). Missing any of them must cost only echo
+# cancellation, never meeting audio: an unparseable receiver plays nothing at all.
+REFERENCE_ELEMENTS = ('webrtcechoprobe', 'tee', 'appsink', 'appsrc')
 
 
 def echo_cancellation_available():
@@ -46,7 +55,7 @@ def echo_cancellation_available():
         Gst = gst_runtime()
     except Exception:
         return False
-    return all(Gst.ElementFactory.find(name) for name in ('webrtcdsp', 'webrtcechoprobe'))
+    return all(Gst.ElementFactory.find(name) for name in ('webrtcdsp',) + REFERENCE_ELEMENTS)
 
 
 def microphone_source(Gst, name):
@@ -79,57 +88,71 @@ def microphone_source(Gst, name):
     return element
 
 
-class MicEngine:
-    """Presenter microphone -> Opus/RTP to the bridge, in-process, optionally echo-cancelled.
+def microphone_bin(Gst, name, host, port, gain_db=0, echo_probe=None, source=None):
+    """Capture -> [echo cancellation] -> exactly what the CoreAudio leg sent (48 kHz stereo
+    Opus, 64 kbit/s, 20 ms frames, PT 97), so the bridge cannot tell the difference.
 
-    Sends exactly what the CoreAudio leg sent (48 kHz stereo Opus, 64 kbit/s, 20 ms frames,
-    PT 97), so the bridge cannot tell the difference. Same process-like surface as
-    AudioEngine, so the session supervises it as just another leg.
+    Mono into the canceller (a microphone is mono anyway, and it halves the work). Gain control
+    and noise suppression stay off: the bridge owns voice AGC. `source` lets tests substitute a
+    generator for the physical device. Returns a self-contained bin ending in udpsink 'sender'.
+    """
+    aec = ('webrtcdsp name=aec probe=%s echo-cancel=true gain-control=false '
+           'noise-suppression=false ! ' % echo_probe) if echo_probe else ''
+    gain = 'volume volume=%s ! ' % (10 ** (float(gain_db) / 20)) if gain_db else ''
+    chain = ('audioconvert ! audioresample ! audio/x-raw,format=S16LE,rate=48000,channels=1 ! '
+             + aec + 'audioconvert ! audio/x-raw,channels=2 ! ' + gain +
+             'audioconvert ! audio/x-raw,format=S16LE ! '
+             'opusenc bitrate=64000 audio-type=voice frame-size=20 inband-fec=true '
+             'packet-loss-percentage=5 ! rtpopuspay pt=97 ! '
+             'udpsink name=sender host=%s port=%d sync=false async=false' % (json.dumps(host), int(port)))
+    if source is not None:
+        return Gst.parse_bin_from_description(source + ' ! ' + chain, False)
+    branch = Gst.Bin.new(None)
+    microphone = microphone_source(Gst, name)
+    rest = Gst.parse_bin_from_description(chain, True)
+    branch.add(microphone)
+    branch.add(rest)
+    if not microphone.link(rest):
+        raise RuntimeError('Microphone could not be linked: %s' % name)
+    return branch
+
+
+def _first_packet(Gst, branch):
+    """An Event set when the microphone's first RTP packet reaches its udpsink."""
+    sending = threading.Event()
+    def seen(pad, info):
+        sending.set()
+        return Gst.PadProbeReturn.REMOVE
+    branch.get_by_name('sender').get_static_pad('sink').add_probe(Gst.PadProbeType.BUFFER, seen)
+    return sending
+
+
+class MicEngine:
+    """The microphone on its own: used when no meeting audio plays here (nothing to cancel).
+
+    Same process-like surface as AudioEngine, so the session supervises it as just another leg.
     """
     in_process = True
     stdin = None
     pid = None
+    echo_probe = None
 
-    def __init__(self, name, host, port, gain_db=0, echo_probe=None, source=None):
+    def __init__(self, name, host, port, gain_db=0, source=None):
         self.Gst = Gst = gst_runtime()
         self.rc = None
         self.failure = None
         self.stopped = threading.Event()
         self.created = time.monotonic()
         self.name = name
-        self.echo_probe = echo_probe
-        # Mono into the canceller (a microphone is mono anyway, and it halves the work).
-        # Gain control and noise suppression stay off: the bridge owns voice AGC.
-        aec = ('webrtcdsp name=aec probe=%s echo-cancel=true gain-control=false '
-               'noise-suppression=false ! ' % echo_probe) if echo_probe else ''
-        gain = 'volume volume=%s ! ' % (10 ** (float(gain_db) / 20)) if gain_db else ''
-        chain = ('audioconvert ! audioresample ! audio/x-raw,format=S16LE,rate=48000,channels=1 ! '
-                 + aec + 'audioconvert ! audio/x-raw,channels=2 ! ' + gain +
-                 'audioconvert ! audio/x-raw,format=S16LE ! '
-                 'opusenc bitrate=64000 audio-type=voice frame-size=20 inband-fec=true '
-                 'packet-loss-percentage=5 ! rtpopuspay pt=97 ! '
-                 'udpsink name=sender host=%s port=%d sync=false async=false' % (json.dumps(host), int(port)))
-        if source is not None:      # tests substitute a generator for the physical device
-            self.pipeline = Gst.parse_launch(source + ' ! ' + chain)
-        else:
-            self.pipeline = Gst.Pipeline.new('netbridge_presenter_microphone')
-            microphone = microphone_source(Gst, name)
-            rest = Gst.parse_bin_from_description(chain, True)
-            self.pipeline.add(microphone)
-            self.pipeline.add(rest)
-            if not microphone.link(rest):
-                raise RuntimeError('Microphone could not be linked: %s' % name)
+        self.pipeline = Gst.Pipeline.new('netbridge_presenter_microphone')
+        branch = microphone_bin(Gst, name, host, port, gain_db, source=source)
+        self.pipeline.add(branch)
         bus = self.pipeline.get_bus()
-        sending = threading.Event()
-        def first_packet(pad, info):
-            sending.set()
-            return Gst.PadProbeReturn.REMOVE
-        self.pipeline.get_by_name('sender').get_static_pad('sink').add_probe(
-            Gst.PadProbeType.BUFFER, first_packet)
-        # Fail HERE, not later on the bus: a busy device, or a canceller that cannot find its
-        # probe, must raise to the caller so it can fall back to the subprocess microphone.
-        # An error after PLAYING would only reach the supervisor, which retries the same
-        # failure until it gives up - a session with no voice. So wait for audio to leave.
+        sending = _first_packet(Gst, branch)
+        # Fail HERE, not later on the bus: a busy device must raise to the caller so it can
+        # fall back to the subprocess microphone. An error after PLAYING would only reach the
+        # supervisor, which retries the same failure until it gives up - a session with no
+        # voice. So wait for audio to leave (or an error).
         failed = self.pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE
         deadline = time.monotonic() + 3
         while not failed and not sending.is_set() and time.monotonic() < deadline:
@@ -162,7 +185,7 @@ class MicEngine:
 
     def snapshot(self):
         return {'backend': 'gstreamer-inprocess', 'running': self.rc is None,
-                'device': self.name, 'echo_cancellation': bool(self.echo_probe),
+                'device': self.name, 'echo_cancellation': False,
                 'uptime_s': round(time.monotonic() - self.created, 2), 'failure': self.failure}
 
     def poll(self):
@@ -179,6 +202,87 @@ class MicEngine:
         if not self.stopped.wait(timeout):
             raise subprocess.TimeoutExpired('microphone', timeout)
         self.thread.join(timeout=5)
+        return self.rc
+
+
+class AttachedMicrophone:
+    """The microphone as a branch of the return player's pipeline, echo-cancelled against its
+    probe in the same running time. Created by AudioEngine.attach_microphone.
+
+    Its errors are routed here by the engine's bus thread and remove only this branch; meeting
+    audio keeps playing. If the engine stops, this reports dead and the supervisor restarts it.
+    """
+    in_process = True
+    stdin = None
+    pid = None
+
+    def __init__(self, engine, name, host, port, gain_db=0, source=None):
+        Gst = engine.Gst
+        self.engine = engine
+        self.name = name
+        self.echo_probe = engine.echo_probe
+        self.rc = None
+        self.failure = None
+        self.stopped = threading.Event()
+        self.created = time.monotonic()
+        self._detached = False
+        self._lock = threading.Lock()
+        self.branch = microphone_bin(Gst, name, host, port, gain_db, self.echo_probe, source)
+        sending = _first_packet(Gst, self.branch)
+        engine._adopt_microphone(self)
+        if not self.branch.sync_state_with_parent():
+            self._fail('Microphone could not start')
+        # Same contract as MicEngine: fail to the caller, not later to the supervisor.
+        deadline = time.monotonic() + 3
+        while not sending.is_set() and not self.stopped.is_set() and time.monotonic() < deadline:
+            time.sleep(.02)
+        if self.stopped.is_set():
+            self.detach()
+            raise RuntimeError(self.failure or 'Microphone could not start')
+
+    def _fail(self, message):
+        # Called from the engine's bus thread (or from __init__): mark first, then tear down.
+        if self.rc is None:
+            self.failure = message
+            self.rc = 1
+        self.stopped.set()
+
+    def _ended(self, message):
+        """The engine stopped, taking this branch with it."""
+        if self.rc is None:
+            self.failure = message
+            self.rc = 1
+        self._detached = True
+        self.stopped.set()
+
+    def detach(self):
+        with self._lock:     # the session and the engine's bus thread may both get here
+            if self._detached:
+                return
+            self._detached = True
+        Gst = self.engine.Gst
+        # NULL releases the capture device and the canceller's claim on the probe.
+        self.branch.set_state(Gst.State.NULL)
+        self.engine._release_microphone(self)
+
+    def snapshot(self):
+        return {'backend': 'gstreamer-inprocess', 'running': self.rc is None,
+                'device': self.name, 'echo_cancellation': True,
+                'uptime_s': round(time.monotonic() - self.created, 2), 'failure': self.failure}
+
+    def poll(self):
+        return self.rc
+
+    def terminate(self):
+        self.rc = 0 if self.rc is None else self.rc
+        self.stopped.set()
+        self.detach()
+
+    kill = terminate
+
+    def wait(self, timeout=None):
+        if not self.stopped.wait(timeout):
+            raise subprocess.TimeoutExpired('microphone', timeout)
         return self.rc
 
 
@@ -310,7 +414,7 @@ class AudioEngine:
     stdin = None
     pid = None  # in-process engine, not an independently killable process
 
-    def __init__(self, port, settings, directory, sink=None, echo_probe=True):
+    def __init__(self, port, settings, directory, sink=None, echo_probe=True, device_caps=None):
         self.Gst = Gst = gst_runtime()
         self.lock = threading.RLock()
         self.stopped = threading.Event()
@@ -326,14 +430,30 @@ class AudioEngine:
         self.settings = {}
         self.failure = None
         self.last_pcm = None
+        self.microphone = None      # an AttachedMicrophone branch, while echo-cancelling
         sink = sink or ('osxaudiosink' if os.sys.platform == 'darwin' else 'autoaudiosink')
         if sink not in ('osxaudiosink', 'autoaudiosink', 'fakesink'):
             raise ValueError('unsupported output sink')
-        # The echo canceller's reference: what actually reaches the speaker, recorded as
-        # late as possible. A passthrough; without webrtcdsp bundled it is simply left out.
-        self.echo_probe = ECHO_PROBE if echo_probe and Gst.ElementFactory.find('webrtcechoprobe') else None
-        reference = (('! audio/x-raw,format=S16LE,layout=interleaved ', 'webrtcechoprobe name=%s ! ' % ECHO_PROBE)
-                     if self.echo_probe else ('', ''))
+        # The echo canceller's reference: the audio about to reach the speaker, on a side branch
+        # of its own (see _reference). Left out when webrtcdsp is not bundled.
+        self.echo_probe = ECHO_PROBE if echo_probe and all(
+            Gst.ElementFactory.find(name) for name in REFERENCE_ELEMENTS) else None
+        # Tests emulate a device that accepts only its own format (fakesink takes anything).
+        device = 'capsfilter caps="%s" ! ' % device_caps if device_caps else ''
+        output = sink + (' buffer-time=200000 latency-time=20000' if sink == 'osxaudiosink' else '')
+        if self.echo_probe:
+            # S16LE for the probe; the output branch converts AGAIN, because the device decides
+            # its format: Windows' WASAPI takes only its mix format (usually 32-bit float), and
+            # 0.0.104 forced S16LE into it - no meeting audio at all on Windows.
+            split = ('! audio/x-raw,format=S16LE,layout=interleaved ! tee name=far ',
+                     'audioconvert ! audioresample ! ')
+            reference = (
+                ' far. ! queue leaky=downstream max-size-time=200000000 max-size-bytes=0 max-size-buffers=0 '
+                '! appsink name=reference_tap sync=false emit-signals=true max-buffers=50 drop=true '
+                'appsrc name=reference_feed is-live=true format=time min-latency=0 '
+                '! webrtcechoprobe name=%s ! fakesink sync=false async=false' % ECHO_PROBE)
+        else:
+            split, reference = ('', ''), ''
         pipeline = (
             'udpsrc name=source address=127.0.0.1 port=%d buffer-size=1048576 '
             'caps="application/x-rtp,media=audio,encoding-name=OPUS,payload=97,clock-rate=48000" '
@@ -346,10 +466,8 @@ class AudioEngine:
             '! volume name=gain '
             '! audiodynamic name=limiter mode=compressor characteristics=hard-knee threshold=0.97 '
             '! audioconvert %s! queue name=output_queue max-size-time=100000000 '
-            'max-size-bytes=0 max-size-buffers=0 ! %s%s name=output sync=true'
-            % (int(port), reference[0], reference[1], sink))
-        if sink == 'osxaudiosink':
-            pipeline += ' buffer-time=200000 latency-time=20000'
+            'max-size-bytes=0 max-size-buffers=0 ! %s%s%s name=output sync=true%s'
+            % (int(port), split[0], split[1], device, output, reference))
         self.pipeline = Gst.parse_launch(pipeline)
         self.elements = {n: self.pipeline.get_by_name(n) for n in
                          ('source','jitter','decoder','pcm','compressor','limiter','gain','output_queue','output')}
@@ -359,6 +477,10 @@ class AudioEngine:
         self.pipeline.connect('deep-element-added', lambda _bin, _sub, element: self._own.add(element))
         self.elements['source'].get_static_pad('src').add_probe(Gst.PadProbeType.BUFFER, self._packet)
         self.elements['pcm'].get_static_pad('src').add_probe(Gst.PadProbeType.BUFFER, self._pcm)
+        if self.echo_probe:
+            self._reference_feed = self.pipeline.get_by_name('reference_feed')
+            self._reference_caps = None
+            self.pipeline.get_by_name('reference_tap').connect('new-sample', self._reference)
         try:
             self.tune(settings)
             if self.pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
@@ -371,6 +493,29 @@ class AudioEngine:
         Gst.debug_set_default_threshold(Gst.DebugLevel.WARNING)
         self.thread = threading.Thread(target=self._bus, name='audio-events', daemon=True)
         self.thread.start()
+
+    def _reference(self, tap):
+        """Hand the echo probe what is about to play, behind a zero-latency live source.
+
+        For a capture stamped t, webrtcechoprobe returns the far-end audio that plays at
+        t + delay, where delay is the latency UPSTREAM of the probe. Inline before the sink
+        that is the jitter buffer and Opus FEC - 200 ms or more - but meeting audio reaches
+        that point only a few ms before it plays, so audio for t + 200 ms is never there yet
+        and the probe hands the canceller silence: it cancelled nothing (measured on GStreamer
+        1.20 and 1.28 alike). Behind appsrc min-latency=0 the delay is 0: the probe hands
+        what plays at t, which is always buffered, and the canceller finds the remaining
+        speaker-to-microphone delay itself. Buffers keep their timestamps, and the probe still
+        gets the pipeline's real playout latency, so the alignment is exact.
+        """
+        sample = tap.emit('pull-sample')
+        if sample is None:
+            return self.Gst.FlowReturn.EOS
+        caps = sample.get_caps()
+        if caps is not None and caps != self._reference_caps:
+            self._reference_feed.set_property('caps', caps)
+            self._reference_caps = caps
+        self._reference_feed.emit('push-buffer', sample.get_buffer())
+        return self.Gst.FlowReturn.OK
 
     def event(self, kind, detail):
         with self.lock:
@@ -411,10 +556,52 @@ class AudioEngine:
             self.elements['jitter'].set_property('do-lost', bool(s['fec'] or s['plc']))
             self.elements['decoder'].set_property('use-inband-fec', bool(s['fec']))
             self.elements['decoder'].set_property('plc', bool(s['plc']))
-            self.elements['output'].set_property('sync', bool(s['sink_sync']))
+            self.elements['output'].set_property('sync', self._output_sync(s))
             self.settings = s
             self.updates += 1
             self.pipeline.recalculate_latency()
+
+    def _output_sync(self, settings):
+        # The probe learns when audio really plays from the LATENCY event, which only a sink
+        # that syncs to the clock sends. Unsynced (the Windows default), it feeds the canceller
+        # silence. So while a canceller is attached the output syncs, whatever the setting.
+        return bool(settings.get('sink_sync')) or self.microphone is not None
+
+    def attach_microphone(self, name, host, port, gain_db=0, source=None):
+        """Run the microphone as a branch of THIS pipeline, echo-cancelled against its probe
+        (see ECHO_PROBE for why it must be the same pipeline). Raises if it cannot start."""
+        if not self.echo_probe:
+            raise RuntimeError('echo cancellation is not available in this player')
+        if self.rc is not None:
+            raise RuntimeError('the meeting audio player has stopped')
+        current = self.microphone
+        if current is not None and current.poll() is None:
+            raise RuntimeError('a microphone is already attached')
+        return AttachedMicrophone(self, name, host, port, gain_db, source)
+
+    def _adopt_microphone(self, microphone):
+        self.microphone = microphone
+        self.pipeline.add(microphone.branch)
+        self.elements['output'].set_property('sync', self._output_sync(self.settings))
+        self.pipeline.recalculate_latency()
+
+    def _release_microphone(self, microphone):
+        try:
+            self.pipeline.remove(microphone.branch)
+        except Exception:
+            pass
+        if self.microphone is microphone:
+            self.microphone = None
+            if self.rc is None:
+                self.elements['output'].set_property('sync', self._output_sync(self.settings))
+                self.pipeline.recalculate_latency()
+
+    def _from_microphone(self, msg):
+        microphone = self.microphone
+        source = msg.src
+        # The bus thread holds no GStreamer locks, so walking ancestors is safe here.
+        return (microphone is not None and source is not None
+                and (source == microphone.branch or source.has_as_ancestor(microphone.branch)))
 
     def _packet(self, pad, info):
         buffer = info.get_buffer()
@@ -447,6 +634,14 @@ class AudioEngine:
                 continue
             if msg.type in (Gst.MessageType.ERROR, Gst.MessageType.WARNING):
                 error, debug = msg.parse_error() if msg.type == Gst.MessageType.ERROR else msg.parse_warning()
+                if msg.type == Gst.MessageType.ERROR and self._from_microphone(msg):
+                    # Only the microphone branch failed: drop it, keep meeting audio playing.
+                    # The supervisor sees the voice leg dead and starts it again.
+                    microphone = self.microphone
+                    self.event('microphone-error', '%s: %s' % (msg.src.get_name(), error.message))
+                    microphone._fail(error.message)
+                    microphone.detach()
+                    continue
                 self.event('error' if msg.type == Gst.MessageType.ERROR else 'warning',
                            '%s: %s (%s)' % (msg.src.get_name(), error.message, debug or ''))
                 if msg.type == Gst.MessageType.ERROR:
@@ -469,7 +664,11 @@ class AudioEngine:
                 self.rc = 1
                 self.failure = 'unexpected end of return stream'
                 self.stopped.set()
+        microphone = self.microphone
+        if microphone is not None:
+            microphone._ended('the meeting audio player stopped')
         self.pipeline.set_state(Gst.State.NULL)
+        self.microphone = None
         Gst.debug_remove_log_function(self._log_hook)
         if self.capture:
             self.capture.stop()
@@ -492,6 +691,7 @@ class AudioEngine:
                     'pcm_discontinuities': self.discontinuities, 'qos_messages': self.qos,
                     'last_pcm_age_ms': (time.monotonic()-self.last_pcm)*1000 if self.last_pcm else None,
                     'failure': self.failure, 'events': list(self.events),
+                    'microphone': self.microphone.snapshot() if self.microphone else None,
                     'capture': self.capture.snapshot() if self.capture else None}
 
     def start_capture(self, seconds):

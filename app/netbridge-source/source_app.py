@@ -983,21 +983,25 @@ class Session:
                                 stderr=lf, env=getattr(self, "leg_env", {}).get(name))
 
     def _open_inprocess_voice(self):
-        """Start the in-process microphone, cancelling the echo of the return player when one
-        is playing here. Raises if it cannot start; callers fall back to the subprocess leg,
-        because a presenter without echo cancellation beats a presenter without a voice."""
+        """Start the in-process microphone. While meeting audio plays here it runs INSIDE the
+        return player's pipeline, echo-cancelled (see audio_engine.ECHO_PROBE); otherwise
+        there is nothing to cancel and it runs on its own. Raises if it cannot start; callers
+        fall back to the subprocess leg, because a presenter without echo cancellation beats
+        a presenter without a voice."""
         from audio_engine import MicEngine
         mic_name, host, gain = self.voice_capture
-        probe = (getattr(self.return_proc, "echo_probe", None)
-                 if self.echo_cancel and self.return_on and self.return_proc is not None
-                 and self.return_proc.poll() is None else None)
+        player = self.return_proc
+        cancel = (self.echo_cancel and self.return_on and player is not None
+                  and player.poll() is None and getattr(player, "echo_probe", None)
+                  and hasattr(player, "attach_microphone"))
         try:
-            proc = MicEngine(mic_name, host, RTP_VOICE, gain, echo_probe=probe)
+            proc = (player.attach_microphone(mic_name, host, RTP_VOICE, gain) if cancel
+                    else MicEngine(mic_name, host, RTP_VOICE, gain))
         except Exception as exc:
             self.voice_note = "Echo cancellation unavailable: %s" % exc
             print("[mic] %s; using the standard microphone" % self.voice_note, flush=True)
             raise
-        self.voice_note = None if probe or not self.echo_cancel else (
+        self.voice_note = None if cancel or not self.echo_cancel else (
             "Echo cancellation is idle: meeting audio is not playing on this computer")
         if IS_MAC:
             # The supervisor compares this to spot a USB re-attach (see StreamGuard).
@@ -1356,6 +1360,11 @@ class Session:
                 self.procs.remove(self.return_proc)
             self.return_proc = None
             self.return_player = "off"
+            # An echo-cancelled microphone lived inside that player and stopped with it: keep
+            # the presenter audible on a microphone of its own (nothing left to cancel).
+            if (getattr(self, "voice_backend", None) == "gstreamer-inprocess"
+                    and self.wanted and not self.voice_muted):
+                self.respawn_leg("voice")
         return self.return_on
 
     def _start_return(self, port):

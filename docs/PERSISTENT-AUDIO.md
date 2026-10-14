@@ -37,21 +37,46 @@ itself. The meeting app cannot cancel it: it returns half a second later and nev
 delay. The presenter machine is the only place both signals are a few milliseconds apart.
 
 When the bundled GStreamer has `webrtcdsp`/`webrtcechoprobe` and the persistent receiver is in
-use, the receiver records what reaches the speaker (`webrtcechoprobe`, just before the sink) and
-the microphone moves into the same process (`audio_engine.MicEngine`): capture, `webrtcdsp`
-echo cancellation, then the same Opus/RTP the subprocess leg sent. webrtcdsp finds its probe
-only within one process, which is why the microphone moves. Gain control and noise suppression
-stay off; the bridge owns voice AGC.
+use, the microphone runs **as a branch of the receiver's own pipeline**
+(`AudioEngine.attach_microphone`): capture, `webrtcdsp` echo cancellation, then the same
+Opus/RTP the subprocess leg sent. Gain control and noise suppression stay off; the bridge owns
+voice AGC. Three things had to be true for it to cancel anything, and each was found by measuring:
+
+- **One pipeline.** webrtcdsp asks the probe for far-end audio by comparing running times, which
+  only line up inside one pipeline (GStreamer: "the probe can only be used within the same top
+  level GstPipeline"). 0.0.104 ran the microphone as its own pipeline and cancelled nothing.
+- **Probe delay 0.** For a capture stamped t, the probe returns what plays at t + *delay*, where
+  delay is the latency *upstream of the probe*. Inline before the sink that is the jitter buffer
+  plus Opus FEC (200 ms+), but audio reaches that point only a few ms before it plays, so the
+  probe handed the canceller silence - zero reduction on GStreamer 1.20 and 1.28 alike. The probe
+  now sits on a side branch behind `appsrc min-latency=0` (`AudioEngine._reference`, fed from a
+  tee just before the output): delay 0, so it hands what plays at t, which is always buffered.
+  Buffers keep their timestamps and the probe still gets the real playout latency.
+- **The output syncs to the clock** while a canceller is attached (whatever `sink_sync` says):
+  the probe learns the playout latency from the LATENCY event, which an unsynced sink never sends.
+
+The output branch converts again after the tee, because WASAPI accepts only its own mix format
+(0.0.104 fed it S16LE and played nothing on Windows). If `tee`/`appsrc`/`appsink`/
+`webrtcechoprobe` are missing the receiver simply runs without a reference branch: losing echo
+cancellation must never cost meeting audio.
 
 - On by default; `POST /api/echo-cancel` with `{"enabled": bool}` switches it, remembered across
   sessions (Studio: Meeting audio → Echo cancellation). `NB_ECHO_CANCEL=0` sets the default off.
-- Switching restarts only the microphone leg. Restarting meeting audio restarts the microphone
-  too, so the canceller follows the new probe.
+- Switching restarts only the microphone leg. Without meeting audio playing here (switched off,
+  or not started) the microphone runs on its own (`MicEngine`): there is nothing to cancel.
+  Turning meeting audio off or restarting it moves the microphone accordingly.
+- A microphone error removes only its branch; meeting audio keeps playing and the supervisor
+  restarts the microphone. If the receiver stops, its microphone reports stopped too.
 - If anything prevents the in-process microphone from starting (no plugin, device not found by
   GStreamer, canceller error), the session uses the existing ffmpeg/CoreAudio leg and
   `/api/state` → `echo_cancel.note` says why. Losing echo cancellation never costs the voice.
 - The official Windows GStreamer ships `webrtcdsp`; Homebrew's does not, so macOS builds from
-  Homebrew report it unavailable. Only listening on real hardware can judge the result.
+  Homebrew report it unavailable.
+- `tests/test-echo-gst.py` measures cancellation end to end: speech-like meeting audio plays, and
+  the microphone hears exactly what the speaker played, about 15 dB quieter and 40 ms later. What
+  leaves for the bridge must be at least 10 dB quieter than through a microphone without a
+  canceller. Steady noise is no proxy for a meeting (AEC3 deliberately backs off on stationary
+  echo). Only listening on real hardware can judge the result in a room.
 
 ## Local API and UI
 

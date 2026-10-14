@@ -66,7 +66,7 @@ if (process.env.NB_PERSISTENT_AUDIO === "1") {
   run(python, ["-c", "from PyInstaller.utils.cliutils.makespec import run; run()", ...spec]);
   const specFile = path.join(work, "NetBridgeEngine.spec");
   const plugins = ["coreelements", "udp", "rtpmanager", "rtp", "opus", "audioconvert",
-    "audioresample", "audiofx", "volume", "autodetect", "webrtcdsp",
+    "audioresample", "audiofx", "volume", "autodetect", "webrtcdsp", "app",
     ...(windows ? ["wasapi2", "wasapi", "directsound"] : ["osxaudio"])];
   const hooksconfig = { gstreamer: { include_plugins: plugins }, gi: { languages: ["en_US"] } };
   const text = fs.readFileSync(specFile, "utf8");
