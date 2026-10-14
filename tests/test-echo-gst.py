@@ -4,6 +4,7 @@
 Runs in the linux-media suite: Ubuntu noble disabled webrtcdsp in its package, jammy ships it.
 A skip here blocks the suite on purpose; the job installs the element it needs.
 """
+import faulthandler
 import pathlib
 import socket
 import struct
@@ -95,4 +96,6 @@ class EchoCancellation(unittest.TestCase):
 
 
 if __name__ == '__main__':
+    # A hang inside GStreamer must show WHERE (every thread's stack), not just a job timeout.
+    faulthandler.dump_traceback_later(90, exit=True)
     unittest.main()
