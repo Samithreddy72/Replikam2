@@ -20,7 +20,7 @@ thing that turns J3's six steps into software:
 Deliberately NOT in this app: any admin capability. It signs in as a viewer, so the
 control plane refuses fleet mutations even if the UI asked for them.
 """
-import hashlib, json, os, pathlib, re, shutil, socket, subprocess, sys, threading, time
+import hashlib, json, locale, os, pathlib, re, shutil, socket, subprocess, sys, threading, time
 import urllib.request, urllib.error, urllib.parse
 import math
 
@@ -72,9 +72,13 @@ APP_VERSION = "1.5.1"
 # --------------------------------------------------------------------------- state
 def load_state():
     try:
-        return json.loads(STATE_FILE.read_text())
+        st = json.loads(STATE_FILE.read_text())
     except Exception:
         return {}
+    for key in ("camera_name", "mic_name"):
+        if isinstance(st, dict) and key in st:
+            st[key] = repair_device_name(st[key])
+    return st
 
 
 def save_state(d):
@@ -537,8 +541,14 @@ def av_devices(timeout=25):
     args = ([ff, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]
             if IS_WIN else
             [ff, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""])
+    # ffmpeg prints device names as UTF-8 on both platforms. Plain text=True decodes with the
+    # Windows ANSI code page instead, so "Microphone Array (Intel® Smart Sound ...)" - the
+    # stock mic on many HP laptops - became "IntelÂ®". The setup check still passed (the
+    # mangled name matched itself), video worked (camera names are ASCII), and ffmpeg was
+    # asked to open a microphone that does not exist: no voice, on some machines only.
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(args, capture_output=True, encoding="utf-8", errors="replace",
+                           timeout=timeout)
     except Exception as e:
         return {"video": [], "audio": [], "error": str(e)}
     err = p.stderr or ""
@@ -567,6 +577,25 @@ def av_devices(timeout=25):
                 except Exception:
                     pass
     return {"video": video, "audio": audio}
+
+
+# What av_devices() used to decode ffmpeg's UTF-8 output with (see the comment there).
+LEGACY_DEVICE_ENCODING = locale.getpreferredencoding(False)
+
+
+def repair_device_name(name):
+    """Undo the old mis-decoding in a name saved by an earlier build ("IntelÂ®" -> "Intel®").
+
+    Without this, a presenter with several microphones would be silently moved to the first
+    one after updating, because the saved name no longer matches any listed device. A name
+    that was decoded correctly does not survive the round trip and is returned unchanged.
+    """
+    if not isinstance(name, str):
+        return name
+    try:
+        return name.encode(LEGACY_DEVICE_ENCODING).decode("utf-8")
+    except (UnicodeError, LookupError):
+        return name
 
 
 def resolve_by_name(devs, saved_name, fallback_index="0"):
