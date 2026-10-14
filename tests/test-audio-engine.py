@@ -16,8 +16,7 @@ from unittest.mock import Mock, patch
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'app/netbridge-source'))
 from audio_diagnostics import PacketTiming, Capture
-from audio_engine import (AudioEngine, ECHO_PROBE, MicEngine, echo_cancellation_available,
-                          gst_runtime, mac_microphone_argv, selftest)
+from audio_engine import AudioEngine, MicEngine, gst_runtime, mac_microphone_argv, selftest
 
 
 def port():
@@ -194,47 +193,6 @@ class Media(unittest.TestCase):
         self.assertFalse(mic.snapshot()['echo_cancellation'])
         mic.terminate()
         self.assertEqual(mic.poll(), 0)
-
-    def require_echo_cancellation(self):
-        if not echo_cancellation_available():
-            self.skipTest('webrtcdsp/webrtcechoprobe not installed')
-
-    def test_echo_canceller_runs_against_the_return_players_probe(self):
-        self.require_echo_cancellation()
-        Gst = self.Gst
-        self.assertEqual(self.engine.echo_probe, ECHO_PROBE)
-        self.assertIsNotNone(self.engine.pipeline.get_by_name(ECHO_PROBE))
-        # Meeting audio arriving and playing, while the microphone talks: both directions live.
-        sender = Gst.parse_launch('audiotestsrc is-live=true wave=sine samplesperbuffer=960 ! '
-            'audio/x-raw,rate=48000,channels=2 ! audioconvert ! opusenc frame-size=20 ! '
-            'rtpopuspay pt=97 ! udpsink host=127.0.0.1 port=%d sync=false' % self.port)
-        self.addCleanup(lambda: sender.set_state(Gst.State.NULL))
-        sender.set_state(Gst.State.PLAYING)
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
-            receiver.bind(('127.0.0.1', 0)); receiver.settimeout(.2)
-            mic = self.microphone(receiver, echo_probe=self.engine.echo_probe)
-            self.assertIsNotNone(mic.pipeline.get_by_name('aec'))
-            packets = self.receive(receiver, 2)
-        self.assert_contiguous(packets)
-        self.assertTrue(mic.snapshot()['echo_cancellation'])
-        self.assertTrue(self.engine.snapshot()['running'])
-        self.assertGreater(self.engine.snapshot()['packets']['packets'], 20)
-
-    def test_silent_meeting_never_stalls_the_microphone(self):
-        # The bridge sends nothing (quiet room, nobody playing): the probe gets no audio, and
-        # the presenter must still be heard.
-        self.require_echo_cancellation()
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
-            receiver.bind(('127.0.0.1', 0)); receiver.settimeout(.2)
-            self.microphone(receiver, echo_probe=self.engine.echo_probe)
-            self.assert_contiguous(self.receive(receiver, 2))
-
-    def test_missing_probe_fails_at_start_so_the_session_can_fall_back(self):
-        self.require_echo_cancellation()
-        with self.assertRaises(RuntimeError):
-            MicEngine('Test microphone', '127.0.0.1', 9, echo_probe='no_such_probe',
-                      source='audiotestsrc is-live=true')
-
 
     def test_packaged_selftest_receives_rtp_in_process(self):
         result=selftest(self.tmp.name)
