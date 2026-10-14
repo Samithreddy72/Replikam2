@@ -11,7 +11,7 @@ import time
 import types
 import unittest
 import wave
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'app/netbridge-source'))
@@ -145,6 +145,21 @@ class Media(unittest.TestCase):
         self.assertGreaterEqual(snapshot['jitter']['num-lost'],1,snapshot)
         self.assertGreaterEqual(snapshot['jitter']['num-late'],1,snapshot)
         self.assertEqual(snapshot['packets']['sequence_gap_observations'],1)
+
+    def test_log_hook_never_calls_back_into_gstreamer(self):
+        # The hook runs while GStreamer may hold a lock on the logging object; asking
+        # GStreamer anything about that object (get_parent) deadlocked the engine.
+        Gst = self.Gst
+        stranger = Mock()
+        stranger.get_parent.side_effect = AssertionError('called back into GStreamer')
+        message = Mock()
+        message.get.return_value = 'clock skew'
+        before = len(self.engine.events)
+        self.engine._debug_log(None, Gst.DebugLevel.WARNING, '', '', 0, stranger, message)
+        self.assertEqual(len(self.engine.events), before)
+        stranger.get_parent.assert_not_called()
+        self.engine._debug_log(None, Gst.DebugLevel.WARNING, '', '', 0, self.engine.elements['output'], message)
+        self.assertEqual(self.engine.events[-1]['detail'], 'clock skew')
 
     def test_packaged_selftest_receives_rtp_in_process(self):
         result=selftest(self.tmp.name)

@@ -191,6 +191,10 @@ class AudioEngine:
         self.pipeline = Gst.parse_launch(pipeline)
         self.elements = {n: self.pipeline.get_by_name(n) for n in
                          ('source','jitter','decoder','pcm','compressor','limiter','gain','output_queue','output')}
+        # What _debug_log may attribute to this pipeline, known without asking GStreamer:
+        # these elements, and any added later (autoaudiosink adds its real sink at start).
+        self._own = {self.pipeline, *self.elements.values()}
+        self.pipeline.connect('deep-element-added', lambda _bin, _sub, element: self._own.add(element))
         self.elements['source'].get_static_pad('src').add_probe(Gst.PadProbeType.BUFFER, self._packet)
         self.elements['pcm'].get_static_pad('src').add_probe(Gst.PadProbeType.BUFFER, self._pcm)
         try:
@@ -213,19 +217,21 @@ class AudioEngine:
 
     def _debug_log(self, category, level, file, function, line, obj, message, *unused):
         # Clock skew warnings are debug messages, not necessarily bus WARNINGs.
+        #
+        # This hook is process-wide and runs in whichever thread logged - often while
+        # GStreamer holds a lock on `obj`. It must never call back into GStreamer: walking
+        # get_parent() here took that same lock and froze the whole engine (a failing
+        # microphone pipeline did it every time). Match against objects collected up front,
+        # and append without self.lock (deque.append is atomic), so it never waits on anyone.
         if level > self.Gst.DebugLevel.WARNING or obj is None:
             return
         try:
-            current = obj
-            for _ in range(8):
-                if current == self.pipeline:
-                    self.event('gst-warning', message.get())
-                    return
-                current = current.get_parent()
-                if current is None:
-                    return
-        except (AttributeError, TypeError):
+            if obj not in self._own:
+                return
+        except TypeError:
             return
+        self.events.append({'at_s': round(time.monotonic()-self.created, 3),
+                            'kind': 'gst-warning', 'detail': str(message.get())[:1200]})
 
     def tune(self, settings):
         with self.lock:
