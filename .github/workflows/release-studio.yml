@@ -127,6 +127,13 @@ jobs:
         run: |
           test "$(uname -m)" = arm64
           brew install gstreamer
+      # Keyed by the pinned checksum, so a cached installer is the exact file verified below.
+      - name: Restore verified GStreamer installer
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/gstreamer-installer
+          key: gstreamer-msvc-x86_64-1.26.11-31cbc21fa0950b5c1e79c80959b2799805cb05a7a35953a13a9f790776137605
       - name: Install verified GStreamer on Windows
         if: runner.os == 'Windows'
         shell: pwsh
@@ -134,9 +141,24 @@ jobs:
           GST_VERSION: '1.26.11'
           GST_SHA256: '31cbc21fa0950b5c1e79c80959b2799805cb05a7a35953a13a9f790776137605'
         run: |
-          $msi = Join-Path $env:RUNNER_TEMP 'gstreamer.msi'
+          $msi = Join-Path $env:RUNNER_TEMP 'gstreamer-installer\gstreamer.msi'
+          New-Item -ItemType Directory -Force -Path (Split-Path $msi) | Out-Null
           $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc/gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.msi"
-          Invoke-WebRequest -Uri $url -OutFile $msi
+          # gstreamer.freedesktop.org keeps ending this ~300 MB download early ("The response
+          # ended prematurely"; 0.1.13 failed twice in a row), and starting over fails the same
+          # way. curl resumes the partial file instead. The pinned checksum still decides trust.
+          if (!(Test-Path $msi) -or (Get-FileHash $msi -Algorithm SHA256).Hash -ne $env:GST_SHA256) {
+            # Anything already here is not this run's partial download: never resume onto it.
+            Remove-Item $msi -ErrorAction SilentlyContinue
+            foreach ($attempt in 1..12) {
+              curl.exe --fail --location --silent --show-error --continue-at - --output $msi $url
+              if ($LASTEXITCODE -eq 0) { break }
+              if ($attempt -eq 12) { throw "GStreamer download failed after $attempt attempts" }
+              $size = if (Test-Path $msi) { (Get-Item $msi).Length } else { 0 }
+              Write-Host "GStreamer download stopped (curl exit $LASTEXITCODE, $size bytes so far); resuming"
+              Start-Sleep -Seconds 10
+            }
+          }
           if ((Get-FileHash $msi -Algorithm SHA256).Hash -ne $env:GST_SHA256) { throw 'GStreamer checksum mismatch' }
           $install = Start-Process msiexec.exe -Wait -PassThru -ArgumentList "/i `"$msi`" /qn /norestart ADDLOCAL=ALL INSTALLDIR=C:\gstreamer"
           if ($install.ExitCode -notin @(0, 3010)) { throw "GStreamer installation failed: $($install.ExitCode)" }
