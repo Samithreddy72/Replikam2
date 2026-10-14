@@ -655,6 +655,29 @@ def _locked(fn):
     return wrap
 
 
+def _voice_follows_coreaudio(session):
+    """Mac voice legs that must re-resolve their CoreAudio device after a USB change."""
+    backend = getattr(session, "voice_backend", None)
+    return backend == "gstreamer-coreaudio" or (IS_MAC and backend == "gstreamer-inprocess")
+
+
+_ECHO_CANCELLATION = None
+
+
+def _echo_cancellation_available():
+    """Bundled GStreamer has webrtcdsp, and the in-process return player is in use."""
+    global _ECHO_CANCELLATION
+    if os.environ.get("NB_AUDIO_ENGINE", "persistent") == "legacy":
+        return False
+    if _ECHO_CANCELLATION is None:
+        try:
+            from audio_engine import echo_cancellation_available
+            _ECHO_CANCELLATION = echo_cancellation_available()
+        except Exception:
+            _ECHO_CANCELLATION = False
+    return _ECHO_CANCELLATION
+
+
 class WaitingMicrophone:
     """A stopped voice leg awaiting its explicitly selected USB input."""
     pid = None
@@ -786,6 +809,10 @@ class Session:
         # are the warble that was chased for a week.
         self.return_fec = os.environ.get("NB_RETURN_FEC", "1") != "0"
         self.return_plc = os.environ.get("NB_RETURN_PLC", "0") != "0"
+        # Echo cancellation (see audio_engine.ECHO_PROBE): on unless the presenter turned it
+        # off. It only engages where the bundled GStreamer has webrtcdsp.
+        self.echo_cancel = os.environ.get("NB_ECHO_CANCEL", "1") != "0"
+        self.voice_note = None
 
     # Did the OPERATOR ask for this session, or is it merely still twitching?
     #
@@ -890,6 +917,15 @@ class Session:
             except ImportError as exc:
                 print("[mic] CoreAudio capture unavailable; using legacy FFmpeg: %s" % exc)
 
+        # Where echo cancellation can run, the microphone joins the return player's process
+        # (webrtcdsp finds its probe only in-process). The subprocess leg built above stays
+        # as the fallback, and is used if the in-process microphone cannot start.
+        self.voice_fallback_backend = self.voice_backend
+        self.voice_note = None
+        inprocess_voice = self.echo_cancel and _echo_cancellation_available()
+        if inprocess_voice:
+            self.voice_backend = "gstreamer-inprocess"
+
         # Keep each leg's stderr so a dead leg can be explained instead of guessed at.
         self.logs = []
         self.voice_proc = None
@@ -904,8 +940,8 @@ class Session:
         logdir = _logdir()
         try:
             for name, argv in (("video", v), ("voice", a)):
-                if name == "voice" and self.voice_muted:
-                    continue
+                if name == "voice" and (self.voice_muted or inprocess_voice):
+                    continue        # in-process voice starts after the return player below
                 if name == "voice" and not argv:
                     self.voice_proc = WaitingMicrophone()
                     self.leg_proc[name] = self.voice_proc
@@ -926,9 +962,77 @@ class Session:
                     self.voice_proc = proc          # so the app can report the voice leg is alive
 
             self.return_player = self._start_return(return_port) if self.return_on else "off"
+            if inprocess_voice and not self.voice_muted:
+                # After the return player: the canceller needs its probe to already exist.
+                try:
+                    proc = self._open_inprocess_voice()
+                except Exception:
+                    self.voice_backend = self.voice_fallback_backend
+                    proc = self._spawn_leg("voice", a) if a else WaitingMicrophone()
+                if not isinstance(proc, WaitingMicrophone):
+                    self.procs.append(proc)
+                self.leg_proc["voice"] = self.voice_proc = proc
         except Exception as exc:
             self.stop()
             raise RuntimeError("Media could not start. Camera and microphone have been released; try again.") from exc
+
+    def _spawn_leg(self, name, argv):
+        lf = open(os.path.join(str(_logdir()), "netbridge-source-%s.log" % name), "w")
+        self.logs.append(lf)
+        return subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                stderr=lf, env=getattr(self, "leg_env", {}).get(name))
+
+    def _open_inprocess_voice(self):
+        """Start the in-process microphone, cancelling the echo of the return player when one
+        is playing here. Raises if it cannot start; callers fall back to the subprocess leg,
+        because a presenter without echo cancellation beats a presenter without a voice."""
+        from audio_engine import MicEngine
+        mic_name, host, gain = self.voice_capture
+        probe = (getattr(self.return_proc, "echo_probe", None)
+                 if self.echo_cancel and self.return_on and self.return_proc is not None
+                 and self.return_proc.poll() is None else None)
+        try:
+            proc = MicEngine(mic_name, host, RTP_VOICE, gain, echo_probe=probe)
+        except Exception as exc:
+            self.voice_note = "Echo cancellation unavailable: %s" % exc
+            print("[mic] %s; using the standard microphone" % self.voice_note, flush=True)
+            raise
+        self.voice_note = None if probe or not self.echo_cancel else (
+            "Echo cancellation is idle: meeting audio is not playing on this computer")
+        if IS_MAC:
+            # The supervisor compares this to spot a USB re-attach (see StreamGuard).
+            try:
+                from audio_engine import mac_microphone_device_id
+                self.voice_device_id = mac_microphone_device_id(mic_name or "System default microphone")
+            except Exception:
+                self.voice_device_id = None
+        return proc
+
+    def voice_follows_coreaudio(self):
+        return _voice_follows_coreaudio(self)
+
+    @_locked
+    def set_echo_cancel(self, enabled):
+        """The presenter's switch, for listening tests and as an escape hatch. Restarts only
+        the microphone leg; video and meeting audio never notice."""
+        self.echo_cancel = bool(enabled)
+        if getattr(self, "wanted", False) and not self.voice_muted:
+            backend = getattr(self, "voice_backend", None)
+            if self.echo_cancel and backend != "gstreamer-inprocess" and _echo_cancellation_available():
+                self.voice_fallback_backend = backend
+                self.voice_backend = "gstreamer-inprocess"
+                self.respawn_leg("voice")
+            elif backend == "gstreamer-inprocess":
+                self.respawn_leg("voice")
+        return self.echo_status()
+
+    def echo_status(self):
+        proc = getattr(self, "voice_proc", None)
+        return {"enabled": bool(getattr(self, "echo_cancel", False)),
+                "available": _echo_cancellation_available(),
+                "active": (getattr(proc, "in_process", False) is True
+                           and bool(getattr(proc, "echo_probe", None)) and proc.poll() is None),
+                "note": getattr(self, "voice_note", None)}
 
 
     @_locked
@@ -979,7 +1083,7 @@ class Session:
     @_locked
     def suspend_voice(self):
         """Stop a disconnected CoreAudio input without touching video/return."""
-        if not self.wanted or getattr(self, "voice_backend", None) != "gstreamer-coreaudio":
+        if not self.wanted or not self.voice_follows_coreaudio():
             return
         proc = self.leg_proc.get("voice")
         if proc is not None and proc.poll() is None:
@@ -1005,7 +1109,8 @@ class Session:
         if name == "voice" and getattr(self, "voice_muted", False):
             return False
         argv = (getattr(self, "leg_argv", {}) or {}).get(name)
-        if not argv and not (name == "voice" and getattr(self, "voice_backend", None) == "gstreamer-coreaudio"):
+        if not argv and not (name == "voice" and getattr(self, "voice_backend", None)
+                             in ("gstreamer-coreaudio", "gstreamer-inprocess")):
             return False
         selected = getattr(self, "capture_names", {}).get(name)
         if selected and (name == "video" or IS_WIN) and not (name == "video" and self.video_muted):
@@ -1031,6 +1136,18 @@ class Session:
             _quit(old, timeout=3.0)
             if old in self.procs:
                 self.procs.remove(old)
+        if name == "voice" and getattr(self, "voice_backend", None) == "gstreamer-inprocess":
+            try:
+                proc = self._open_inprocess_voice()
+            except Exception:
+                # Keep the presenter audible: continue below with the subprocess leg.
+                self.voice_backend = getattr(self, "voice_fallback_backend", "ffmpeg")
+                if not argv and self.voice_backend != "gstreamer-coreaudio":
+                    return False
+            else:
+                self.procs.append(proc)
+                self.leg_proc[name] = self.voice_proc = proc
+                return proc.poll() is None
         try:
             if name == "voice" and getattr(self, "voice_backend", None) == "gstreamer-coreaudio":
                 # USB reattachment can change the CoreAudio unique ID. Resolve
@@ -1226,6 +1343,10 @@ class Session:
             return False
         if self.return_on and not running:
             self.return_player = self._start_return(self.return_port)
+            # A new player brings a new echo probe. The microphone's canceller still holds
+            # the old, now silent one, so restart just the microphone against this one.
+            if getattr(self, "voice_backend", None) == "gstreamer-inprocess" and self.voice_sending():
+                self.respawn_leg("voice")
         elif not self.return_on and running:
             try:
                 self.return_proc.terminate()
@@ -1436,8 +1557,8 @@ def _quit(p, timeout=4.0):
     """
     if p is None:
         return
-    if hasattr(p, "snapshot") and hasattr(p, "tune"):
-        p.terminate()
+    if getattr(p, "in_process", False) is True or (hasattr(p, "snapshot") and hasattr(p, "tune")):
+        p.terminate()       # an in-process pipeline: NULL state releases its device
         return
     try:
         if p.poll() is not None:
@@ -2227,7 +2348,7 @@ class StreamGuard:
         for name, alive in (SESSION.leg_status() or {}).items():
             if name == "voice" and getattr(SESSION, "voice_muted", False) is True:
                 continue
-            if name == "voice" and getattr(SESSION, "voice_backend", None) == "gstreamer-coreaudio":
+            if name == "voice" and _voice_follows_coreaudio(SESSION):
                 from audio_engine import mac_microphone_device_id
                 try:
                     current_device = mac_microphone_device_id(SESSION.voice_capture[0])
@@ -2911,6 +3032,7 @@ class Handler(BaseHTTPRequestHandler):
                 "last_mic": st.get("mic_name") or ("System default microphone" if IS_MAC else None),
                 "system_default_mic": IS_MAC,
                 "voice_backend": getattr(SESSION, "voice_backend", None),
+                "echo_cancel": SESSION.echo_status(),
                 "live": SESSION.live,
                 "wanted": SESSION.wanted,
                 "interruption": getattr(SESSION, "interruption", None),
@@ -3216,6 +3338,8 @@ class Handler(BaseHTTPRequestHandler):
                                    "need_pin": True, "reason": reason}, 401)
             if not isinstance(peer, dict) or peer.get("ok") is not True:
                 return self._send({"_error":"The bridge did not confirm your session. Media has not been started; try again."},502)
+            if isinstance(st.get("echo_cancel"), bool):
+                SESSION.echo_cancel = st["echo_cancel"]
             try:
                 SESSION.start(route["media_host"], vidx, aidx, return_port=port, mic_name=aname,
                               video_muted=video_muted, voice_muted=voice_muted)
@@ -3303,6 +3427,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send({"ok": True, "video_muted": muted})
             except RuntimeError as exc:
                 return self._send({"error": str(exc)}, 409)
+
+        if self.path == "/api/echo-cancel":
+            if not isinstance(b.get("enabled"), bool):
+                return self._send({"error": "enabled must be a boolean"}, 400)
+            # Remembered across sessions: a presenter who turned it off for a reason should
+            # not have it silently come back at the next go-live.
+            st["echo_cancel"] = b["enabled"]
+            save_state(st)
+            return self._send({"ok": True, **SESSION.set_echo_cancel(b["enabled"])})
 
         if self.path == "/api/microphone":
             if not isinstance(b.get("muted"), bool):

@@ -18,7 +18,7 @@ struct Engine {
 fn allowed(method: &str, path: &str) -> bool {
     match method {
         "GET" => matches!(path, "/api/state" | "/api/devices" | "/api/bridges" | "/api/audio/diagnostics" | "/api/desktop/status"),
-        "POST" => matches!(path, "/api/support-report" | "/api/preflight" | "/api/signin-request" | "/api/signin-redeem" | "/api/signout" | "/api/remember" | "/api/unlock" | "/api/golive" | "/api/stop" | "/api/return" | "/api/return-tuning" | "/api/audio/recover" | "/api/microphone" | "/api/video" | "/api/desktop/configure"),
+        "POST" => matches!(path, "/api/support-report" | "/api/preflight" | "/api/signin-request" | "/api/signin-redeem" | "/api/signout" | "/api/remember" | "/api/unlock" | "/api/golive" | "/api/stop" | "/api/return" | "/api/return-tuning" | "/api/audio/recover" | "/api/microphone" | "/api/echo-cancel" | "/api/video" | "/api/desktop/configure"),
         _ => false,
     }
 }

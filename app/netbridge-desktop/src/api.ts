@@ -26,6 +26,7 @@ export type EngineState = {
   voice_muted?: boolean;
   video_muted?: boolean;
   return_on: boolean;
+  echo_cancel?: { enabled: boolean; available: boolean; active: boolean; note?: string | null };
   return_gain: string;
   return_jitter_ms: string;
   version: string;

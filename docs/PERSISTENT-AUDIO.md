@@ -30,6 +30,29 @@ Release builds can opt in with `build.py --persistent-audio` using the same GI/G
 installation. This adds PyInstaller's Gst binding hook. Packaged Mac/Windows artifacts still
 require platform-specific launch/device testing; source integration tests are not a substitute.
 
+## Echo cancellation
+
+With meeting audio on the presenter's speakers, their microphone picks it up and the room hears
+itself. The meeting app cannot cancel it: it returns half a second later and never at a steady
+delay. The presenter machine is the only place both signals are a few milliseconds apart.
+
+When the bundled GStreamer has `webrtcdsp`/`webrtcechoprobe` and the persistent receiver is in
+use, the receiver records what reaches the speaker (`webrtcechoprobe`, just before the sink) and
+the microphone moves into the same process (`audio_engine.MicEngine`): capture, `webrtcdsp`
+echo cancellation, then the same Opus/RTP the subprocess leg sent. webrtcdsp finds its probe
+only within one process, which is why the microphone moves. Gain control and noise suppression
+stay off; the bridge owns voice AGC.
+
+- On by default; `POST /api/echo-cancel` with `{"enabled": bool}` switches it, remembered across
+  sessions (Studio: Meeting audio → Echo cancellation). `NB_ECHO_CANCEL=0` sets the default off.
+- Switching restarts only the microphone leg. Restarting meeting audio restarts the microphone
+  too, so the canceller follows the new probe.
+- If anything prevents the in-process microphone from starting (no plugin, device not found by
+  GStreamer, canceller error), the session uses the existing ffmpeg/CoreAudio leg and
+  `/api/state` → `echo_cancel.note` says why. Losing echo cancellation never costs the voice.
+- The official Windows GStreamer ships `webrtcdsp`; Homebrew's does not, so macOS builds from
+  Homebrew report it unavailable. Only listening on real hardware can judge the result.
+
 ## Local API and UI
 
 The Audio diagnostics panel shows the receiver state and offers explicit recording and

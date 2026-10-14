@@ -1148,6 +1148,25 @@ function App() {
                     ))}
                   </select>
                 </label>
+                {state?.echo_cancel?.available && (
+                  <>
+                    {button(
+                      `Echo cancellation: ${state?.echo_cancel?.enabled ? "on" : "off"}`,
+                      async () => {
+                        await api("/api/echo-cancel", { enabled: !state?.echo_cancel?.enabled });
+                        await refresh();
+                      },
+                      <AudioLines size={15} />,
+                      "secondary wide",
+                    )}
+                    <p className="field-note">
+                      {state?.echo_cancel?.note ||
+                        (state?.echo_cancel?.active
+                          ? "Removing meeting audio from your microphone, so the room does not hear itself."
+                          : "Stops the room hearing itself when you use speakers. Turn off only to compare.")}
+                    </p>
+                  </>
+                )}
                 {button(
                   "Use fleet audio tuning",
                   async () => {
