@@ -441,7 +441,7 @@ function App() {
     setNoticeTone(audioProblem ? "warning" : "success");
     setNotice(previewMode ? "Demo session only. No media is transmitted." : audioProblem
       ? "Your session started, but meeting audio needs attention. Open Connection health to check it."
-      : "You’re live. Camera, microphone and meeting audio can be controlled below.");
+      : "You’re live. Camera, microphone and meeting audio can be controlled below. Using speakers? Headphones stop the room hearing itself.");
   };
   const checkSetup = async () => {
     const result = await api<{checks:{label:string;status:string;detail:string}[]}>("/api/preflight", {
@@ -625,7 +625,7 @@ function App() {
           ? "Local microphone preview is active."
           : "Preview to check your microphone level."}
       </p>
-      <div className="speaker-row"><span><Headphones size={15}/> System output</span>{button("Test speakers", testSpeakers, <Volume2 size={16}/>, "secondary")}</div>
+      <div className="speaker-row"><span title="Headphones prevent echo: with speakers, your microphone can pick up meeting audio and send it back to the room."><Headphones size={15}/> System output</span>{button("Test speakers", testSpeakers, <Volume2 size={16}/>, "secondary")}</div>
     </>
   );
   const message = notice && <div className={`banner ${noticeTone}`} role={noticeTone === "error" ? "alert" : "status"}><AlertCircle size={18}/><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={()=>setNotice("")}><X size={16}/></button></div>;
@@ -1091,6 +1091,10 @@ function App() {
                   Choose your microphone here, or use System default microphone on macOS
                   to follow System Settings. Speaker output follows your operating system.
                   The microphone button mutes outgoing capture during a session.
+                </p>
+                <p className="field-note">
+                  Use headphones when you can. With speakers, your microphone picks up the
+                  meeting audio and sends it back, so the room hears itself.
                 </p>
               </section>
               <section className="panel">
