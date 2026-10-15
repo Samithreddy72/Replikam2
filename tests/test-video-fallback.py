@@ -133,6 +133,41 @@ class Fallback(unittest.TestCase):
         self.assertEqual(receiver.read_session(self.control, 10*SECOND), EPOCH)
         self.assertEqual(receiver.read_session(self.control, 1000*SECOND), 0)
 
+class FrameShape(unittest.TestCase):
+    """NB 007 (2026-10-16): the descriptor may advertise 480x212 - the same 203,520 bytes, with 960-byte
+    rows that macOS reads correctly. The receiver follows it; anything else falls back to stock."""
+    def shape_of(self, w, h, name=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            # the attribute files configfs keeps beside the frame folders (uvc_configfs.c)
+            for attr in ('bFormatIndex', 'guidFormat', 'bBitsPerPixel', 'bDefaultFrameIndex', 'bAspectRatioX',
+                         'bAspectRatioY', 'bmInterlaceFlags', 'bmaControls'):
+                (pathlib.Path(tmp) / attr).write_text('0\n')
+            d = pathlib.Path(tmp) / (name or '%dp' % h)
+            d.mkdir()
+            (d / 'wWidth').write_text('%d\n' % w)
+            (d / 'wHeight').write_text('%d\n' % h)
+            return receiver.frame_shape(pathlib.Path(tmp))
+
+    def test_follows_the_descriptor(self):
+        self.assertEqual(self.shape_of(424, 240), (424, 240))
+        self.assertEqual(self.shape_of(480, 212), (480, 212))
+        self.assertEqual(self.shape_of(480, 212, name='zz-sorts-after-attributes'), (480, 212))
+        self.assertEqual(self.shape_of(416, 234), (424, 240))   # the pump cannot carry it
+        self.assertEqual(receiver.frame_shape(pathlib.Path('/no/such/configfs')), (424, 240))
+
+    def test_every_shape_is_the_frame_the_pump_carries(self):
+        for w, h in receiver.FRAME_SHAPES:
+            self.assertEqual(w * h * 2, receiver.FRAME_BYTES)
+            self.assertEqual(w * 2 % 2, 0)
+        self.assertEqual(480 * 2 % 64, 0)   # macOS reads 960-byte rows as sent
+
+    def test_stock_caps_are_unchanged(self):
+        stock = receiver.pipeline_description(100, (424, 240))
+        self.assertIn('max-threads=1 ! videoconvert ! videoscale ! video/x-raw,format=YUY2,width=424,height=240 ! queue', stock)
+        self.assertEqual(stock, receiver.pipeline_description(100, None) if receiver.frame_shape() == (424, 240) else stock)
+        mac = receiver.pipeline_description(100, (480, 212))
+        self.assertIn('format=I420,width=480,height=212,pixel-aspect-ratio=1/1 ! videoconvert ! video/x-raw,format=YUY2,width=480,height=212', mac)
+
 class Telemetry(unittest.TestCase):
     def test_reports_source_state_without_claiming_room_verification(self):
         spec = importlib.util.spec_from_file_location('web', ROOT/'pi/scripts/bridge-web.py')

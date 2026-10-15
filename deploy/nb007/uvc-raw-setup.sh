@@ -1,0 +1,331 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+
+set -e
+
+CONFIGFS="/sys/kernel/config"
+GADGET="$CONFIGFS/usb_gadget"
+VID="0x0525"
+PID="0xa4a2"
+# Pilot only: an existing laptop caches USB descriptors by this identity.
+# Enable on one idle spare bridge via /etc/bridge/usb-serial-mode = unique.
+bridge_usb_serial() {
+  case "$1:$2" in
+    unique:*) case "$2" in ''|*[!0-9a-fA-F]*) return 1;; esac
+              [ "${#2}" -eq 16 ] || return 1
+              [ "$2" != "0000000000000000" ] || return 1
+              printf '%s' "$2" ;;
+    *) printf '%s' '0123456789' ;;
+  esac
+}
+SERIAL=$(bridge_usb_serial "$(cat /etc/bridge/usb-serial-mode 2>/dev/null || true)" "$(awk '/^Serial[[:space:]]*:/ {print $3}' /proc/cpuinfo)") || { echo 'Invalid unique USB identity; refusing descriptor setup' >&2; exit 1; }
+MANUF=$(hostname)
+# Display label only: preserve the existing VID, PID and serial identity.
+PRODUCT="Logi"
+BOARD=$(strings /proc/device-tree/model)
+UDC=$(ls /sys/class/udc) # will identify the 'first' UDC
+
+# ---------------------------------------------------------------- audio tuning overrides
+# /data/gadget-tuning.conf lets the two USB-audio parameters that actually matter be changed
+# WITHOUT rebuilding and reflashing an image. They can only be set here, at boot, before the
+# function is linked into a configuration — configfs refuses them afterwards, and trying it on
+# a running bridge took this bridge down twice on 2026-08-13. So the file is read here, once,
+# and applied before anything is linked.
+#
+# Format, one KEY=VALUE per line:
+#     UAC2_C_SYNC=async          # or adaptive
+#     UAC2_REQ_NUMBER=32         # 2..64
+#
+# The file is NOT sourced. It is running as root at boot, and sourcing a writable file would
+# make /data a place where anyone able to write it could execute arbitrary code. Only known
+# keys are read, and only values that pass validation are used — anything else falls back to
+# the built-in default and says so in the log, because a typo must never leave the bridge
+# without working audio.
+TUNE_FILE=/data/gadget-tuning.conf
+tune_get() {   # tune_get <KEY> <default>
+	_v=""
+	if [ -f "$TUNE_FILE" ]; then
+		_v=$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$TUNE_FILE" 2>/dev/null \
+		     | tail -1 | cut -d= -f2- | tr -d ' \t"'"'"'')
+	fi
+	[ -n "$_v" ] && echo "$_v" || echo "$2"
+}
+tune_sync() {
+	_s=$(tune_get UAC2_C_SYNC "${UAC2_C_SYNC:-adaptive}")
+	case "$_s" in
+		async|adaptive) echo "$_s" ;;
+		*) echo "  tuning: ignoring c_sync='$_s' (expected async|adaptive)" >&2; echo adaptive ;;
+	esac
+}
+tune_reqnum() {
+	_r=$(tune_get UAC2_REQ_NUMBER "${UAC2_REQ_NUMBER:-32}")
+	case "$_r" in
+		''|*[!0-9]*) echo "  tuning: ignoring req_number='$_r' (not a number)" >&2; echo 32 ;;
+		*) if [ "$_r" -ge 2 ] && [ "$_r" -le 64 ]; then echo "$_r"
+		   else echo "  tuning: ignoring req_number='$_r' (expected 2..64)" >&2; echo 32; fi ;;
+	esac
+}
+
+echo "Detecting platform:"
+echo "  board : $BOARD"
+echo "  udc   : $UDC"
+
+create_frame() {
+	# Example usage:
+	# create_frame <function name> <width> <height> <format> <name>
+
+	FUNCTION=$1
+	WIDTH=$2
+	HEIGHT=$3
+	FORMAT=$4
+	NAME=$5
+
+	wdir=functions/$FUNCTION/streaming/$FORMAT/$NAME/${HEIGHT}p
+
+	mkdir -p $wdir
+	echo $WIDTH > $wdir/wWidth
+	echo $HEIGHT > $wdir/wHeight
+	echo $(( $WIDTH * $HEIGHT * 2 )) > $wdir/dwMaxVideoFrameBufferSize
+	# Advertise ONLY the real rate: 333333 (100ns units) = 30fps. The old list also had
+	# 100000 (=100fps) and 5000000 (=2fps); the kernel sorts ascending so 100000 became the
+	# DEFAULT, and webcam apps negotiated ~100fps against a ~20fps source -> the gadget had a
+	# fresh frame only every ~5th poll -> severe judder. One matching rate = smooth motion.
+	# 30fps since 2026-09-24 (was 20): the presenter's Mac camera captures at 30, and 20 does not
+	# divide 30 - keeping 2 frames of every 3 spaced them 33/67 ms apart = visible motion judder.
+	# The sender must run at the same rate (source_app.py Session.start fps=30).
+	cat <<EOF > $wdir/dwFrameInterval
+333333
+EOF
+}
+
+create_uvc() {
+	# Example usage:
+	#	create_uvc <target config> <function name>
+	#	create_uvc config/c.1 uvc.0
+	CONFIG=$1
+	FUNCTION=$2
+
+	echo "	Creating UVC gadget functionality : $FUNCTION"
+	mkdir functions/$FUNCTION
+	printf '%s\n' "$PRODUCT" > "functions/$FUNCTION/function_name"
+
+	# 480x212, not 424x240 (NB 007, 2026-10-15): macOS's UVC driver assumes uncompressed YUY2 rows
+	# arrive padded to a multiple of 64 bytes and copies every row with that length. 424 px rows are
+	# 848 bytes, so a Mac read each one 48 bytes long and showed fine slanted stripes. 480 px rows are
+	# 960 bytes = 15 x 64, and 480 x 212 x 2 = 203,520 bytes - exactly the frame the compiled 2.2.x
+	# pump carries, so this ships as a signed update with no new image. The receiver reads this
+	# frame back from configfs and keeps the 16:9 picture inside it with black side bars.
+	create_frame $FUNCTION 480 212 uncompressed u
+
+	mkdir functions/$FUNCTION/streaming/header/h
+	cd functions/$FUNCTION/streaming/header/h
+	ln -s ../../uncompressed/u
+	cd ../../class/fs
+	ln -s ../../header/h
+	cd ../../class/hs
+	ln -s ../../header/h
+	cd ../../class/ss
+	ln -s ../../header/h
+	cd ../../../control
+	mkdir header/h
+	ln -s header/h class/fs
+	ln -s header/h class/ss
+	cd ../../../
+
+	# Include an Extension Unit if the kernel supports that
+	if [ -d functions/$FUNCTION/control/extensions ]; then
+		mkdir functions/$FUNCTION/control/extensions/xu.0
+		pushd functions/$FUNCTION/control/extensions/xu.0
+
+		# Set the bUnitID of the Processing Unit as the XU's source
+		echo 2 > baSourceID
+
+		# Set this XU as the source for the default output terminal
+		cat bUnitID > ../../terminal/output/default/bSourceID
+
+		# Flag some arbitrary controls. This sets alternating bits of the
+		# first byte of bmControls active.
+		echo 0x55 > bmControls
+
+		# Set the GUID
+		echo -e -n "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10" > guidExtensionCode
+
+		popd
+	fi
+
+	# ONE 1024-byte packet per 125 us microframe (8.2 MB/s ceiling). 424x240 YUY2 @30 fps needs
+	# 6.1 MB/s (75%); 480x270 @30 would need 7.8 MB/s (95%, too tight). 640x360 @20 needed 9.2 MB/s, which forced 2048 =
+	# "high-bandwidth" isochronous (two packets per microframe) - the mode where the Pi 4's dwc2
+	# controller missed slots ("uvc: VS request completed with status -61", 14-16/s live) and the
+	# meeting laptop saw choppy video in every app while everything upstream was clean
+	# (2026-09-24: 0 packet loss Mac->Pi, CPU half idle, 21 fps handed to the gadget).
+	echo 1024 > functions/$FUNCTION/streaming_maxpacket
+
+	ln -s functions/$FUNCTION configs/c.1
+}
+
+delete_uvc() {
+	# Example usage:
+	#	delete_uvc <target config> <function name>
+	#	delete_uvc config/c.1 uvc.0
+	CONFIG=$1
+	FUNCTION=$2
+
+	echo "	Deleting UVC gadget functionality : $FUNCTION"
+	rm $CONFIG/$FUNCTION
+
+	rm functions/$FUNCTION/control/class/*/h
+	rm functions/$FUNCTION/streaming/class/*/h
+	rm functions/$FUNCTION/streaming/header/h/u
+	rmdir functions/$FUNCTION/streaming/uncompressed/u/*/
+	rmdir functions/$FUNCTION/streaming/uncompressed/u
+	rm -rf functions/$FUNCTION/streaming/mjpeg/m/*/
+	rm -rf functions/$FUNCTION/streaming/mjpeg/m
+	rmdir functions/$FUNCTION/streaming/header/h
+	rmdir functions/$FUNCTION/control/header/h
+	rmdir functions/$FUNCTION
+}
+
+case "$1" in
+    start)
+	echo "Creating the USB gadget"
+
+	echo "Creating gadget directory g1"
+	mkdir -p $GADGET/g1
+
+	cd $GADGET/g1
+	if [ $? -ne 0 ]; then
+	    echo "Error creating usb gadget in configfs"
+	    exit 1;
+	else
+	    echo "OK"
+	fi
+
+	echo "Setting Vendor and Product ID's"
+	echo $VID > idVendor
+	echo $PID > idProduct
+	echo 0x0200 > bcdUSB
+	echo 0xEF > bDeviceClass
+	echo 0x02 > bDeviceSubClass
+	echo 0x01 > bDeviceProtocol
+	echo "OK"
+
+	echo "Setting English strings"
+	mkdir -p strings/0x409
+	echo $SERIAL > strings/0x409/serialnumber
+	echo $MANUF > strings/0x409/manufacturer
+	printf '%s\n' "$PRODUCT" > strings/0x409/product
+	echo "OK"
+
+	echo "Creating Config"
+	mkdir configs/c.1
+	mkdir configs/c.1/strings/0x409
+
+	echo "Creating functions..."
+	create_uvc configs/c.1 uvc.0
+	echo "OK"
+
+	echo "Creating UAC2 microphone function..."
+	mkdir functions/uac2.usb0
+	printf '%s\n' "$PRODUCT" > functions/uac2.usb0/function_name
+	# ADAPTIVE sync for the host->gadget (speaker) stream: the default "async"
+	# mode requires a feedback endpoint that Windows' usbaudio2.sys must honor —
+	# a documented source of drift -> stutter-burst -> multi-second stream resets
+	# on continuous audio (music), while pause-laden speech self-heals. Adaptive
+	# is what real USB soundcards use: no feedback dance, host streams steadily.
+	C_SYNC=$(tune_sync)
+	echo "  tuning: c_sync=$C_SYNC  req_number=$(tune_reqnum)  (edit $TUNE_FILE to change)"
+	echo "$C_SYNC" > functions/uac2.usb0/c_sync || true
+	# Request depth preserves scheduling headroom; it is not a measured audio delay.
+	# Earlier one-sided capture-rate estimates did not establish dropped samples.
+	echo "$(tune_reqnum)" > functions/uac2.usb0/req_number || true
+	# Stereo, 16-bit capture keeps the UAC2 request stride 4-byte aligned. At
+	# 48 kHz the mono descriptor reserves 98 bytes (48+1 frames), making every
+	# other request unaligned for dwc2 DMA. On the diagnostic Pi this produced
+	# stale samples repeating at the 32-request cycle and audible chipping.
+	# Stereo reserves 196 bytes; native captures no longer show that signature.
+	# See docs/USB-AUDIO-FIX-2026-09-16.md for A/B evidence and limitations.
+	echo 3 > functions/uac2.usb0/c_chmask
+	# Return path (the "Speakers/Source" the client plays into): SINGLE 48 kHz rate.
+	#
+	# It was briefly 48000,44100,32000 for walkthrough phase 6 ("at whatever rate the
+	# meeting laptop happens to play"). That produced audible jitter, and capturing the
+	# return stream to a file showed why: 29 runs of EXACT ZEROS >=1ms in 21s, all at ~1ms
+	# granularity — the USB frame interval. The gadget was dropping isochronous frames and
+	# the driver was zero-filling them; opus then encoded the damage faithfully, which is
+	# why every transport measurement (0 packet loss, perfect RTP timestamps) looked clean.
+	#
+	# THAT CONCLUSION WAS OVERTURNED — restored to multi-rate 2026-08-12.
+	#
+	# The measurement above was taken with the v1 rate-following SUPERVISOR in place, and the
+	# same commit's own first conclusion was that the supervisor is the dominant fault: a
+	# shell loop stopping and restarting gst underneath a live ALSA capture, 100x worse than
+	# not having it (21.6 vs 0.2 zero-runs/sec). Multi-rate was NEVER measured without it, so
+	# "multi-rate is also worse" (1.4/sec) was never isolated from the supervisor's damage.
+	#
+	# Phase 6 v2 replaced that supervisor with the kernel's own Capture Rate control — rate
+	# following INSIDE the pipeline, which is exactly what the revert said it had to be — and
+	# the multi-rate descriptor was then deployed to Samith's working card by card surgery.
+	# It has run there since, and he confirmed clean audio at 32k, 44.1k and 48k by ear.
+	#
+	# PROOF, from that card's own diagnostics bundle on 2026-08-12 (gadget-av.txt):
+	#     c_sync = adaptive
+	#     c_srate = 48000,44100,32000
+	#
+	# The work was never committed, so every image built since has silently regressed to a
+	# single rate — and flashing one overwrites a working multi-rate card. Windows then offers
+	# no choice of format, because the device is advertising that it has none. This restores
+	# the configuration that is proven on hardware.
+	#
+	# If audio ever degrades after a change here, measure it the way the revert did: capture
+	# the return stream to a file and count runs of EXACT ZEROS. 0.2/sec is clean, 21.6/sec is
+	# broken. Transport metrics cannot see this damage — it happens at the gadget, before opus.
+	echo 48000,44100,32000 > functions/uac2.usb0/c_srate
+	echo 2 > functions/uac2.usb0/c_ssize
+	echo 3 > functions/uac2.usb0/p_chmask
+	echo 48000,44100,32000 > functions/uac2.usb0/p_srate
+	echo 2 > functions/uac2.usb0/p_ssize
+	ln -s functions/uac2.usb0 configs/c.1/
+	echo "OK"
+
+	echo "Binding USB Device Controller"
+	echo $UDC > UDC
+	echo "OK"
+	;;
+
+    stop)
+	echo "Stopping the USB gadget"
+
+	set +e # Ignore all errors here on a best effort
+
+	cd $GADGET/g1
+
+	if [ $? -ne 0 ]; then
+	    echo "Error: no configfs gadget found"
+	    exit 1;
+	fi
+
+	echo "Unbinding USB Device Controller"
+	grep $UDC UDC && echo "" > UDC
+	echo "OK"
+
+	delete_uvc configs/c.1 uvc.0
+
+	echo "Clearing English strings"
+	rmdir strings/0x409
+	echo "OK"
+
+	echo "Cleaning up configuration"
+	rmdir configs/c.1/strings/0x409
+	rmdir configs/c.1
+	echo "OK"
+
+	echo "Removing gadget directory"
+	cd $GADGET
+	rmdir g1
+	cd /
+	echo "OK"
+	;;
+    *)
+	echo "Usage : $0 {start|stop}"
+esac

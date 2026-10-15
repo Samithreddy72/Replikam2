@@ -12,6 +12,13 @@ import sys
 import time
 
 FRAME_BYTES = 424 * 240 * 2
+# Frame shapes of exactly FRAME_BYTES, the size every 2.2.x camera pump carries. The USB descriptor
+# (uvc-raw-setup.sh) chooses one. 424x240 is the stock shape; 480x212 has 960-byte rows, a multiple of
+# 64, which macOS needs: it read 424x240's 848-byte rows 48 bytes long (slanted stripes, NB 007,
+# 2026-10-15).
+FRAME_SHAPES = ((424, 240), (480, 212))
+UVC_FRAMES = Path('/sys/kernel/config/usb_gadget/g1/functions/uvc.0/streaming/uncompressed/u')
+STOCK_CAPS = 'video/x-raw,format=YUY2,width=424,height=240'
 CONTROL = Path('/run/bridge-pin/video-session')
 FRAME_DIR = Path('/run/bridge-video')
 
@@ -46,7 +53,37 @@ def publish_frame(pixels, epoch, stamp, directory=FRAME_DIR, count=0):
     return True
 
 
-def pipeline_description(latency):
+def frame_shape(frames=UVC_FRAMES):
+    """The frame the USB camera advertises, when the pump can carry it; otherwise the stock 424x240."""
+    try:
+        entries = sorted(frames.iterdir())
+    except OSError:
+        return FRAME_SHAPES[0]
+    for d in entries:                   # frame folders sit beside the format's attribute files
+        try:
+            if not d.is_dir():
+                continue
+            shape = (int((d / 'wWidth').read_text()), int((d / 'wHeight').read_text()))
+        except (OSError, ValueError):
+            continue
+        if shape in FRAME_SHAPES:
+            return shape
+    return FRAME_SHAPES[0]
+
+
+def output_chain(shape):
+    """Elements after the decoder. The stock shape is the stock chain exactly (no scaling for a 424x240
+    presenter). Any other shape pins square pixels, so videoscale keeps the picture's own proportions
+    with black bars; it scales in the decoder's planar I420, which costs about a third less CPU than
+    packed YUY2, then converts once to the YUY2 the camera sends."""
+    if shape == FRAME_SHAPES[0]:
+        return 'videoconvert ! videoscale ! ' + STOCK_CAPS
+    return ('videoconvert ! videoscale ! video/x-raw,format=I420,width=%d,height=%d,pixel-aspect-ratio=1/1 '
+            '! videoconvert ! video/x-raw,format=YUY2,width=%d,height=%d,pixel-aspect-ratio=1/1' % (shape + shape))
+
+
+def pipeline_description(latency, shape=None):
+    chain = output_chain(shape or frame_shape())
     return (
                 'udpsrc name=net port=5000 buffer-size=262144 caps="application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000" '
                 '! rtpjitterbuffer name=jitter latency=%d drop-on-latency=true do-lost=true post-drop-messages=true drop-messages-interval=1000 '
@@ -54,14 +91,13 @@ def pipeline_description(latency):
                 # Keep decoder scheduling off the jitter-buffer worker. Two
                 # complete access units bound memory/backlog without tearing H264.
                 '! queue name=decode_queue max-size-buffers=2 max-size-bytes=0 max-size-time=66666666 '
-                '! h264parse name=parser ! avdec_h264 name=decoder max-threads=1 ! videoconvert ! videoscale '
+                '! h264parse name=parser ! avdec_h264 name=decoder max-threads=1 ! %s '
                 # The STATIC UVC source reads only the atomic RAM frame. A legacy
                 # loopback sink adds driver contention and can stall decoded delivery.
-                '! video/x-raw,format=YUY2,width=424,height=240 '
                 # Isolate atomic publication from RTP/decode scheduling. Only the
                 # newest complete decoded frame waits; never queue encoded history.
                 '! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream '
-                '! appsink name=frames emit-signals=true sync=false max-buffers=1 drop=true' % latency
+                '! appsink name=frames emit-signals=true sync=false max-buffers=1 drop=true' % (latency, chain)
     )
 
 
@@ -136,6 +172,7 @@ def make_receiver(Gst, GLib, latency, control=CONTROL, directory=FRAME_DIR,
 
         def start(self):
             epoch = self.epoch
+            print('Video frame %dx%d (from the USB descriptor)' % frame_shape(), flush=True)
             self.pipe = Gst.parse_launch(
                 pipeline_factory(latency))
             self.pipe.get_by_name('net').get_static_pad('src').add_probe(Gst.PadProbeType.BUFFER, self.packet, epoch)

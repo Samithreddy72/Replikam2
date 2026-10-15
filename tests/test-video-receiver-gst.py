@@ -100,6 +100,26 @@ class Decode(unittest.TestCase):
         _, err = p.communicate(timeout=5)
         self.assertEqual(p.returncode,0,err.decode())
 
+    def test_mac_shape_keeps_the_picture_with_side_bars(self):
+        # NB 007: descriptor 480x212 (960-byte rows) from today's 424x240 presenter, still 203,520 bytes.
+        self.receiver.stop()
+        self.receiver = r.make_receiver(Gst, GLib, 20, self.control, self.directory,
+            lambda latency: r.pipeline_description(latency, (480, 212)).replace('port=5000','port=%d'%self.port))
+        self.receiver.tick()
+        p = Gst.parse_launch('videotestsrc is-live=true pattern=white ! '
+            'video/x-raw,width=424,height=240,framerate=30/1 ! '
+            'x264enc tune=zerolatency key-int-max=10 ! rtph264pay pt=96 config-interval=-1 ssrc=%d ! '
+            'udpsink host=127.0.0.1 port=%d sync=false' % (EPOCH>>32,self.port))
+        self.addCleanup(lambda:p.set_state(Gst.State.NULL))
+        p.set_state(Gst.State.PLAYING)
+        self.drive(1.0)
+        frame = (self.directory/'frame').read_bytes()
+        self.assertEqual(len(frame), 96 + r.FRAME_BYTES)
+        y = frame[96:][106*960:107*960:2]          # luma of the middle row
+        self.assertLess(max(y[:40]), 30)           # left bar is black
+        self.assertLess(max(y[-40:]), 30)          # right bar is black
+        self.assertGreater(min(y[80:400]), 200)    # the white picture fills the middle, undistorted
+
     def test_old_presenter_packets_never_publish(self):
         self.sender((EPOCH>>32)+1)
         self.drive(.5)
