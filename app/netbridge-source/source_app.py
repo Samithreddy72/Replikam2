@@ -1295,8 +1295,11 @@ class Session:
                 # copy, opusdec emits silence rather than inventing something.
                 fec = getattr(self, "return_fec", True)
                 plc = getattr(self, "return_plc", False)
+                # Loopback only, like the persistent receiver: the mesh helper delivers return
+                # audio to 127.0.0.1. udpsrc's default 0.0.0.0 let anyone on the LAN play audio
+                # into the presenter's speakers and drew a Windows Firewall prompt mid-meeting.
                 chain = [gst, "-q",
-                    "udpsrc", "port=%d" % port, "caps=" + caps, "!",
+                    "udpsrc", "address=127.0.0.1", "port=%d" % port, "caps=" + caps, "!",
                     "rtpjitterbuffer", "latency=" + lat] + (
                         ["do-lost=true"] if (fec or plc) else []) + ["!",
                     "rtpopusdepay", "!",

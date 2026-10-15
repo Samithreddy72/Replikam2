@@ -199,6 +199,14 @@ class ReturnPlayback(unittest.TestCase):
         self.assertIn("audiodynamic", result["argv"])
         self.assertIn("sync=false", result["argv"])
 
+    def test_legacy_receiver_listens_on_loopback_only(self):
+        for mac, win in ((True, False), (False, True)):
+            with patch.object(app, "IS_MAC", mac), patch.object(app, "IS_WIN", win):
+                argv = self.launch(app.Session())["argv"]
+            source = argv[argv.index("udpsrc"):argv.index("!")]
+            self.assertIn("address=127.0.0.1", source)
+            self.assertIn("port=5004", source)
+
     def test_repeated_tuning_does_not_restart_audio(self):
         session = app.Session()
         with patch.object(session, "set_return") as restart:
