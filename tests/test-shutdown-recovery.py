@@ -63,7 +63,7 @@ class ShutdownRecovery(unittest.TestCase):
     def test_partial_start_failure_releases_camera_and_can_retry(self):
         s = a.Session(); s.return_on = False
         camera = Mock(spec=POPEN, stdin=io.BytesIO()); camera.poll.return_value = 0
-        with tempfile.TemporaryDirectory() as tmp, patch.object(a, '_logdir', return_value=pathlib.Path(tmp)), patch.object(a, '_ffmpeg', return_value='fake'), patch.object(a, 'IS_MAC', False), patch.object(a, 'bind_video_ticket', side_effect=lambda args, ticket: args), patch.object(a.subprocess, 'Popen', side_effect=[camera, OSError('injected microphone launch failure')]):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(a, '_logdir', return_value=pathlib.Path(tmp)), patch.object(a, '_ffmpeg', return_value='fake'), patch.object(a, 'IS_MAC', False), patch.object(a, 'avfoundation_video_mode', return_value=None), patch.object(a, 'bind_video_ticket', side_effect=lambda args, ticket: args), patch.object(a.subprocess, 'Popen', side_effect=[camera, OSError('injected microphone launch failure')]):
             with self.assertRaisesRegex(RuntimeError, 'released'):
                 s.start('127.0.0.1', 'camera', 'mic')
             self.assertFalse(s.wanted)

@@ -10,6 +10,7 @@ class VideoMute(unittest.TestCase):
    p=Mock();p.poll.return_value=None;p.argv=argv;self.spawned.append(p);return p
   for ctx in (patch.object(app,'_ffmpeg',return_value='ffmpeg'),patch.object(app,'_gst',return_value=None),patch.object(app.subprocess,'Popen',side_effect=spawn),patch.object(app,'_logdir',return_value=pathlib.Path('/tmp')),patch.object(app.PINS,'ticket',return_value='test-ticket'),patch.object(app,'_quit',side_effect=lambda p,**k:setattr(p.poll,'return_value',0))):
    ctx.start();self.addCleanup(ctx.stop)
+  probe=patch.object(app,'avfoundation_video_mode',return_value=None);self.probe=probe.start();self.addCleanup(probe.stop)
   self.addCleanup(self.session.stop)
  def start(self,**kw):
   self.session.start('127.0.0.1','0','0',**kw);self.session.capture_names={'video':'Test camera','voice':'Test mic'}
@@ -19,6 +20,7 @@ class VideoMute(unittest.TestCase):
     self.spawned.clear();self.start(video_muted=True,voice_muted=True)
     self.assertEqual(len(self.spawned),1);args=self.spawned[0].argv
     self.assertIn('lavfi',args);self.assertIn('-ssrc',args);self.assertNotIn('avfoundation',args);self.assertNotIn('dshow',args)
+    self.probe.assert_not_called()
     self.assertTrue(self.session.video_muted);self.assertTrue(self.session.voice_muted);self.session.stop()
  def test_toggle_and_watchdog_never_reopen_muted_camera(self):
   self.start();voice=self.session.voice_proc;video=self.session.leg_proc['video']

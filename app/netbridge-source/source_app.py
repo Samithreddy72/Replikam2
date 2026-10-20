@@ -611,6 +611,51 @@ def resolve_by_name(devs, saved_name, fallback_index="0"):
     return fallback_index, "", False
 
 
+# mac/mac-stream.sh's PROVEN capture mode, kept for every camera that offers it.
+MAC_CAPTURE_MODE = ("1280x720", "30")
+
+
+def pick_capture_mode(listing):
+    """Choose (video_size, framerate) from avfoundation's "Supported modes:" listing.
+
+    avfoundation opens a camera only at a size it lists AND at the top of one of that size's
+    frame-rate ranges, so the mode has to come from the list. None when nothing is listed.
+    """
+    modes = {}
+    for w, h, top in re.findall(r"(\d+)x(\d+)@\[[\d.,]+ ([\d.,]+)\]fps", listing or ""):
+        fps = float(top.replace(",", "."))
+        if int(w) and int(h) and fps:
+            modes[("%sx%s" % (w, h), ("%.3f" % fps).rstrip("0").rstrip("."))] = (int(w), int(h), fps)
+    if not modes:
+        return None
+    if MAC_CAPTURE_MODE in modes:
+        return MAC_CAPTURE_MODE
+    # The leg scales to STREAM_W x STREAM_H and resamples to the stream's frame rate, so any
+    # mode works; prefer one that repeats no frames, enlarges nothing and stretches nothing.
+    def cost(mode):
+        w, h, fps = modes[mode]
+        return (fps < STREAM_FPS - 0.5, w < STREAM_W or h < STREAM_H,
+                abs(w * STREAM_H / (h * STREAM_W) - 1) > 0.05, w * h, fps)
+    return min(modes, key=cost)
+
+
+def avfoundation_video_mode(ff, index, timeout=5):
+    """Ask the camera at `index` for its modes and pick one; None if it cannot tell.
+
+    OBS Virtual Camera offers ONLY 1920x1080 at 60 fps, so asking it for 1280x720@30 failed:
+    the video leg died on every repair while voice kept running, and the room saw black. An
+    impossible size makes ffmpeg list the camera's modes and exit before capture starts;
+    -frames:v 1 ends it should a device ignore the size.
+    """
+    try:
+        p = subprocess.run([ff, "-hide_banner", "-f", "avfoundation", "-video_size", "1x1",
+                            "-i", "%s:none" % index, "-frames:v", "1", "-f", "null", "-"],
+                           capture_output=True, encoding="utf-8", errors="replace", timeout=timeout)
+    except Exception:
+        return None
+    return pick_capture_mode(p.stderr)
+
+
 def local_ip_towards(host):
     """The address THIS machine has on the route to the bridge — what the bridge should
     send return audio to. Guessing 127.0.0.1 or the first NIC breaks on multi-homed
@@ -823,10 +868,11 @@ class Session:
         ff = _ffmpeg()
         common = [ff, "-hide_banner", "-loglevel", "warning"]
         # The macOS arguments are mac/mac-stream.sh's PROVEN ones and must not be
-        # "simplified": asking the camera for 320x180 or 640x360 fails outright
-        # ("Selected video size is not supported by the device") and the video leg dies
-        # instantly while the audio leg keeps running - which reads as a network fault
-        # rather than a bad argument. Capture large, scale down.
+        # "simplified": asking a camera for a mode it does not offer (320x180 or 640x360;
+        # on OBS Virtual Camera, even 1280x720@30) fails outright ("Selected video size is
+        # not supported by the device") and the video leg dies instantly while the audio leg
+        # keeps running - which reads as a network fault rather than a bad argument. So the
+        # mode is asked of the camera (avfoundation_video_mode). Capture large, scale down.
         # -bsf:v dump_extra=freq=keyframe repeats SPS/PPS so a receiver joining late can
         # decode. Opus -fec is deliberately absent: ffmpeg's RTP muxer rejects it.
         if IS_WIN:
@@ -836,8 +882,11 @@ class Session:
             venc = ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency"]
             ain = ["-f", "dshow", "-i", "audio=%s" % audio_idx]
         else:
-            vin = ["-f", "avfoundation", "-framerate", "30",
-                   "-video_size", "1280x720", "-pixel_format", "uyvy422",
+            # Camera-off must not open the camera even to ask; unmuting asks (respawn_leg).
+            mode = None if video_muted else avfoundation_video_mode(ff, video_idx)
+            size, rate = mode or MAC_CAPTURE_MODE
+            vin = ["-f", "avfoundation", "-framerate", rate,
+                   "-video_size", size, "-pixel_format", "uyvy422",
                    "-i", "%s:none" % video_idx]
             # Baseline profile: CAVLC instead of the default High profile's CABAC. CABAC is the most
             # expensive, strictly serial part of H.264 decoding, and the bridge decodes this stream
@@ -1019,6 +1068,12 @@ class Session:
             if "-i" in argv:
                 argv[argv.index("-i")+1] = (("video=" if name == "video" else "audio=") + selected
                     if IS_WIN else str(matches[0]["index"]) + ":none")
+            if not IS_WIN and "-video_size" in argv:
+                # Ask again: the session may have started camera-off, or OBS restarted. A
+                # camera still held by the old leg may not answer; keep its mode then.
+                mode = avfoundation_video_mode(argv[0], matches[0]["index"])
+                if mode:
+                    argv[argv.index("-video_size")+1], argv[argv.index("-framerate")+1] = mode
             self.leg_argv[name] = argv
         if name == "video":
             argv = bind_video_ticket(argv, PINS.ticket())
