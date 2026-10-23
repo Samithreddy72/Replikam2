@@ -69,12 +69,13 @@ test('Claim refreshes actions and PIN fix; offline readings are historical',asyn
  const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
  await page.route('http://fleet.test/**',async route=>{
   if(new URL(route.request().url()).pathname==='/')return route.fulfill({contentType:'text/html',body:html});
+  if(new URL(route.request().url()).pathname.endsWith('/open-alerts'))return route.fulfill({json:[]});
   return route.fulfill({json:{windows:[{pct:98}],streak_s:900,incidents:[]}});
  });
  await page.goto('http://fleet.test/');
  await page.evaluate(()=> (window as any).eval(`
   S.devices.set('a',{id:'a',name:'Room A',state:'new',claimed:false,online:true,latest:{power:{ok:true},temp:'40C'},alerts:[{kind:'pin_not_set',title:'No PIN set',fix:{command:'set-pin',label:'Set a PIN…',steps:[]}}]});
-  openDrawer('a','actions');
+  ADMIN=true;$('gate').hidden=true;$('shell').hidden=false;$('app').hidden=false;showPage('bridge');openDrawer('a','actions');
  `));
  await expect(page.getByText('Only reads work until this bridge is claimed.',{exact:true})).toBeVisible();
  await page.evaluate(()=> (window as any).eval(`Object.assign(S.devices.get('a'),{claimed:true,state:'active'});paintDrawer();`));
@@ -83,7 +84,10 @@ test('Claim refreshes actions and PIN fix; offline readings are historical',asyn
  await page.evaluate(()=> (window as any).selectTab('overview'));
  await expect(page.getByRole('button',{name:'Set a PIN…',exact:true})).toBeVisible();
  await page.evaluate(()=> (window as any).eval(`Object.assign(S.devices.get('a'),{online:false,state:'offline'});paintDrawer();loadUptime(S.devices.get('a'));`));
- await expect(page.getByText('Last reported: OK (offline; not current)',{exact:true})).toBeVisible();
+ const power=page.locator('.hcard',{hasText:'Power'});
+ await expect(power).toContainText('OK');
+ await expect(power).toContainText('Last reported · offline');
+ await expect(power).toHaveClass(/\bstale\b/);
  await expect(page.getByText('Last 24 h: 98% · currently offline; readings are historical',{exact:true})).toBeVisible();
  expect(errors).toEqual([]);
 });
@@ -95,7 +99,7 @@ test('Common Fleet actions expose targeted video recovery and keep broad resets 
   return route.fulfill({json:{}});
  });
  await page.goto('http://fleet.test/');
- await page.evaluate(()=> (window as any).eval(`S.devices.set('a',{id:'a',name:'Room A',state:'active',claimed:true,online:true,latest:{},alerts:[]});openDrawer('a','actions');`));
+ await page.evaluate(()=> (window as any).eval(`S.devices.set('a',{id:'a',name:'Room A',state:'active',claimed:true,online:true,latest:{},alerts:[]});ADMIN=true;$('gate').hidden=true;$('shell').hidden=false;$('app').hidden=false;showPage('bridge');openDrawer('a','actions');`));
  await expect(page.getByRole('button',{name:/Recover video only/})).toBeVisible();
  await expect(page.getByRole('button',{name:/Show all actions/})).toBeVisible();
  await expect(page.getByRole('button',{name:/Restart all|Reboot the bridge/})).toHaveCount(0);
