@@ -442,6 +442,9 @@ def _migrate():
                 conn.execute(_text("ALTER TABLE devices ADD COLUMN mesh_key_at DATETIME"))
             if "mesh_autokeys" not in dcols:
                 conn.execute(_text("ALTER TABLE devices ADD COLUMN mesh_autokeys INTEGER DEFAULT 0"))
+            # Admin-only alias (2026-10-24): see models.Device.
+            if "alias" not in dcols:
+                conn.execute(_text("ALTER TABLE devices ADD COLUMN alias VARCHAR"))
         # M6 magic-link sign-in: one-time login code on the user row.
         if "users" in insp.get_table_names():
             ucols = cols("users")
@@ -1004,6 +1007,7 @@ def _device_view(dev: Device, eps=None) -> dict:
         "number": dev.number,
         "label": fleet_label(dev.number),
         "name": dev.name,
+        "alias": dev.alias,           # admin-only (models.Device.alias)
         "pairing_code": dev.pairing_code,
         "claimed": dev.claimed_at is not None,
         "hostname": dev.hostname,
@@ -1055,7 +1059,8 @@ def device_detail(device_id: str, actor=Depends(auth.require_admin),
 @app.patch("/admin/devices/{device_id}")
 def update_device(device_id: str, body: DeviceUpdateIn, actor=Depends(auth.require_admin),
                   db: Session = Depends(get_db)):
-    """Rename a bridge or change its fleet number (NB-###). Admin only; audited."""
+    """Rename a bridge, set its admin-only alias or change its fleet number (NB-###). Admin only;
+    audited."""
     dev = _scoped_device(db, device_id, actor)
     changes = []
     if body.name is not None:
@@ -1065,6 +1070,13 @@ def update_device(device_id: str, body: DeviceUpdateIn, actor=Depends(auth.requi
         if name != dev.name:
             changes.append("name %r -> %r" % (dev.name, name))
             dev.name = name
+    if body.alias is not None:
+        alias = body.alias.strip() or None
+        if alias is not None and len(alias) > 64:
+            raise HTTPException(400, "alias must be at most 64 characters")
+        if alias != dev.alias:
+            changes.append("alias %r -> %r" % (dev.alias or "", alias or ""))
+            dev.alias = alias
     if body.number is not None:
         if not 1 <= body.number <= 9999:
             raise HTTPException(400, "number must be between 1 and 9999")
