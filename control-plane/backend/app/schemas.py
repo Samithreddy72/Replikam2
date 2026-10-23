@@ -66,6 +66,7 @@ class DeviceUpdateIn(BaseModel):
     """Admin edits to a bridge's identity in the fleet (PATCH /admin/devices/{id})."""
     name: Optional[str] = None         # display name, 1-64 characters
     number: Optional[int] = None       # fleet number, shown as NB-001; unique within the org
+    alias: Optional[str] = None        # admin-only alias, up to 64 characters; "" clears it
 
 
 class RolloutCreateIn(BaseModel):

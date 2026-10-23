@@ -25,6 +25,10 @@ class Device(Base):
     org_id: Mapped[str] = mapped_column(String, default="default")  # reserved for multi-tenant
     pairing_code: Mapped[str] = mapped_column(String, index=True)
     name: Mapped[str | None] = mapped_column(String, nullable=True)       # set when claimed
+    # Admin-only alias ("Nitin", "Sales team"), set with PATCH /admin/devices/{id} (2026-10-24).
+    # Only admin views carry it: /auth/bridges (the list NetBridge Studio shows presenters) and
+    # everything sent to the bridge itself leave it out. `name` is the one presenters see.
+    alias: Mapped[str | None] = mapped_column(String, nullable=True)
     # Fleet number, shown as NB-001: assigned at claim (next free in the org), stable for
     # the life of the device, changeable only by an admin (PATCH /admin/devices/{id}).
     number: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)

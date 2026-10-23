@@ -366,6 +366,48 @@ check(r.status_code == 400, "a key with a space in it is refused", r.status_code
 r = c.post("/admin/devices/%s/mesh-key" % MS, headers=A)
 check(r.status_code == 200 and len(MINTS) == n + 1, "the panel's re-key (no body) still mints one", r.text)
 
+print("  ---- an alias only admins see (2026-10-24) ----")
+LOBBY = "10000000cccc0001"
+cols = [x[1] for x in rows("PRAGMA table_info(devices)")]
+check("alias" in cols, "start-up adds the alias column to the fleet's existing devices table", cols)
+r = c.patch("/admin/devices/%s" % LOBBY, headers=A, json={"alias": "  Nitin  "})
+check(r.status_code == 200 and r.json().get("alias") == "Nitin" and r.json().get("name") == "Lobby",
+      "an admin gives a bridge an alias (trimmed); its name, what presenters see, is unchanged", r.text)
+view = next((d for d in c.get("/admin/devices", headers=A).json() if d["id"] == LOBBY), {})
+check(view.get("alias") == "Nitin", "the fleet list carries the alias", view.get("alias"))
+check(c.get("/admin/devices/%s" % LOBBY, headers=A).json().get("alias") == "Nitin", "…and so does the bridge's own view")
+last = rows("SELECT action, target FROM audit_log ORDER BY id DESC LIMIT 1")
+check(last and last[0][0] == "device:update" and "alias '' -> 'Nitin'" in (last[0][1] or ""),
+      "the change is in the audit log", last)
+n_audit = rows("SELECT COUNT(*) FROM audit_log")[0][0]
+r = c.patch("/admin/devices/%s" % LOBBY, headers=A, json={"alias": "Nitin"})
+check(r.status_code == 200 and rows("SELECT COUNT(*) FROM audit_log")[0][0] == n_audit,
+      "saving the same alias again records nothing", r.text)
+
+r = c.post("/admin/users", headers=A, json={"email": "dave@example.test", "role": "presenter"})
+DAVE = {"Authorization": "Bearer " + c.post("/auth/redeem", json={"invite": r.json().get("invite", "")}).json().get("token", "")}
+r = c.get("/auth/bridges", headers=DAVE)
+lobby = next((b for b in r.json() if b.get("id") == LOBBY), None) if r.status_code == 200 else None
+check(lobby is not None and lobby.get("name") == "Lobby" and "alias" not in lobby and "Nitin" not in r.text,
+      "a presenter's bridge list (what NetBridge Studio shows) has the name and never the alias", r.text[:300])
+check(c.patch("/admin/devices/%s" % LOBBY, headers=DAVE, json={"alias": "Mine"}).status_code in (401, 403),
+      "a presenter cannot set an alias")
+check(c.get("/admin/devices/%s" % LOBBY, headers=DAVE).status_code in (401, 403),
+      "…nor read the admin view that carries it")
+r = c.patch("/admin/devices/%s" % MS, headers=A, json={"alias": "Priya"})
+said = [c.post("/v1/telemetry", headers=mtok, json={"version": "2.2.0-test"}).text,
+        c.get("/v1/provision", headers=mtok).text, c.get("/v1/commands", headers=mtok).text]
+check(r.status_code == 200 and not any("Priya" in x for x in said), "the bridge itself is never sent its alias", said)
+
+r = c.patch("/admin/devices/%s" % LOBBY, headers=A, json={"alias": "x" * 65})
+check(r.status_code == 400 and device(LOBBY).alias == "Nitin", "an alias over 64 characters is refused", r.text)
+r = c.patch("/admin/devices/%s" % LOBBY, headers=A, json={"alias": "   "})
+check(r.status_code == 200 and r.json().get("alias") is None and device(LOBBY).alias is None,
+      "an empty alias clears it", r.text)
+r = c.patch("/admin/devices/%s" % LOBBY, headers=A, json={"number": 1})
+check(r.status_code == 200 and device(LOBBY).alias is None and device(LOBBY).name == "Lobby",
+      "an edit that leaves the alias out does not touch it", r.text)
+
 print("  ---- the organisation is never locked out ----")
 r = c.delete("/admin/users/1", headers=A)                       # admin@test removing their own account
 check(r.status_code == 409 and "your own account" in r.text and c.get("/auth/whoami", headers=A).status_code == 200,
