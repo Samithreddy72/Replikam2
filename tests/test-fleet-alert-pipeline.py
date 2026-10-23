@@ -843,8 +843,10 @@ try:
           "…and a successful test clears the failing state")
     panel = (ROOT / "control-plane/panel-dist/index.html").read_text()
     check("Alerts are also emailed.</p>" not in panel and "/admin/alerts/channels" in panel and "No alert channel is set up" in panel,
-          "the Alerts page words where alerts go from the fleet (no fixed 'Alerts are also emailed')")
-    check("<th>Notified</th>" in panel and "<th>Emailed</th>" not in panel, "the history column says Notified (a webhook counts too)")
+          "the Overview words where alerts go from the fleet (no fixed 'Alerts are also emailed')")
+    # The Alerts page and its episode history left the panel on 2026-10-24 (a bridge's alerts show on
+    # its own page). What remains of this wording rule: delivery is never called "Emailed".
+    check("<th>Emailed</th>" not in panel, "the panel never calls alert delivery 'Emailed' (a webhook counts too)")
     check("c.managed" in panel and "the fleet operator's alert channels" in panel,
           "…and for another organisation it says alerts go through the operator's channels, naming none")
     check("has been failing since " in panel and "is failing\" + (x.failing_since" not in panel,
